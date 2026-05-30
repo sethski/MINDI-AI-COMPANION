@@ -56,6 +56,9 @@ Windows-first local assistant. Current repo layout:
   - Import path includes conflict detection (UID-first, then title + dueAt fallback).
   - Import parses `DTSTART;TZID=...`, `VALARM` reminder triggers, and `EXDATE` exclusions.
 - Memory tab UI for note creation and retrieval.
+- Playwright E2E coverage:
+  - task status transitions (`todo` -> `done` -> `todo`)
+  - calendar export/import roundtrip with dedupe validation
 
 ## Run Desktop
 
@@ -75,4 +78,10 @@ pnpm dev:agent
 
 ```bash
 pnpm test:agent
+```
+
+## Test E2E
+
+```bash
+pnpm test:e2e
 ```
