@@ -3,6 +3,7 @@ import {
   QUICK_TOGGLES,
   TAB_ORDER,
   type AutoIndexStatus,
+  type AutomationChainResponse,
   type AssistantResponse,
   type FileOrganizeResponse,
   type HubSnapshot,
@@ -44,6 +45,7 @@ import {
   getSchedulerNextRun,
   parseTaskTime,
   listSecurityEvents,
+  runAutomationChain,
   runSecurityRecovery,
   runSecurityScan,
   runSchedulerScanNow,
@@ -131,6 +133,10 @@ export default function App() {
   const [opsScrapeUrl, setOpsScrapeUrl] = useState("https://example.com");
   const [opsScrapeStoreAsNote, setOpsScrapeStoreAsNote] = useState(true);
   const [opsScrapeResult, setOpsScrapeResult] = useState<WebScrapeResponse | null>(null);
+  const [opsChainName, setOpsChainName] = useState("ops-daily-brief");
+  const [opsChainTaskTitle, setOpsChainTaskTitle] = useState("Review latest security findings");
+  const [opsChainNoteTitle, setOpsChainNoteTitle] = useState("Ops brief note");
+  const [opsChainResult, setOpsChainResult] = useState<AutomationChainResponse | null>(null);
   const [opsStatus, setOpsStatus] = useState("No ops run yet.");
   const [memoryStatus, setMemoryStatus] = useState("No memory action yet.");
   const [perceptionStatus, setPerceptionStatus] = useState("No perception run yet.");
@@ -401,6 +407,26 @@ export default function App() {
           action: recoveryAction,
           target: typeof payload.target === "string" ? payload.target : undefined,
           confirm: Boolean(payload.confirm),
+        });
+        return true;
+      }
+      if (action === "automation_chain") {
+        const name = typeof payload.name === "string" ? payload.name : "ops-chain";
+        const scrapeUrl = typeof payload.scrapeUrl === "string" ? payload.scrapeUrl : "";
+        const taskTitle = typeof payload.taskTitle === "string" ? payload.taskTitle : "";
+        const noteTitle = typeof payload.noteTitle === "string" ? payload.noteTitle : "";
+        if (!scrapeUrl || !taskTitle || !noteTitle) {
+          return false;
+        }
+        await runAutomationChain({
+          name,
+          continueOnFailure: false,
+          steps: [
+            { kind: "web_scrape", url: scrapeUrl, storeAsNote: true },
+            { kind: "security_scan" },
+            { kind: "create_task", title: taskTitle },
+            { kind: "create_note", title: noteTitle, text: `Automation chain completed for ${name}.` },
+          ],
         });
         return true;
       }
@@ -1291,6 +1317,51 @@ export default function App() {
     }
   }
 
+  async function runOpsAutomationChain() {
+    const name = opsChainName.trim();
+    const scrapeUrl = opsScrapeUrl.trim();
+    const taskTitle = opsChainTaskTitle.trim();
+    const noteTitle = opsChainNoteTitle.trim();
+    if (!name || !scrapeUrl || !taskTitle || !noteTitle) {
+      setOpsStatus("Automation chain requires name, URL, task title, and note title.");
+      return;
+    }
+    try {
+      const response = await runAutomationChain({
+        name,
+        continueOnFailure: false,
+        steps: [
+          { kind: "web_scrape", url: scrapeUrl, storeAsNote: true },
+          { kind: "security_scan" },
+          { kind: "create_task", title: taskTitle },
+          {
+            kind: "create_note",
+            title: noteTitle,
+            text: `Chain ${name} finished. Source URL: ${scrapeUrl}`,
+          },
+        ],
+      });
+      setOpsChainResult(response);
+      if (response.accepted) {
+        setOpsStatus(`Automation chain completed (${response.completedSteps}/${response.totalSteps} steps).`);
+      } else {
+        setOpsStatus(
+          `Automation chain failed at step ${response.failedStepIndex ?? "?"}: ${response.recoverySummary ?? response.reason}`,
+        );
+      }
+      if (response.steps.some((step) => step.kind === "security_scan")) {
+        await refreshSecurityEvents();
+      }
+    } catch {
+      enqueueSyncItem({
+        type: "action",
+        payload: { action: "automation_chain", name, scrapeUrl, taskTitle, noteTitle },
+      });
+      setSyncDepth(loadSyncQueue().length);
+      setOpsStatus("Automation chain queued for sync.");
+    }
+  }
+
   const perceptionAverageConfidence = useMemo(() => {
     if (!perceptionResult || perceptionResult.blocks.length === 0) {
       return 0;
@@ -1715,6 +1786,48 @@ export default function App() {
               </button>
             </div>
             <p className="assistant-reply">{opsStatus}</p>
+          </div>
+
+          <div className="card">
+            <h3>Automation Chain</h3>
+            <div className="stack">
+              <input
+                value={opsChainName}
+                onChange={(event) => setOpsChainName(event.target.value)}
+                placeholder="Chain name"
+              />
+              <input
+                value={opsChainTaskTitle}
+                onChange={(event) => setOpsChainTaskTitle(event.target.value)}
+                placeholder="Task title for chain"
+              />
+              <input
+                value={opsChainNoteTitle}
+                onChange={(event) => setOpsChainNoteTitle(event.target.value)}
+                placeholder="Note title for chain"
+              />
+              <button type="button" onClick={() => void runOpsAutomationChain()}>
+                Run Automation Chain
+              </button>
+            </div>
+            <p>
+              {opsChainResult
+                ? `accepted=${String(opsChainResult.accepted)} completed=${opsChainResult.completedSteps}/${opsChainResult.totalSteps}`
+                : "No chain result yet."}
+            </p>
+            {opsChainResult?.recoverySummary ? (
+              <p className="assistant-reply">{opsChainResult.recoverySummary}</p>
+            ) : null}
+            <ul>
+              {(opsChainResult?.steps ?? []).map((step) => (
+                <li key={`${step.kind}-${step.index}`}>
+                  #{step.index + 1} {step.kind}: {step.reason}
+                  {step.detail ? ` | ${step.detail}` : ""}
+                  {step.recoveryHint ? ` | recovery: ${step.recoveryHint}` : ""}
+                </li>
+              ))}
+              {opsChainResult && opsChainResult.steps.length === 0 ? <li>No steps returned.</li> : null}
+            </ul>
           </div>
 
           <div className="card">
