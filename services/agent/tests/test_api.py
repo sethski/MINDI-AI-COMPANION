@@ -337,3 +337,60 @@ def test_calendar_export_creates_ics_file() -> None:
     assert "BEGIN:VEVENT" in text
     assert "SUMMARY:Calendar Export Task" in text
     assert "RRULE:FREQ=WEEKLY" in text
+
+
+def test_calendar_import_creates_tasks_from_ics(tmp_path: Path) -> None:
+    ics = tmp_path / "import.ics"
+    ics.write_text(
+        "\r\n".join(
+            [
+                "BEGIN:VCALENDAR",
+                "VERSION:2.0",
+                "BEGIN:VEVENT",
+                "UID:a1@test",
+                "DTSTART:20260701T090000Z",
+                "SUMMARY:Imported Task A",
+                "END:VEVENT",
+                "BEGIN:VEVENT",
+                "UID:b2@test",
+                "DTSTART:20260702T100000Z",
+                "SUMMARY:Imported Task B",
+                "RRULE:FREQ=DAILY",
+                "END:VEVENT",
+                "END:VCALENDAR",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    client.post(
+        "/control/permissions",
+        json={"scope": "folder", "subject": str(tmp_path), "decision": "allow"},
+    )
+
+    imported = client.post("/calendar/import", json={"filePath": str(ics)})
+    assert imported.status_code == 200
+    body = imported.json()
+    assert body["accepted"] is True
+    assert body["importedCount"] == 2
+
+    tasks = client.get("/tasks")
+    assert tasks.status_code == 200
+    titles = [item["title"] for item in tasks.json()]
+    assert "Imported Task A" in titles
+    assert "Imported Task B" in titles
+
+
+def test_calendar_import_rejects_non_ics(tmp_path: Path) -> None:
+    file = tmp_path / "not-calendar.txt"
+    file.write_text("hello", encoding="utf-8")
+    client.post(
+        "/control/permissions",
+        json={"scope": "folder", "subject": str(tmp_path), "decision": "allow"},
+    )
+    imported = client.post("/calendar/import", json={"filePath": str(file)})
+    assert imported.status_code == 200
+    body = imported.json()
+    assert body["accepted"] is False
+    assert body["reason"] == "unsupported_file_type"
