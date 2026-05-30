@@ -167,6 +167,10 @@ python -m pip install -e services/ai_runtime
 pnpm dev:ai-runtime
 ```
 
+Notes:
+- Install `llama.cpp` and make sure `llama-cli` is available in your shell `PATH`.
+- Configure `LLM model path (GGUF)` in Settings before using `/assistant/respond` runtime inference.
+
 ## Test Agent
 
 ```bash
