@@ -8,6 +8,7 @@ import type {
   DocumentImportResponse,
   DocumentSearchResponse,
   CreateTaskRequest,
+  TaskStatusUpdateRequest,
   FileOrganizeRequest,
   FileOrganizeResponse,
   HubSnapshot,
@@ -61,6 +62,16 @@ export async function sendAssistantRequest(
 export async function createTask(payload: CreateTaskRequest): Promise<TaskItem> {
   return agentFetch<TaskItem>("/tasks", {
     method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function updateTaskStatus(
+  taskId: string,
+  payload: TaskStatusUpdateRequest,
+): Promise<TaskItem> {
+  return agentFetch<TaskItem>(`/tasks/${encodeURIComponent(taskId)}/status`, {
+    method: "PATCH",
     body: JSON.stringify(payload),
   });
 }
