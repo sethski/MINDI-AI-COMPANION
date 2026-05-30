@@ -292,6 +292,7 @@ export interface PerceptionUiBlock {
 export interface PerceptionAnalyzeResponse {
   accepted: boolean;
   reason: string;
+  snapshotId?: string;
   path?: string;
   imageWidth?: number;
   imageHeight?: number;
@@ -300,6 +301,24 @@ export interface PerceptionAnalyzeResponse {
   text?: string;
   textLength: number;
   blocks: PerceptionUiBlock[];
+}
+
+export interface PerceptionSnapshot {
+  id: string;
+  sourcePath?: string;
+  reason: string;
+  ocrMode?: string;
+  text?: string;
+  textLength: number;
+  blockCount: number;
+  imageWidth?: number;
+  imageHeight?: number;
+  createdAt: string;
+}
+
+export interface PerceptionSnapshotSearchResponse {
+  query: string;
+  items: PerceptionSnapshot[];
 }
 
 export interface AutoIndexStatus {
