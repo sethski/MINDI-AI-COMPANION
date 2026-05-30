@@ -57,6 +57,11 @@ asr_model: Any | None = None
 ocr_runtime_error: str | None = None
 ocr_model_ref: str | None = None
 ocr_pipe: Any | None = None
+feature_telemetry: dict[str, dict[str, Any]] = {
+    "llm": {"lastLatencyMs": None, "lastFailureReason": None},
+    "asr": {"lastLatencyMs": None, "lastFailureReason": None},
+    "ocr": {"lastLatencyMs": None, "lastFailureReason": None},
+}
 
 
 def _resolve_model_path(raw_path: str) -> Path | None:
@@ -323,6 +328,23 @@ def _load_glm_ocr_pipeline() -> tuple[bool, dict]:
     return True, {"reason": "ok"}
 
 
+def _record_feature_failure(feature: str, reason: str, latency_ms: int | None = None) -> None:
+    telemetry = feature_telemetry.get(feature)
+    if telemetry is None:
+        return
+    telemetry["lastFailureReason"] = reason
+    if latency_ms is not None:
+        telemetry["lastLatencyMs"] = max(0, int(latency_ms))
+
+
+def _record_feature_success(feature: str, latency_ms: int) -> None:
+    telemetry = feature_telemetry.get(feature)
+    if telemetry is None:
+        return
+    telemetry["lastFailureReason"] = None
+    telemetry["lastLatencyMs"] = max(0, int(latency_ms))
+
+
 def _feature_status() -> dict:
     llm_path = _resolve_model_path(runtime_config.llmModelPath)
     asr_path = _resolve_model_path(runtime_config.asrModelPath)
@@ -340,6 +362,8 @@ def _feature_status() -> dict:
             "model": runtime_config.llmModel,
             "modelPath": runtime_config.llmModelPath,
             "lastError": llm_runtime_error,
+            "lastLatencyMs": feature_telemetry["llm"].get("lastLatencyMs"),
+            "lastFailureReason": feature_telemetry["llm"].get("lastFailureReason"),
         },
         "asr": {
             "enabled": True,
@@ -350,6 +374,8 @@ def _feature_status() -> dict:
             "model": runtime_config.asrModel,
             "modelPath": runtime_config.asrModelPath,
             "lastError": asr_ready_error,
+            "lastLatencyMs": feature_telemetry["asr"].get("lastLatencyMs"),
+            "lastFailureReason": feature_telemetry["asr"].get("lastFailureReason"),
         },
         "ocr": {
             "enabled": True,
@@ -360,6 +386,8 @@ def _feature_status() -> dict:
             "model": runtime_config.ocrModel,
             "modelPath": runtime_config.ocrModelPath,
             "lastError": ocr_ready_error,
+            "lastLatencyMs": feature_telemetry["ocr"].get("lastLatencyMs"),
+            "lastFailureReason": feature_telemetry["ocr"].get("lastFailureReason"),
         },
     }
 
@@ -395,22 +423,27 @@ def runtime_update_config(payload: RuntimeConfig) -> dict:
     ocr_runtime_error = None
     ocr_model_ref = None
     ocr_pipe = None
+    for telemetry in feature_telemetry.values():
+        telemetry["lastLatencyMs"] = None
+        telemetry["lastFailureReason"] = None
     return runtime_status()
 
 
 @app.post("/llm/generate")
 def llm_generate(payload: LlmGenerateRequest) -> dict:
+    started = time()
     features = _feature_status()
     if not features["llm"]["ready"]:
+        _record_feature_failure("llm", features["llm"]["lastError"] or "llm_model_not_ready")
         return {
             "accepted": False,
             "reason": features["llm"]["lastError"] or "llm_model_not_ready",
             "provider": runtime_config.llmProvider,
             "model": runtime_config.llmModel,
         }
-    started = time()
     text = payload.prompt.strip()
     if not text:
+        _record_feature_failure("llm", "empty_prompt")
         return {
             "accepted": False,
             "reason": "empty_prompt",
@@ -420,6 +453,8 @@ def llm_generate(payload: LlmGenerateRequest) -> dict:
     prompt = _build_llm_prompt(prompt=text, language_mode=payload.languageMode)
     ok, result = _run_llama_cpp(prompt)
     if not ok:
+        latency_ms = int((time() - started) * 1000)
+        _record_feature_failure("llm", str(result.get("reason", "llm_runtime_error")), latency_ms)
         return {
             "accepted": False,
             "reason": result.get("reason", "llm_runtime_error"),
@@ -428,22 +463,27 @@ def llm_generate(payload: LlmGenerateRequest) -> dict:
             "model": runtime_config.llmModel,
             "degraded": True,
         }
+    latency_ms = int((time() - started) * 1000)
+    _record_feature_success("llm", latency_ms)
     return {
         "accepted": True,
         "reason": "ok",
         "reply": str(result["reply"]).strip(),
         "provider": runtime_config.llmProvider,
         "model": runtime_config.llmModel,
-        "latencyMs": int((time() - started) * 1000),
+        "latencyMs": latency_ms,
     }
 
 
 @app.post("/asr/transcribe")
 def asr_transcribe(payload: AsrTranscribeRequest) -> dict:
+    started = time()
     features = _feature_status()
     if payload.sourceType not in {"file", "mic"}:
+        _record_feature_failure("asr", "invalid_source_type")
         return {"accepted": False, "reason": "invalid_source_type"}
     if not features["asr"]["ready"]:
+        _record_feature_failure("asr", "asr_model_not_ready")
         return {
             "accepted": False,
             "reason": "asr_model_not_ready",
@@ -453,12 +493,14 @@ def asr_transcribe(payload: AsrTranscribeRequest) -> dict:
         }
     value = payload.sourceValue.strip()
     if not value:
+        _record_feature_failure("asr", "source_value_required")
         return {"accepted": False, "reason": "source_value_required"}
 
     if payload.sourceType == "file":
         audio_input = str(Path(value).resolve())
         file_path = Path(audio_input)
         if not file_path.exists() or not file_path.is_file():
+            _record_feature_failure("asr", "audio_not_found")
             return {"accepted": False, "reason": "audio_not_found"}
     else:
         # Mic capture is expected to pass a local audio path or a supported audio URI payload.
@@ -466,6 +508,7 @@ def asr_transcribe(payload: AsrTranscribeRequest) -> dict:
 
     ok, load_result = _load_qwen_asr_model()
     if not ok:
+        _record_feature_failure("asr", str(load_result.get("reason", "asr_backend_unavailable")))
         return {
             "accepted": False,
             "reason": load_result.get("reason", "asr_backend_unavailable"),
@@ -494,6 +537,7 @@ def asr_transcribe(payload: AsrTranscribeRequest) -> dict:
                 return_time_stamps=False,
             )
         except Exception:
+            _record_feature_failure("asr", "asr_inference_failed", int((time() - started) * 1000))
             return {
                 "accepted": False,
                 "reason": "asr_inference_failed",
@@ -502,6 +546,7 @@ def asr_transcribe(payload: AsrTranscribeRequest) -> dict:
                 "degraded": True,
             }
     except Exception:
+        _record_feature_failure("asr", "asr_inference_failed", int((time() - started) * 1000))
         return {
             "accepted": False,
             "reason": "asr_inference_failed",
@@ -511,6 +556,7 @@ def asr_transcribe(payload: AsrTranscribeRequest) -> dict:
         }
 
     if not results:
+        _record_feature_failure("asr", "asr_empty_result", int((time() - started) * 1000))
         return {
             "accepted": False,
             "reason": "asr_empty_result",
@@ -522,6 +568,7 @@ def asr_transcribe(payload: AsrTranscribeRequest) -> dict:
     first = results[0]
     text = str(getattr(first, "text", "") or "").strip()
     if not text:
+        _record_feature_failure("asr", "asr_no_text_detected", int((time() - started) * 1000))
         return {
             "accepted": False,
             "reason": "asr_no_text_detected",
@@ -531,6 +578,8 @@ def asr_transcribe(payload: AsrTranscribeRequest) -> dict:
         }
     time_stamps = getattr(first, "time_stamps", None)
     segments = _asr_segments_from_result(text, time_stamps)
+    latency_ms = int((time() - started) * 1000)
+    _record_feature_success("asr", latency_ms)
     return {
         "accepted": True,
         "reason": "ok",
@@ -539,13 +588,16 @@ def asr_transcribe(payload: AsrTranscribeRequest) -> dict:
         "provider": runtime_config.asrProvider,
         "model": runtime_config.asrModel,
         "degraded": False,
+        "latencyMs": latency_ms,
     }
 
 
 @app.post("/ocr/extract")
 def ocr_extract(payload: OcrExtractRequest) -> dict:
+    started = time()
     features = _feature_status()
     if not features["ocr"]["ready"]:
+        _record_feature_failure("ocr", features["ocr"]["lastError"] or "ocr_model_not_ready")
         return {
             "accepted": False,
             "reason": features["ocr"]["lastError"] or "ocr_model_not_ready",
@@ -555,10 +607,12 @@ def ocr_extract(payload: OcrExtractRequest) -> dict:
         }
     source = Path(payload.path).resolve()
     if not source.exists() or not source.is_file():
+        _record_feature_failure("ocr", "image_not_found")
         return {"accepted": False, "reason": "image_not_found"}
 
     ok, load_result = _load_glm_ocr_pipeline()
     if not ok:
+        _record_feature_failure("ocr", str(load_result.get("reason", "ocr_backend_unavailable")))
         return {
             "accepted": False,
             "reason": load_result.get("reason", "ocr_backend_unavailable"),
@@ -579,6 +633,7 @@ def ocr_extract(payload: OcrExtractRequest) -> dict:
         ]
         result = ocr_pipe(text=messages, return_full_text=False, max_new_tokens=1024)
     except Exception:
+        _record_feature_failure("ocr", "ocr_inference_failed", int((time() - started) * 1000))
         return {
             "accepted": False,
             "reason": "ocr_inference_failed",
@@ -588,6 +643,7 @@ def ocr_extract(payload: OcrExtractRequest) -> dict:
         }
     text = _normalize_ocr_text(_extract_generated_text(result))
     if not text:
+        _record_feature_failure("ocr", "ocr_no_text_detected", int((time() - started) * 1000))
         return {
             "accepted": False,
             "reason": "ocr_no_text_detected",
@@ -595,6 +651,8 @@ def ocr_extract(payload: OcrExtractRequest) -> dict:
             "model": runtime_config.ocrModel,
             "degraded": True,
         }
+    latency_ms = int((time() - started) * 1000)
+    _record_feature_success("ocr", latency_ms)
     return {
         "accepted": True,
         "reason": "ok",
@@ -603,4 +661,5 @@ def ocr_extract(payload: OcrExtractRequest) -> dict:
         "provider": runtime_config.ocrProvider,
         "model": runtime_config.ocrModel,
         "degraded": False,
+        "latencyMs": latency_ms,
     }
