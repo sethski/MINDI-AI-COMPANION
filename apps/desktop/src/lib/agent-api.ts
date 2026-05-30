@@ -22,6 +22,8 @@ import type {
   TaskNextRunResponse,
   TaskTimeParseRequest,
   TaskTimeParseResponse,
+  CalendarExportRequest,
+  CalendarExportResponse,
 } from "@mindi/shared";
 
 const AGENT_URL = "http://127.0.0.1:8765";
@@ -173,6 +175,15 @@ export async function parseTaskTime(
   payload: TaskTimeParseRequest,
 ): Promise<TaskTimeParseResponse> {
   return agentFetch<TaskTimeParseResponse>("/ops/scheduler/parse-time", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function exportCalendar(
+  payload: CalendarExportRequest,
+): Promise<CalendarExportResponse> {
+  return agentFetch<CalendarExportResponse>("/calendar/export", {
     method: "POST",
     body: JSON.stringify(payload),
   });
