@@ -128,6 +128,19 @@ SLANG_EXPLICIT_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"(?im)\b(?:slang|term|phrase)\s*[:=-]\s*([A-Za-z][A-Za-z0-9'-]{1,19})\b"),
     re.compile(r"(?im)\b([A-Za-z][A-Za-z0-9'-]{1,19})\b\s*[-:]\s*(?:slang|taglish|tagalog)\b"),
 ]
+LEARNING_SOURCE_TAGS = {"style", "slang", "taglish", "tagalog", "language"}
+LEARNING_BLOCKED_TERMS = {
+    "app",
+    "browser",
+    "brave",
+    "chrome",
+    "cmd",
+    "edge",
+    "firefox",
+    "notepad",
+    "powershell",
+    "terminal",
+}
 
 
 class _ScrapeHtmlParser(HTMLParser):
@@ -250,7 +263,11 @@ class RuntimeStore:
     intelligence_eval_history: list[IntelligenceEvalRunResponse] = field(default_factory=list)
     intelligence_learning_sources: dict[str, IntelligenceLearningSourceSummary] = field(default_factory=dict)
     intelligence_learning_candidates: list[IntelligenceLearningCandidate] = field(default_factory=list)
+    intelligence_learning_candidate_version: str | None = None
     intelligence_learning_last_run_at: str | None = None
+    intelligence_learning_last_eval_score: float | None = None
+    intelligence_learning_last_eval_version: str | None = None
+    intelligence_learning_last_eval_signature: str | None = None
     intelligence_learning_last_applied_at: str | None = None
 
     def __post_init__(self) -> None:
@@ -396,6 +413,9 @@ class RuntimeStore:
         *,
         decision: PolicyDecision,
         config: IntelligenceTuningConfig | None = None,
+        language_mode: str | None = None,
+        slang_enabled: bool | None = None,
+        slang_terms: list[str] | None = None,
     ) -> str:
         text = reply
         active_config = config or self._active_tuning_config()
@@ -411,12 +431,15 @@ class RuntimeStore:
             text = f"Status: {text}"
         elif active_config.preset == "companion":
             text = f"{text} I can stay with you for the next step."
-        if self.intelligence_language_mode == "taglish":
+        effective_language_mode = language_mode or self.intelligence_language_mode
+        effective_slang_enabled = self.intelligence_slang_enabled if slang_enabled is None else bool(slang_enabled)
+        effective_slang_terms = self.intelligence_slang_terms if slang_terms is None else slang_terms
+        if effective_language_mode == "taglish":
             text = f"Sige. {text}"
-        elif self.intelligence_language_mode == "tagalog":
+        elif effective_language_mode == "tagalog":
             text = f"Naiintindihan ko. {text}"
-        if self.intelligence_slang_enabled and self.intelligence_slang_terms:
-            text = f"{text} [{self.intelligence_slang_terms[0]}]"
+        if effective_slang_enabled and effective_slang_terms:
+            text = f"{text} [{effective_slang_terms[0]}]"
         return text
 
     def add_task(self, request: CreateTaskRequest) -> TaskItem:
@@ -597,17 +620,79 @@ class RuntimeStore:
             canApplyPending=can_apply_pending,
         )
 
+    @staticmethod
+    def _learning_terms_signature(terms: list[str]) -> str:
+        normalized = sorted({term.strip().lower() for term in terms if term.strip()})
+        return "|".join(normalized)
+
+    def _clear_learning_eval_gate(self) -> None:
+        self.intelligence_learning_last_eval_score = None
+        self.intelligence_learning_last_eval_version = None
+        self.intelligence_learning_last_eval_signature = None
+
+    def _set_learning_candidates(self, candidates: list[IntelligenceLearningCandidate]) -> None:
+        self.intelligence_learning_candidates = candidates[:50]
+        self.intelligence_learning_candidate_version = str(uuid4()) if self.intelligence_learning_candidates else None
+        self._clear_learning_eval_gate()
+
+    def _selected_learning_terms(self, request_terms: list[str]) -> list[str]:
+        available_by_term = {
+            item.term.lower(): item.term.lower()
+            for item in self.intelligence_learning_candidates
+        }
+        if request_terms:
+            ordered: list[str] = []
+            seen: set[str] = set()
+            for raw_term in request_terms:
+                term = raw_term.strip().lower()
+                if not term or term in seen:
+                    continue
+                if term not in available_by_term:
+                    return []
+                seen.add(term)
+                ordered.append(term)
+            return ordered
+        return list(available_by_term.keys())
+
+    def _note_is_learning_source_eligible(self, note: MemoryNote) -> bool:
+        note_tags = {tag.strip().lower() for tag in note.tags if tag.strip()}
+        if note_tags & LEARNING_SOURCE_TAGS:
+            return True
+        return bool(self._extract_slang_candidates_from_text(note.content))
+
+    def _learning_candidate_allowed(self, term: str) -> bool:
+        normalized = term.strip().lower()
+        if not normalized:
+            return False
+        if normalized in LEARNING_BLOCKED_TERMS:
+            return False
+        risky_terms = self._normalized_risky_terms(self._active_tuning_config())
+        return normalized not in risky_terms
+
     def intelligence_learning_status(self) -> IntelligenceLearningStatus:
         approved_sources = sorted(
             self.intelligence_learning_sources.values(),
             key=lambda item: item.approvedAt,
             reverse=True,
         )
+        current_signature = self._learning_terms_signature([item.term for item in self.intelligence_learning_candidates])
+        can_apply_candidates = bool(
+            self.intelligence_learning_candidate_version is not None
+            and self.intelligence_learning_last_eval_version == self.intelligence_learning_candidate_version
+            and self.intelligence_learning_last_eval_score is not None
+            and self.intelligence_learning_last_eval_score >= 1.0
+            and self.intelligence_learning_last_eval_signature == current_signature
+        )
         return IntelligenceLearningStatus(
             approvedSources=approved_sources,
             candidates=self.intelligence_learning_candidates[:50],
+            candidateVersion=self.intelligence_learning_candidate_version,
             lastRunAt=self.intelligence_learning_last_run_at,
+            lastEvalScore=self.intelligence_learning_last_eval_score,
+            lastEvalVersion=self.intelligence_learning_last_eval_version,
             lastAppliedAt=self.intelligence_learning_last_applied_at,
+            minApplyScore=1.0,
+            canApplyCandidates=can_apply_candidates,
         )
 
     def update_intelligence_style(self, request: IntelligenceStyleUpdateRequest) -> IntelligenceStyleStatus:
@@ -698,6 +783,120 @@ class RuntimeStore:
     ) -> IntelligenceEvalRunResponse:
         payload = request or IntelligenceEvalRunRequest()
         scope = payload.scope
+        if scope == "learning":
+            candidate_version = self.intelligence_learning_candidate_version
+            selected_terms = self._selected_learning_terms(payload.terms)
+            if candidate_version is None or not self.intelligence_learning_candidates:
+                return IntelligenceEvalRunResponse(
+                    accepted=False,
+                    reason="no_learning_candidates",
+                    runId=str(uuid4()),
+                    createdAt=now_iso(),
+                    scope="learning",
+                    gatePassed=False,
+                    totalCases=0,
+                    passedCases=0,
+                    score=0.0,
+                    candidateVersion=None,
+                    evaluatedTerms=[],
+                    cases=[],
+                )
+            if not selected_terms:
+                return IntelligenceEvalRunResponse(
+                    accepted=False,
+                    reason="invalid_learning_terms",
+                    runId=str(uuid4()),
+                    createdAt=now_iso(),
+                    scope="learning",
+                    gatePassed=False,
+                    totalCases=0,
+                    passedCases=0,
+                    score=0.0,
+                    candidateVersion=candidate_version,
+                    evaluatedTerms=[],
+                    cases=[],
+                )
+
+            active_config = self._active_tuning_config()
+            safe_decision = self.policy_decision(AssistantRequest(text="summarize my notes"), config=active_config)
+            safe_reply = self._style_reply(
+                "Acknowledged. I can proceed locally and keep this action in audit logs.",
+                decision=safe_decision,
+                config=active_config,
+                slang_enabled=True,
+                slang_terms=selected_terms,
+            )
+            risky_decision = self.policy_decision(AssistantRequest(text="delete all files"), config=active_config)
+            learning_cases = [
+                (
+                    "style_learned_slang_reply",
+                    f"[{selected_terms[0]}]" in safe_reply,
+                    f"reply contains [{selected_terms[0]}]",
+                    safe_reply,
+                ),
+                (
+                    "style_learned_slang_single_append",
+                    safe_reply.count("[") == 1 and safe_reply.count("]") == 1,
+                    "exactly one slang marker appended",
+                    safe_reply,
+                ),
+                (
+                    "policy_learning_risky",
+                    risky_decision.allowed is False and risky_decision.requiresUnlock is True,
+                    "allowed=False,unlock=True",
+                    f"allowed={risky_decision.allowed},unlock={risky_decision.requiresUnlock}",
+                ),
+            ]
+            learning_results: list[IntelligenceEvalCaseResult] = []
+            passed = 0
+            for case_id, ok, expected, observed in learning_cases:
+                if ok:
+                    passed += 1
+                learning_results.append(
+                    IntelligenceEvalCaseResult(
+                        id=case_id,
+                        accepted=ok,
+                        score=1.0 if ok else 0.0,
+                        expected=expected,
+                        observed=observed,
+                    )
+                )
+
+            total = len(learning_results)
+            score = float(passed) / float(total) if total > 0 else 0.0
+            gate_passed = score >= 1.0
+            run = IntelligenceEvalRunResponse(
+                accepted=True,
+                reason="ok",
+                runId=str(uuid4()),
+                createdAt=now_iso(),
+                scope="learning",
+                gatePassed=gate_passed,
+                totalCases=total,
+                passedCases=passed,
+                score=score,
+                candidateVersion=candidate_version,
+                evaluatedTerms=selected_terms,
+                cases=learning_results,
+            )
+            self.intelligence_learning_last_eval_score = score
+            self.intelligence_learning_last_eval_version = candidate_version
+            self.intelligence_learning_last_eval_signature = self._learning_terms_signature(selected_terms)
+            self.intelligence_eval_history.insert(0, run)
+            self.intelligence_eval_history = self.intelligence_eval_history[:50]
+            self.logs.insert(
+                0,
+                ActionLogItem(
+                    id=str(uuid4()),
+                    intent="intelligence_eval_run",
+                    tier=ActionTier.read_only,
+                    result="allowed",
+                    reason=f"scope:{scope},score:{score:.2f},terms:{len(selected_terms)}",
+                    createdAt=now_iso(),
+                ),
+            )
+            return run
+
         if scope == "pending":
             config = self._pending_tuning_config()
             pending_version = self.intelligence_tuning_pending_version
@@ -712,6 +911,8 @@ class RuntimeStore:
                     totalCases=0,
                     passedCases=0,
                     score=0.0,
+                    candidateVersion=None,
+                    evaluatedTerms=[],
                     cases=[],
                 )
         else:
@@ -754,6 +955,8 @@ class RuntimeStore:
             totalCases=total,
             passedCases=passed,
             score=score,
+            candidateVersion=None,
+            evaluatedTerms=[],
             cases=results,
         )
         if scope == "pending":
@@ -791,6 +994,12 @@ class RuntimeStore:
                 status=self.intelligence_learning_status(),
             )
         if request.approved:
+            if not self._note_is_learning_source_eligible(note):
+                return IntelligenceLearningSourceResponse(
+                    accepted=False,
+                    reason="note_not_learning_source",
+                    status=self.intelligence_learning_status(),
+                )
             self.intelligence_learning_sources[note.id] = IntelligenceLearningSourceSummary(
                 noteId=note.id,
                 title=note.title,
@@ -800,9 +1009,10 @@ class RuntimeStore:
             reason = "source_approved"
         else:
             self.intelligence_learning_sources.pop(note.id, None)
-            self.intelligence_learning_candidates = [
+            remaining_candidates = [
                 item for item in self.intelligence_learning_candidates if item.sourceNoteId != note.id
             ]
+            self._set_learning_candidates(remaining_candidates)
             reason = "source_removed"
         self.logs.insert(
             0,
@@ -860,6 +1070,8 @@ class RuntimeStore:
             for term, evidence in self._extract_slang_candidates_from_text(note.content):
                 if term in existing_terms:
                     continue
+                if not self._learning_candidate_allowed(term):
+                    continue
                 key = (source.noteId, term)
                 if key in seen_pairs:
                     continue
@@ -873,7 +1085,7 @@ class RuntimeStore:
                     )
                 )
 
-        self.intelligence_learning_candidates = results[:50]
+        self._set_learning_candidates(results)
         self.intelligence_learning_last_run_at = now_iso()
         self.logs.insert(
             0,
@@ -899,9 +1111,7 @@ class RuntimeStore:
         self,
         request: IntelligenceLearningApplyRequest,
     ) -> IntelligenceLearningApplyResponse:
-        selected_terms = {term.strip().lower() for term in request.terms if term.strip()}
-        if not selected_terms:
-            selected_terms = {item.term.lower() for item in self.intelligence_learning_candidates}
+        selected_terms = self._selected_learning_terms(request.terms)
         if not selected_terms:
             return IntelligenceLearningApplyResponse(
                 accepted=False,
@@ -910,12 +1120,41 @@ class RuntimeStore:
                 style=self.intelligence_style_status(),
                 status=self.intelligence_learning_status(),
             )
+        if self.intelligence_learning_candidate_version is None:
+            return IntelligenceLearningApplyResponse(
+                accepted=False,
+                reason="learning_candidates_not_evaluated",
+                appliedTerms=[],
+                style=self.intelligence_style_status(),
+                status=self.intelligence_learning_status(),
+            )
+        selected_signature = self._learning_terms_signature(selected_terms)
+        if (
+            self.intelligence_learning_last_eval_version != self.intelligence_learning_candidate_version
+            or self.intelligence_learning_last_eval_signature != selected_signature
+        ):
+            return IntelligenceLearningApplyResponse(
+                accepted=False,
+                reason="learning_candidates_not_evaluated",
+                appliedTerms=[],
+                style=self.intelligence_style_status(),
+                status=self.intelligence_learning_status(),
+            )
+        if self.intelligence_learning_last_eval_score is None or self.intelligence_learning_last_eval_score < 1.0:
+            return IntelligenceLearningApplyResponse(
+                accepted=False,
+                reason="learning_eval_below_threshold",
+                appliedTerms=[],
+                style=self.intelligence_style_status(),
+                status=self.intelligence_learning_status(),
+            )
 
         applied_terms: list[str] = []
         remaining: list[IntelligenceLearningCandidate] = []
         existing_terms = {term.lower() for term in self.intelligence_slang_terms}
+        selected_term_set = set(selected_terms)
         for item in self.intelligence_learning_candidates:
-            if item.term.lower() not in selected_terms:
+            if item.term.lower() not in selected_term_set:
                 remaining.append(item)
                 continue
             if item.term.lower() not in existing_terms:
@@ -923,7 +1162,7 @@ class RuntimeStore:
                 existing_terms.add(item.term.lower())
                 applied_terms.append(item.term)
         self.intelligence_slang_terms = self.intelligence_slang_terms[:50]
-        self.intelligence_learning_candidates = remaining[:50]
+        self._set_learning_candidates(remaining)
         if applied_terms and request.enableSlang:
             self.intelligence_slang_enabled = True
         self.intelligence_learning_last_applied_at = now_iso()

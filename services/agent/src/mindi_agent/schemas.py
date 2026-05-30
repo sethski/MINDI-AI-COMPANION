@@ -438,7 +438,8 @@ class IntelligenceTuningStageRequest(BaseModel):
 
 
 class IntelligenceEvalRunRequest(BaseModel):
-    scope: Literal["active", "pending"] = "active"
+    scope: Literal["active", "pending", "learning"] = "active"
+    terms: list[str] = Field(default_factory=list)
 
 
 class IntelligenceEvalCaseResult(BaseModel):
@@ -454,11 +455,13 @@ class IntelligenceEvalRunResponse(BaseModel):
     reason: str
     runId: str
     createdAt: str
-    scope: Literal["active", "pending"] = "active"
+    scope: Literal["active", "pending", "learning"] = "active"
     gatePassed: bool = False
     totalCases: int
     passedCases: int
     score: float
+    candidateVersion: str | None = None
+    evaluatedTerms: list[str] = Field(default_factory=list)
     cases: list[IntelligenceEvalCaseResult] = Field(default_factory=list)
 
 
@@ -490,8 +493,13 @@ class IntelligenceLearningCandidate(BaseModel):
 class IntelligenceLearningStatus(BaseModel):
     approvedSources: list[IntelligenceLearningSourceSummary] = Field(default_factory=list)
     candidates: list[IntelligenceLearningCandidate] = Field(default_factory=list)
+    candidateVersion: str | None = None
     lastRunAt: str | None = None
+    lastEvalScore: float | None = None
+    lastEvalVersion: str | None = None
     lastAppliedAt: str | None = None
+    minApplyScore: float = 1.0
+    canApplyCandidates: bool = False
 
 
 class IntelligenceLearningSourceResponse(BaseModel):
