@@ -258,6 +258,74 @@ def test_ocr_import_missing_file() -> None:
     assert response.json()["accepted"] is False
 
 
+def test_ocr_import_prefers_runtime_backend_when_available(tmp_path: Path) -> None:
+    image = tmp_path / "runtime-scan.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    client.post(
+        "/control/permissions",
+        json={"scope": "folder", "subject": str(tmp_path), "decision": "allow"},
+    )
+
+    with patch.object(
+        store.ai_runtime,
+        "extract_ocr",
+        return_value={
+            "accepted": True,
+            "text": "runtime ocr text",
+            "ocrMode": "glm_ocr_markdown",
+            "provider": "huggingface_local",
+            "model": "zai-org/GLM-OCR",
+            "degraded": False,
+        },
+    ):
+        with patch("mindi_agent.store.extract_text_for_ocr", side_effect=AssertionError("fallback should not run")):
+            response = client.post("/memory/ocr/import", json={"path": str(image)})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["accepted"] is True
+    assert body["reason"] == "glm_ocr_markdown"
+    assert body["ocrBackend"] == "huggingface_local"
+    assert body["ocrModel"] == "zai-org/GLM-OCR"
+    assert body["degraded"] is False
+    assert body["fallbackReason"] is None
+
+
+def test_ocr_import_falls_back_with_explicit_runtime_reason(tmp_path: Path) -> None:
+    image = tmp_path / "runtime-fallback.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    client.post(
+        "/control/permissions",
+        json={"scope": "folder", "subject": str(tmp_path), "decision": "allow"},
+    )
+
+    with patch.object(
+        store.ai_runtime,
+        "extract_ocr",
+        return_value={
+            "accepted": False,
+            "reason": "ocr_model_not_ready",
+            "provider": "huggingface_local",
+            "model": "zai-org/GLM-OCR",
+            "degraded": True,
+        },
+    ):
+        with patch("mindi_agent.store.extract_text_for_ocr") as mock_ocr:
+            mock_ocr.return_value = ("fallback text", "image_ocr")
+            response = client.post("/memory/ocr/import", json={"path": str(image)})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["accepted"] is True
+    assert body["reason"] == "image_ocr"
+    assert body["ocrBackend"] == "pytesseract_fallback"
+    assert body["ocrModel"] == "local_tesseract"
+    assert body["degraded"] is True
+    assert body["fallbackReason"] == "ocr_model_not_ready"
+
+
 def test_auto_index_scan_and_status(tmp_path: Path) -> None:
     doc = tmp_path / "watcher.md"
     marker = f"autoindex-marker-{uuid4()}"
@@ -1674,6 +1742,100 @@ def test_perception_screen_analyze_allows_blocks_when_ocr_fails(tmp_path: Path) 
     assert body["reason"] == "ocr_unavailable_blocks_extracted"
     assert body["ocrError"] == "tesseract_not_installed"
     assert body["text"] is None
+    assert len(body["blocks"]) >= 1
+
+
+def test_perception_screen_analyze_prefers_runtime_ocr_backend(tmp_path: Path) -> None:
+    image_path = tmp_path / "screen-runtime-ocr.png"
+    image = Image.new("RGB", (320, 180), color="white")
+    draw = ImageDraw.Draw(image)
+    draw.rectangle([20, 20, 260, 60], fill="black")
+    image.save(image_path)
+
+    client.post(
+        "/control/permissions",
+        json={"scope": "folder", "subject": str(tmp_path), "decision": "allow"},
+    )
+    client.post(
+        "/control/permissions",
+        json={"scope": "action", "subject": "perception.screen.capture", "decision": "allow"},
+    )
+
+    with patch.object(
+        store.ai_runtime,
+        "extract_ocr",
+        return_value={
+            "accepted": True,
+            "text": "runtime screen text",
+            "ocrMode": "glm_ocr_markdown",
+            "provider": "huggingface_local",
+            "model": "zai-org/GLM-OCR",
+            "degraded": False,
+        },
+    ):
+        with patch("mindi_agent.store.extract_text_for_ocr", side_effect=AssertionError("fallback should not run")):
+            response = client.post(
+                "/perception/screen/analyze",
+                json={"path": str(image_path), "includeOcr": True, "maxBlocks": 10},
+            )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["accepted"] is True
+    assert body["reason"] == "ok"
+    assert body["ocrMode"] == "glm_ocr_markdown"
+    assert body["ocrBackend"] == "huggingface_local"
+    assert body["ocrModel"] == "zai-org/GLM-OCR"
+    assert body["degraded"] is False
+    assert body["fallbackReason"] is None
+    assert body["text"] == "runtime screen text"
+    assert len(body["blocks"]) >= 1
+
+
+def test_perception_screen_analyze_runtime_ocr_failure_keeps_blocks(tmp_path: Path) -> None:
+    image_path = tmp_path / "screen-runtime-fallback.png"
+    image = Image.new("RGB", (280, 160), color="white")
+    draw = ImageDraw.Draw(image)
+    draw.rectangle([22, 22, 240, 68], fill="black")
+    image.save(image_path)
+
+    client.post(
+        "/control/permissions",
+        json={"scope": "folder", "subject": str(tmp_path), "decision": "allow"},
+    )
+    client.post(
+        "/control/permissions",
+        json={"scope": "action", "subject": "perception.screen.capture", "decision": "allow"},
+    )
+
+    with patch.object(
+        store.ai_runtime,
+        "extract_ocr",
+        return_value={
+            "accepted": False,
+            "reason": "ocr_model_not_ready",
+            "provider": "huggingface_local",
+            "model": "zai-org/GLM-OCR",
+            "degraded": True,
+        },
+    ):
+        with patch("mindi_agent.store.extract_text_for_ocr") as mock_ocr:
+            mock_ocr.return_value = ("fallback screen text", "image_ocr")
+            response = client.post(
+                "/perception/screen/analyze",
+                json={"path": str(image_path), "includeOcr": True, "maxBlocks": 8},
+            )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["accepted"] is True
+    assert body["reason"] == "ok"
+    assert body["ocrMode"] == "image_ocr"
+    assert body["ocrBackend"] == "pytesseract_fallback"
+    assert body["ocrModel"] == "local_tesseract"
+    assert body["degraded"] is True
+    assert body["fallbackReason"] == "ocr_model_not_ready"
+    assert body["text"] == "fallback screen text"
     assert len(body["blocks"]) >= 1
 
 
