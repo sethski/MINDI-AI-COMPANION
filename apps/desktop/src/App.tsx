@@ -9,6 +9,7 @@ import {
   type MemoryDocumentChunk,
   type MemoryNote,
   type MindiTabId,
+  type PerceptionPermissionStatus,
   type PerceptionAnalyzeResponse,
   type PermissionGrant,
   type QuickToggle,
@@ -42,6 +43,7 @@ import {
   exportCalendar,
   importCalendar,
   analyzeScreenPerception,
+  getPerceptionPermissionStatus,
 } from "./lib/agent-api";
 import {
   enqueueSyncItem,
@@ -63,6 +65,9 @@ const EMPTY_SNAPSHOT: HubSnapshot = {
   tasks: [],
   logs: [],
 };
+
+const PERCEPTION_SCREEN_SUBJECT = "perception.screen.capture";
+const PERCEPTION_CAMERA_SUBJECT = "perception.camera.capture";
 
 function formatTab(tab: MindiTabId): string {
   return tab[0].toUpperCase() + tab.slice(1);
@@ -101,6 +106,7 @@ export default function App() {
   const [memoryStatus, setMemoryStatus] = useState("No memory action yet.");
   const [perceptionStatus, setPerceptionStatus] = useState("No perception run yet.");
   const [perceptionResult, setPerceptionResult] = useState<PerceptionAnalyzeResponse | null>(null);
+  const [perceptionPermission, setPerceptionPermission] = useState<PerceptionPermissionStatus | null>(null);
   const [perceptionCapturePreview, setPerceptionCapturePreview] = useState<string | null>(null);
   const [perceptionIncludeOcr, setPerceptionIncludeOcr] = useState(true);
   const [perceptionBusy, setPerceptionBusy] = useState(false);
@@ -132,8 +138,9 @@ export default function App() {
       listMemoryNotes(20),
       getAutoIndexStatus(),
       getSchedulerStatus(),
+      getPerceptionPermissionStatus(),
     ])
-      .then(([hub, grantList, appAllowlist, notes, indexStatus, scheduleStatus]) => {
+      .then(([hub, grantList, appAllowlist, notes, indexStatus, scheduleStatus, perceptionPermissionStatus]) => {
         if (!active) {
           return;
         }
@@ -143,6 +150,7 @@ export default function App() {
         setMemoryNotes(notes);
         setAutoIndexStatus(indexStatus);
         setSchedulerStatus(scheduleStatus);
+        setPerceptionPermission(perceptionPermissionStatus);
       })
       .catch(() => {
         if (active) {
@@ -675,6 +683,31 @@ export default function App() {
     }
   }
 
+  async function addPerceptionActionAllowGrant(subject: string) {
+    const normalized = subject.trim();
+    if (!normalized) {
+      return;
+    }
+    try {
+      const created = await addPermissionGrant({
+        scope: "action",
+        subject: normalized,
+        decision: "allow",
+      });
+      setPermissions((current) => [created, ...current]);
+      const status = await getPerceptionPermissionStatus();
+      setPerceptionPermission(status);
+      setPerceptionStatus(`Permission granted: ${normalized}`);
+    } catch {
+      enqueueSyncItem({
+        type: "action",
+        payload: { action: "add_permission", scope: "action", subject: normalized },
+      });
+      setSyncDepth(loadSyncQueue().length);
+      setPerceptionStatus("Permission grant queued for sync.");
+    }
+  }
+
   async function runOrganize(mode: "preview" | "apply") {
     try {
       const result = await fileOrganize({ sourceDir, targetDir, mode });
@@ -931,6 +964,22 @@ export default function App() {
       return;
     }
 
+    try {
+      const status = await getPerceptionPermissionStatus();
+      setPerceptionPermission(status);
+      if (!status.screenAllowed) {
+        const reason =
+          status.screenDecision === "deny"
+            ? "screen permission denied by safety policy."
+            : "screen permission required. Allow it in Vision.";
+        setPerceptionStatus(`Perception blocked: ${reason}`);
+        return;
+      }
+    } catch {
+      setPerceptionStatus("Unable to verify screen permission status.");
+      return;
+    }
+
     let stream: MediaStream | null = null;
     setPerceptionBusy(true);
     setPerceptionStatus("Waiting for screen selection...");
@@ -981,7 +1030,7 @@ export default function App() {
       setPerceptionResult(response);
       if (response.accepted) {
         setPerceptionStatus(
-          `Perception ok: ${response.blocks.length} blocks, textLength=${response.textLength}.`,
+          `Perception ok: ${response.blocks.length} blocks, textLength=${response.textLength}, snapshot=${response.snapshotId ?? "n/a"}.`,
         );
       } else {
         setPerceptionStatus(`Perception failed: ${response.reason}`);
@@ -1237,6 +1286,30 @@ export default function App() {
                 />
                 Include OCR text extraction
               </label>
+              <p>
+                screen permission:{" "}
+                {perceptionPermission
+                  ? `${perceptionPermission.screenDecision} (${String(perceptionPermission.screenAllowed)})`
+                  : "unknown"}
+              </p>
+              <p>
+                camera permission:{" "}
+                {perceptionPermission
+                  ? `${perceptionPermission.cameraDecision} (${String(perceptionPermission.cameraAllowed)})`
+                  : "unknown"}
+              </p>
+              <button
+                type="button"
+                onClick={() => void addPerceptionActionAllowGrant(PERCEPTION_SCREEN_SUBJECT)}
+              >
+                Allow Screen Perception
+              </button>
+              <button
+                type="button"
+                onClick={() => void addPerceptionActionAllowGrant(PERCEPTION_CAMERA_SUBJECT)}
+              >
+                Allow Camera Perception
+              </button>
             </div>
             <p className="assistant-reply">{perceptionStatus}</p>
             {perceptionCapturePreview ? (
