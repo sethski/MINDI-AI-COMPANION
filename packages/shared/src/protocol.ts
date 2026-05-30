@@ -321,6 +321,15 @@ export interface PerceptionSnapshotSearchResponse {
   items: PerceptionSnapshot[];
 }
 
+export interface PerceptionPermissionStatus {
+  screenSubject: string;
+  cameraSubject: string;
+  screenAllowed: boolean;
+  cameraAllowed: boolean;
+  screenDecision: "allow" | "deny" | "unset";
+  cameraDecision: "allow" | "deny" | "unset";
+}
+
 export interface AutoIndexStatus {
   running: boolean;
   watchedPaths: string[];
