@@ -186,6 +186,7 @@ class RuntimeStore:
     def add_task(self, request: CreateTaskRequest) -> TaskItem:
         task = TaskItem(
             id=str(uuid4()),
+            externalId=None,
             title=request.title,
             dueAt=request.dueAt,
             recurrence=request.recurrence,
@@ -841,7 +842,11 @@ class RuntimeStore:
         except ValueError:
             return None
 
-    def _find_task_conflict(self, title: str, due_at: str) -> TaskItem | None:
+    def _find_task_conflict(self, title: str, due_at: str, external_id: str | None) -> TaskItem | None:
+        if external_id:
+            for task in self.tasks:
+                if (task.externalId or "").strip() == external_id:
+                    return task
         normalized_title = " ".join(title.split()).lower()
         for task in self.tasks:
             if (task.dueAt or "") != due_at:
@@ -891,6 +896,7 @@ class RuntimeStore:
         def flush_event() -> None:
             nonlocal created_count, updated_count, skipped_count, current
             title_raw = current.get("SUMMARY", "").strip()
+            uid_raw = current.get("UID", "").strip()
             dtstart_raw = current.get("DTSTART", "").strip()
             if not title_raw or not dtstart_raw:
                 skipped_count += 1
@@ -909,9 +915,15 @@ class RuntimeStore:
                 recurrence = "weekly"
 
             title = self._ics_unescape(title_raw)
+            external_id = self._ics_unescape(uid_raw) if uid_raw else None
             due_at = self._format_utc(due)
-            conflict = self._find_task_conflict(title=title, due_at=due_at)
+            conflict = self._find_task_conflict(
+                title=title,
+                due_at=due_at,
+                external_id=external_id,
+            )
             if conflict is not None:
+                conflict.externalId = external_id or conflict.externalId
                 conflict.title = title
                 conflict.dueAt = due_at
                 conflict.nextRunAt = due_at
@@ -921,6 +933,7 @@ class RuntimeStore:
             else:
                 task = TaskItem(
                     id=str(uuid4()),
+                    externalId=external_id,
                     title=title,
                     dueAt=due_at,
                     recurrence=recurrence,

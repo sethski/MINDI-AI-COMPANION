@@ -58,6 +58,7 @@ class AlertItem(BaseModel):
 
 class TaskItem(BaseModel):
     id: str
+    externalId: str | None = None
     title: str
     status: Literal["todo", "in_progress", "done"] = "todo"
     dueAt: str | None = None
