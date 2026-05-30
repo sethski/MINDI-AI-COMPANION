@@ -12,6 +12,7 @@ from .schemas import (
     DocumentImportRequest,
     FileOrganizeRequest,
     OcrImportRequest,
+    PerceptionAnalyzeRequest,
     SyncQueueRequest,
     TaskNextRunRequest,
     TaskTimeParseRequest,
@@ -147,6 +148,11 @@ def memory_document_search(
 @app.post("/memory/ocr/import")
 def memory_ocr_import(payload: OcrImportRequest):
     return store.import_ocr_document(payload)
+
+
+@app.post("/perception/screen/analyze")
+def perception_screen_analyze(payload: PerceptionAnalyzeRequest):
+    return store.analyze_screen(payload)
 
 
 @app.get("/memory/auto-index/status")

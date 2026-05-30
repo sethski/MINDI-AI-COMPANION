@@ -216,6 +216,35 @@ class OcrImportResponse(BaseModel):
     document: MemoryDocument | None = None
 
 
+class PerceptionAnalyzeRequest(BaseModel):
+    path: str
+    includeOcr: bool = True
+    maxBlocks: int = Field(default=25, ge=1, le=200)
+
+
+class PerceptionUiBlock(BaseModel):
+    x: int
+    y: int
+    width: int
+    height: int
+    kind: Literal["text_region"]
+    confidence: float
+    textSnippet: str | None = None
+
+
+class PerceptionAnalyzeResponse(BaseModel):
+    accepted: bool
+    reason: str
+    path: str | None = None
+    imageWidth: int | None = None
+    imageHeight: int | None = None
+    ocrMode: str | None = None
+    ocrError: str | None = None
+    text: str | None = None
+    textLength: int = 0
+    blocks: list[PerceptionUiBlock] = Field(default_factory=list)
+
+
 class AutoIndexStatus(BaseModel):
     running: bool
     watchedPaths: list[str]

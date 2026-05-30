@@ -8,6 +8,7 @@ from threading import Event, Thread
 from time import time
 from uuid import uuid4
 from zoneinfo import ZoneInfo
+from PIL import Image
 
 from .memory_db import ALLOWED_DOCUMENT_SUFFIXES, MemoryDB
 from .ocr_service import OCR_IMAGE_SUFFIXES, extract_text_for_ocr
@@ -48,6 +49,9 @@ from .schemas import (
     MemorySearchResponse,
     OcrImportRequest,
     OcrImportResponse,
+    PerceptionAnalyzeRequest,
+    PerceptionAnalyzeResponse,
+    PerceptionUiBlock,
     PermissionGrant,
     PolicyDecision,
     SyncQueueRequest,
@@ -504,6 +508,216 @@ class RuntimeStore:
             ),
         )
         return OcrImportResponse(accepted=True, reason=extraction_mode, document=document)
+
+    @staticmethod
+    def _box_intersection_area(
+        a: tuple[int, int, int, int],
+        b: tuple[int, int, int, int],
+    ) -> int:
+        ax1, ay1, ax2, ay2 = a
+        bx1, by1, bx2, by2 = b
+        ix1 = max(ax1, bx1)
+        iy1 = max(ay1, by1)
+        ix2 = min(ax2, bx2)
+        iy2 = min(ay2, by2)
+        iw = max(0, ix2 - ix1 + 1)
+        ih = max(0, iy2 - iy1 + 1)
+        return iw * ih
+
+    @staticmethod
+    def _merge_overlapping_boxes(
+        boxes: list[tuple[int, int, int, int, float]],
+    ) -> list[tuple[int, int, int, int, float]]:
+        if not boxes:
+            return []
+        merged = sorted(boxes, key=lambda item: (item[1], item[0]))
+        changed = True
+        while changed:
+            changed = False
+            next_boxes: list[tuple[int, int, int, int, float]] = []
+            while merged:
+                current = merged.pop(0)
+                cx1, cy1, cx2, cy2, cscore = current
+                keep = True
+                for index, other in enumerate(merged):
+                    ox1, oy1, ox2, oy2, oscore = other
+                    intersection = RuntimeStore._box_intersection_area(
+                        (cx1, cy1, cx2, cy2),
+                        (ox1, oy1, ox2, oy2),
+                    )
+                    if intersection <= 0:
+                        continue
+                    c_area = (cx2 - cx1 + 1) * (cy2 - cy1 + 1)
+                    o_area = (ox2 - ox1 + 1) * (oy2 - oy1 + 1)
+                    overlap_ratio = intersection / max(1, min(c_area, o_area))
+                    if overlap_ratio < 0.35:
+                        continue
+                    nx1 = min(cx1, ox1)
+                    ny1 = min(cy1, oy1)
+                    nx2 = max(cx2, ox2)
+                    ny2 = max(cy2, oy2)
+                    nscore = max(cscore, oscore)
+                    merged.pop(index)
+                    merged.insert(0, (nx1, ny1, nx2, ny2, nscore))
+                    keep = False
+                    changed = True
+                    break
+                if keep:
+                    next_boxes.append(current)
+            merged = next_boxes
+        return merged
+
+    @staticmethod
+    def _find_runs(active: list[bool], min_size: int) -> list[tuple[int, int]]:
+        runs: list[tuple[int, int]] = []
+        start: int | None = None
+        for index, value in enumerate(active):
+            if value and start is None:
+                start = index
+            elif not value and start is not None:
+                if index - start >= min_size:
+                    runs.append((start, index - 1))
+                start = None
+        if start is not None and len(active) - start >= min_size:
+            runs.append((start, len(active) - 1))
+        return runs
+
+    def _extract_ui_blocks_from_image(
+        self,
+        source: Path,
+        max_blocks: int,
+    ) -> tuple[int, int, list[PerceptionUiBlock]]:
+        with Image.open(source) as image:
+            grayscale = image.convert("L")
+            width, height = grayscale.size
+            scale = max(1.0, max(width, height) / 480.0)
+            sample_width = max(1, int(width / scale))
+            sample_height = max(1, int(height / scale))
+            sampled = grayscale.resize((sample_width, sample_height))
+
+            pixels = sampled.load()
+            row_active: list[bool] = []
+            for y in range(sample_height):
+                active_count = 0
+                for x in range(sample_width):
+                    if pixels[x, y] < 232:
+                        active_count += 1
+                row_active.append(active_count >= max(2, int(sample_width * 0.03)))
+
+            row_runs = self._find_runs(row_active, min_size=max(2, int(sample_height * 0.01)))
+            boxes: list[tuple[int, int, int, int, float]] = []
+            for y0, y1 in row_runs:
+                column_active: list[bool] = []
+                run_height = y1 - y0 + 1
+                for x in range(sample_width):
+                    active_count = 0
+                    for y in range(y0, y1 + 1):
+                        if pixels[x, y] < 232:
+                            active_count += 1
+                    column_active.append(active_count >= max(1, int(run_height * 0.08)))
+
+                col_runs = self._find_runs(column_active, min_size=max(3, int(sample_width * 0.02)))
+                for x0, x1 in col_runs:
+                    sx1 = int(x0 * scale)
+                    sy1 = int(y0 * scale)
+                    sx2 = min(width - 1, int((x1 + 1) * scale) - 1)
+                    sy2 = min(height - 1, int((y1 + 1) * scale) - 1)
+                    area = (sx2 - sx1 + 1) * (sy2 - sy1 + 1)
+                    if area < max(200, int(width * height * 0.0003)):
+                        continue
+                    density = min(
+                        1.0,
+                        ((x1 - x0 + 1) * (y1 - y0 + 1))
+                        / max(1.0, float(sample_width * sample_height)),
+                    )
+                    boxes.append((sx1, sy1, sx2, sy2, max(0.05, density * 30)))
+
+            merged = self._merge_overlapping_boxes(boxes)
+            merged = sorted(
+                merged,
+                key=lambda item: ((item[2] - item[0] + 1) * (item[3] - item[1] + 1)),
+                reverse=True,
+            )[:max_blocks]
+            ui_blocks = [
+                PerceptionUiBlock(
+                    x=x1,
+                    y=y1,
+                    width=max(1, x2 - x1 + 1),
+                    height=max(1, y2 - y1 + 1),
+                    kind="text_region",
+                    confidence=round(min(0.99, score), 3),
+                    textSnippet=None,
+                )
+                for x1, y1, x2, y2, score in merged
+            ]
+        return width, height, ui_blocks
+
+    def analyze_screen(self, request: PerceptionAnalyzeRequest) -> PerceptionAnalyzeResponse:
+        source = Path(request.path).resolve()
+        if not source.exists() or not source.is_file():
+            return PerceptionAnalyzeResponse(
+                accepted=False,
+                reason="image_not_found",
+            )
+        if source.suffix.lower() not in OCR_IMAGE_SUFFIXES:
+            return PerceptionAnalyzeResponse(
+                accepted=False,
+                reason="unsupported_file_type",
+            )
+        if not self._is_path_allowed(source):
+            return PerceptionAnalyzeResponse(
+                accepted=False,
+                reason="folder_not_allowed",
+            )
+
+        try:
+            width, height, blocks = self._extract_ui_blocks_from_image(
+                source=source,
+                max_blocks=request.maxBlocks,
+            )
+        except Exception:
+            return PerceptionAnalyzeResponse(
+                accepted=False,
+                reason="image_parse_failed",
+            )
+
+        text: str | None = None
+        ocr_mode: str | None = None
+        ocr_error: str | None = None
+        if request.includeOcr:
+            try:
+                text, ocr_mode = extract_text_for_ocr(source)
+            except ValueError as exc:
+                ocr_error = str(exc)
+
+        reason = "ok"
+        if request.includeOcr and ocr_error is not None:
+            reason = "ocr_unavailable_blocks_extracted"
+
+        self.logs.insert(
+            0,
+            ActionLogItem(
+                id=str(uuid4()),
+                intent=f"perception_screen_analyze:{source.name}",
+                tier=ActionTier.reversible,
+                result="allowed",
+                reason=f"blocks:{len(blocks)}",
+                createdAt=now_iso(),
+            ),
+        )
+
+        return PerceptionAnalyzeResponse(
+            accepted=True,
+            reason=reason,
+            path=str(source),
+            imageWidth=width,
+            imageHeight=height,
+            ocrMode=ocr_mode,
+            ocrError=ocr_error,
+            text=text,
+            textLength=len(text or ""),
+            blocks=blocks,
+        )
 
     def _watched_paths(self) -> list[Path]:
         defaults = [Path("data/inbox"), Path("data/notes"), Path("data/screenshots")]
