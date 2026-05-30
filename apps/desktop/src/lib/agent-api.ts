@@ -12,6 +12,7 @@ import type {
   FileOrganizeResponse,
   HubSnapshot,
   AutoIndexStatus,
+  SchedulerStatus,
   MemoryNote,
   MemorySearchResponse,
   OcrImportResponse,
@@ -139,6 +140,17 @@ export async function getAutoIndexStatus(): Promise<AutoIndexStatus> {
 
 export async function scanAutoIndexNow(): Promise<AutoIndexStatus> {
   return agentFetch<AutoIndexStatus>("/memory/auto-index/scan", {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+}
+
+export async function getSchedulerStatus(): Promise<SchedulerStatus> {
+  return agentFetch<SchedulerStatus>("/ops/scheduler/status");
+}
+
+export async function runSchedulerScanNow(): Promise<SchedulerStatus> {
+  return agentFetch<SchedulerStatus>("/ops/scheduler/scan", {
     method: "POST",
     body: JSON.stringify({}),
   });
