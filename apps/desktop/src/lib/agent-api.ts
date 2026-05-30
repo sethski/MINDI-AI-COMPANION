@@ -20,6 +20,8 @@ import type {
   OcrImportResponse,
   PerceptionAnalyzeRequest,
   PerceptionAnalyzeResponse,
+  PerceptionSnapshot,
+  PerceptionSnapshotSearchResponse,
   PermissionGrant,
   TaskItem,
   TaskNextRunRequest,
@@ -182,6 +184,20 @@ export async function analyzeScreenPerception(
     method: "POST",
     body: JSON.stringify(payload),
   });
+}
+
+export async function listPerceptionSnapshots(limit = 20): Promise<PerceptionSnapshot[]> {
+  return agentFetch<PerceptionSnapshot[]>(`/memory/perception?limit=${limit}`);
+}
+
+export async function searchPerceptionSnapshots(
+  query: string,
+  limit = 20,
+): Promise<PerceptionSnapshotSearchResponse> {
+  const encoded = encodeURIComponent(query);
+  return agentFetch<PerceptionSnapshotSearchResponse>(
+    `/memory/perception/search?query=${encoded}&limit=${limit}`,
+  );
 }
 
 export async function getAutoIndexStatus(): Promise<AutoIndexStatus> {
