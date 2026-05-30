@@ -1025,6 +1025,91 @@ def test_ops_alert_feed_and_actions() -> None:
     assert not any(item["id"] == target_id for item in feed_after.json()["items"])
 
 
+def test_ops_privacy_status_and_update() -> None:
+    before = client.get("/ops/privacy/status")
+    assert before.status_code == 200
+    body = before.json()
+    assert body["safeStorageDefault"] is True
+    assert "redactionEnabled" in body
+
+    flipped = client.post("/ops/privacy/update", json={"redactionEnabled": not body["redactionEnabled"]})
+    assert flipped.status_code == 200
+    flipped_body = flipped.json()
+    assert flipped_body["redactionEnabled"] is (not body["redactionEnabled"])
+
+    reset = client.post("/ops/privacy/update", json={"redactionEnabled": True})
+    assert reset.status_code == 200
+    assert reset.json()["redactionEnabled"] is True
+
+
+def test_ops_web_scrape_storage_redaction_applies_to_note() -> None:
+    html = """
+    <html>
+      <head><title>Sensitive Page</title></head>
+      <body>
+        Contact john.doe@example.com and password=TopSecret123 for support.
+      </body>
+    </html>
+    """.encode("utf-8")
+    client.post("/ops/privacy/update", json={"redactionEnabled": True})
+    client.post(
+        "/control/permissions",
+        json={"scope": "domain", "subject": "example.com", "decision": "allow"},
+    )
+
+    with patch("mindi_agent.store.urlopen") as mock_urlopen:
+        mock_urlopen.return_value = _MockUrlResponse(html)
+        response = client.post(
+            "/ops/web/scrape",
+            json={"url": "https://example.com/private", "storeAsNote": True},
+        )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["accepted"] is True
+    assert body["storageRedacted"] is True
+    assert body["redactionCount"] >= 1
+
+    notes = client.get("/memory/search?query=Sensitive Page")
+    assert notes.status_code == 200
+    items = notes.json()["items"]
+    assert items
+    assert any("[REDACTED_EMAIL]" in item["content"] or "[REDACTED_PASSWORD]" in item["content"] for item in items)
+
+
+def test_perception_storage_redaction_applies_to_snapshot() -> None:
+    marker = "perception-private-marker-8891"
+    client.post("/ops/privacy/update", json={"redactionEnabled": True})
+    client.post(
+        "/control/permissions",
+        json={"scope": "action", "subject": "perception.screen.capture", "decision": "allow"},
+    )
+    image = Image.new("RGB", (220, 120), color="white")
+    draw = ImageDraw.Draw(image)
+    draw.rectangle([10, 10, 160, 36], fill="black")
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+    data_url = f"data:image/png;base64,{encoded}"
+
+    with patch("mindi_agent.store.extract_text_for_ocr") as mock_ocr:
+        mock_ocr.return_value = (f"{marker} email admin@example.com", "image_ocr")
+        analyzed = client.post(
+            "/perception/screen/analyze",
+            json={"imageDataUrl": data_url, "includeOcr": True, "maxBlocks": 6},
+        )
+    assert analyzed.status_code == 200
+    analyzed_body = analyzed.json()
+    assert analyzed_body["accepted"] is True
+    assert analyzed_body["storageRedacted"] is True
+    assert analyzed_body["redactionCount"] >= 1
+
+    searched = client.get(f"/memory/perception/search?query={marker}&limit=10")
+    assert searched.status_code == 200
+    items = searched.json()["items"]
+    assert items
+    assert any("[REDACTED_EMAIL]" in (item.get("text") or "") for item in items)
+
+
 def test_perception_permissions_status_defaults_unset() -> None:
     response = client.get("/perception/permissions")
     assert response.status_code == 200
