@@ -512,7 +512,8 @@ export interface IntelligenceTuningStageRequest {
 }
 
 export interface IntelligenceEvalRunRequest {
-  scope?: "active" | "pending";
+  scope?: "active" | "pending" | "learning";
+  terms?: string[];
 }
 
 export interface IntelligenceEvalCaseResult {
@@ -528,11 +529,13 @@ export interface IntelligenceEvalRunResponse {
   reason: string;
   runId: string;
   createdAt: string;
-  scope: "active" | "pending";
+  scope: "active" | "pending" | "learning";
   gatePassed: boolean;
   totalCases: number;
   passedCases: number;
   score: number;
+  candidateVersion?: string;
+  evaluatedTerms: string[];
   cases: IntelligenceEvalCaseResult[];
 }
 
@@ -564,8 +567,13 @@ export interface IntelligenceLearningCandidate {
 export interface IntelligenceLearningStatus {
   approvedSources: IntelligenceLearningSourceSummary[];
   candidates: IntelligenceLearningCandidate[];
+  candidateVersion?: string;
   lastRunAt?: string;
+  lastEvalScore?: number;
+  lastEvalVersion?: string;
   lastAppliedAt?: string;
+  minApplyScore: number;
+  canApplyCandidates: boolean;
 }
 
 export interface IntelligenceLearningSourceResponse {
