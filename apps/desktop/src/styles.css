@@ -1,0 +1,164 @@
+:root {
+  --bg0: #070b10;
+  --bg1: #0f1a22;
+  --bg2: #142634;
+  --line: #23465f;
+  --text: #e7f6ff;
+  --muted: #98b6c8;
+  --ok: #4ce5a2;
+  --warn: #f0bb4d;
+  --danger: #ff6d6d;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  color: var(--text);
+  font-family:
+    "IBM Plex Sans",
+    "Segoe UI",
+    sans-serif;
+  background:
+    radial-gradient(circle at 20% 10%, #19354a 0%, transparent 45%),
+    radial-gradient(circle at 80% 80%, #143444 0%, transparent 40%),
+    var(--bg0);
+}
+
+.frame {
+  width: min(1180px, calc(100vw - 24px));
+  margin: 12px auto;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: linear-gradient(160deg, rgba(13, 24, 33, 0.94), rgba(9, 16, 22, 0.96));
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.32);
+  overflow: hidden;
+}
+
+.topbar {
+  display: grid;
+  grid-template-columns: auto auto 1fr;
+  gap: 14px;
+  align-items: center;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+.brand {
+  font-weight: 700;
+  letter-spacing: 0.1em;
+}
+
+.badge {
+  text-transform: uppercase;
+  font-size: 0.75rem;
+  padding: 2px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+}
+
+.state-ready {
+  color: var(--ok);
+}
+
+.state-offline {
+  color: var(--warn);
+}
+
+.state-busy,
+.state-blocked {
+  color: var(--danger);
+}
+
+.meta {
+  color: var(--muted);
+  justify-self: end;
+  font-size: 0.85rem;
+}
+
+.tabs {
+  display: flex;
+  gap: 8px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--line);
+  overflow-x: auto;
+}
+
+.tab {
+  border: 1px solid var(--line);
+  background: var(--bg1);
+  color: var(--muted);
+  border-radius: 999px;
+  padding: 6px 12px;
+  cursor: pointer;
+}
+
+.tab.active {
+  color: var(--text);
+  background: linear-gradient(180deg, var(--bg2), var(--bg1));
+}
+
+.hub {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  padding: 12px;
+}
+
+.card {
+  background: rgba(17, 34, 47, 0.56);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 12px;
+}
+
+.card h3 {
+  margin-top: 0;
+}
+
+.row {
+  display: flex;
+  justify-content: flex-end;
+}
+
+button,
+input {
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  padding: 8px 10px;
+  background: var(--bg2);
+  color: var(--text);
+}
+
+.chatbox {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+}
+
+.assistant-reply {
+  color: var(--muted);
+}
+
+.toggles {
+  display: grid;
+  gap: 8px;
+}
+
+@media (max-width: 1000px) {
+  .hub {
+    grid-template-columns: 1fr;
+  }
+
+  .topbar {
+    grid-template-columns: auto auto;
+  }
+
+  .meta {
+    grid-column: 1 / -1;
+    justify-self: start;
+  }
+}
