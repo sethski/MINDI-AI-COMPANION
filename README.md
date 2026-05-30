@@ -104,6 +104,11 @@ Windows-first local assistant. Current repo layout:
   - Executes multi-step chains across scrape/task/note/security-scan steps.
   - Returns per-step status, failure index, and recovery hints for failed chain runs.
   - Ops tab includes automation-chain runner with step-by-step result panel.
+- Alerts and recovery flows:
+  - `GET /ops/alerts/feed`
+  - `POST /ops/alerts/action`
+  - Prioritized alert feed with severity counts and top-risk ordering.
+  - Alert actions: dismiss, create recovery task, and export alert report (JSON with recent logs).
 
 ## Run Desktop
 
