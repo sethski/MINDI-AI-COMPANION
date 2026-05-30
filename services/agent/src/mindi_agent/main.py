@@ -8,6 +8,7 @@ from .schemas import (
     CreateMemoryNoteRequest,
     CreateTaskRequest,
     TaskStatusUpdateRequest,
+    TaskUpdateRequest,
     DocumentImportRequest,
     FileOrganizeRequest,
     OcrImportRequest,
@@ -62,6 +63,22 @@ def update_task_status(task_id: str, payload: TaskStatusUpdateRequest):
     if task is None:
         raise HTTPException(status_code=404, detail="task_not_found")
     return task
+
+
+@app.patch("/tasks/{task_id}")
+def update_task(task_id: str, payload: TaskUpdateRequest):
+    task = store.update_task(task_id=task_id, request=payload)
+    if task is None:
+        raise HTTPException(status_code=404, detail="task_not_found")
+    return task
+
+
+@app.delete("/tasks/{task_id}")
+def delete_task(task_id: str):
+    removed = store.delete_task(task_id=task_id)
+    if removed is None:
+        raise HTTPException(status_code=404, detail="task_not_found")
+    return {"accepted": True, "deletedId": task_id}
 
 
 @app.get("/audit/logs")

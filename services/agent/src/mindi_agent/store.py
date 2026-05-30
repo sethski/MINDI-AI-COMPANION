@@ -34,6 +34,7 @@ from .schemas import (
     CreateMemoryNoteRequest,
     CreateTaskRequest,
     TaskStatusUpdateRequest,
+    TaskUpdateRequest,
     DocumentImportRequest,
     DocumentImportResponse,
     DocumentSearchResponse,
@@ -208,6 +209,34 @@ class RuntimeStore:
             if request.status != "done":
                 self.scheduler_alerted_due.pop(task.id, None)
             return task
+        return None
+
+    def update_task(self, task_id: str, request: TaskUpdateRequest) -> TaskItem | None:
+        for task in self.tasks:
+            if task.id != task_id:
+                continue
+            if "title" in request.model_fields_set and request.title is not None:
+                task.title = request.title
+            if "dueAt" in request.model_fields_set:
+                task.dueAt = request.dueAt
+                task.nextRunAt = request.dueAt
+                self.scheduler_alerted_due.pop(task.id, None)
+            if "recurrence" in request.model_fields_set:
+                task.recurrence = request.recurrence
+            if "status" in request.model_fields_set and request.status is not None:
+                task.status = request.status
+                if request.status != "done":
+                    self.scheduler_alerted_due.pop(task.id, None)
+            return task
+        return None
+
+    def delete_task(self, task_id: str) -> TaskItem | None:
+        for index, task in enumerate(self.tasks):
+            if task.id != task_id:
+                continue
+            removed = self.tasks.pop(index)
+            self.scheduler_alerted_due.pop(task_id, None)
+            return removed
         return None
 
     def enqueue_sync(self, request: SyncQueueRequest) -> dict:
