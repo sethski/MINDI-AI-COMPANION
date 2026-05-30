@@ -4,10 +4,13 @@ import type {
   AppControlResponse,
   AssistantRequest,
   AssistantResponse,
+  CreateMemoryNoteRequest,
   CreateTaskRequest,
   FileOrganizeRequest,
   FileOrganizeResponse,
   HubSnapshot,
+  MemoryNote,
+  MemorySearchResponse,
   PermissionGrant,
   TaskItem,
 } from "@mindi/shared";
@@ -82,4 +85,22 @@ export async function appControlAction(
     method: "POST",
     body: JSON.stringify(payload),
   });
+}
+
+export async function listMemoryNotes(limit = 50): Promise<MemoryNote[]> {
+  return agentFetch<MemoryNote[]>(`/memory/notes?limit=${limit}`);
+}
+
+export async function createMemoryNote(
+  payload: CreateMemoryNoteRequest,
+): Promise<MemoryNote> {
+  return agentFetch<MemoryNote>("/memory/notes", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function searchMemory(query: string, limit = 50): Promise<MemorySearchResponse> {
+  const encoded = encodeURIComponent(query);
+  return agentFetch<MemorySearchResponse>(`/memory/search?query=${encoded}&limit=${limit}`);
 }
