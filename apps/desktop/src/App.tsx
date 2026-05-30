@@ -6,6 +6,7 @@ import {
   type AutoIndexStatus,
   type AutomationChainResponse,
   type IntelligenceEvalRunResponse,
+  type IntelligenceTuningStatus,
   type IntelligenceStyleStatus,
   type AssistantResponse,
   type FileOrganizeResponse,
@@ -31,6 +32,7 @@ import {
   createMemoryNote,
   createTask,
   deleteTask,
+  discardIntelligenceTuning,
   updateTaskStatus,
   updateTask,
   fetchAllowedApps,
@@ -58,8 +60,11 @@ import {
   scrapeWeb,
   getPrivacyStatus,
   getIntelligenceStyleStatus,
+  getIntelligenceTuningStatus,
   listIntelligenceEvalHistory,
   runIntelligenceEval,
+  applyIntelligenceTuning,
+  stageIntelligenceTuning,
   updatePrivacyStatus,
   updateIntelligenceStyleStatus,
   exportCalendar,
@@ -152,6 +157,12 @@ export default function App() {
   );
   const [intelligenceSlangEnabled, setIntelligenceSlangEnabled] = useState(false);
   const [intelligenceNewSlang, setIntelligenceNewSlang] = useState("solid");
+  const [intelligenceTuning, setIntelligenceTuning] = useState<IntelligenceTuningStatus | null>(null);
+  const [intelligencePreset, setIntelligencePreset] = useState<"safe" | "balanced" | "companion">("safe");
+  const [intelligenceVerbosity, setIntelligenceVerbosity] = useState<"brief" | "balanced" | "detailed">(
+    "balanced",
+  );
+  const [intelligenceRiskyTerm, setIntelligenceRiskyTerm] = useState("notepad");
   const [intelligenceEvalResult, setIntelligenceEvalResult] = useState<IntelligenceEvalRunResponse | null>(null);
   const [intelligenceEvalHistory, setIntelligenceEvalHistory] = useState<IntelligenceEvalRunResponse[]>([]);
   const [intelligenceStatus, setIntelligenceStatus] = useState("No intelligence run yet.");
@@ -208,6 +219,7 @@ export default function App() {
       getAlertFeed(12),
       getPrivacyStatus(),
       getIntelligenceStyleStatus(),
+      getIntelligenceTuningStatus(),
       listIntelligenceEvalHistory(8),
     ])
       .then(
@@ -224,6 +236,7 @@ export default function App() {
           alertFeedInitial,
           privacyInitial,
           intelligenceStyleInitial,
+          intelligenceTuningInitial,
           intelligenceEvalHistoryInitial,
         ]) => {
         if (!active) {
@@ -246,6 +259,11 @@ export default function App() {
         setIntelligenceStyle(intelligenceStyleInitial);
         setIntelligenceLanguageMode(intelligenceStyleInitial.languageMode);
         setIntelligenceSlangEnabled(intelligenceStyleInitial.slangEnabled);
+        setIntelligenceTuning(intelligenceTuningInitial);
+        setIntelligencePreset((intelligenceTuningInitial.pending ?? intelligenceTuningInitial.active).preset);
+        setIntelligenceVerbosity(
+          (intelligenceTuningInitial.pending ?? intelligenceTuningInitial.active).responseVerbosity,
+        );
         setIntelligenceEvalHistory(intelligenceEvalHistoryInitial);
         setIntelligenceStatus(`Loaded ${intelligenceEvalHistoryInitial.length} eval history items.`);
         if (snapshotItems.length > 0) {
@@ -1379,13 +1397,17 @@ export default function App() {
 
   async function refreshIntelligenceState() {
     try {
-      const [style, history] = await Promise.all([
+      const [style, tuning, history] = await Promise.all([
         getIntelligenceStyleStatus(),
+        getIntelligenceTuningStatus(),
         listIntelligenceEvalHistory(8),
       ]);
       setIntelligenceStyle(style);
       setIntelligenceLanguageMode(style.languageMode);
       setIntelligenceSlangEnabled(style.slangEnabled);
+      setIntelligenceTuning(tuning);
+      setIntelligencePreset((tuning.pending ?? tuning.active).preset);
+      setIntelligenceVerbosity((tuning.pending ?? tuning.active).responseVerbosity);
       setIntelligenceEvalHistory(history);
       setIntelligenceStatus(`Intelligence loaded: ${history.length} eval runs.`);
     } catch {
@@ -1422,7 +1444,7 @@ export default function App() {
 
   async function runIntelligenceEvalNow() {
     try {
-      const result = await runIntelligenceEval();
+      const result = await runIntelligenceEval({ scope: "active" });
       setIntelligenceEvalResult(result);
       const history = await listIntelligenceEvalHistory(8);
       setIntelligenceEvalHistory(history);
@@ -1431,6 +1453,71 @@ export default function App() {
       );
     } catch {
       setIntelligenceStatus("Eval run failed.");
+    }
+  }
+
+  async function runIntelligenceTuningStage() {
+    const riskyTerm = intelligenceRiskyTerm.trim();
+    try {
+      const tuning = await stageIntelligenceTuning({
+        preset: intelligencePreset,
+        responseVerbosity: intelligenceVerbosity,
+        addCustomRiskyTerms: riskyTerm ? [riskyTerm] : [],
+      });
+      setIntelligenceTuning(tuning);
+      setIntelligencePreset((tuning.pending ?? tuning.active).preset);
+      setIntelligenceVerbosity((tuning.pending ?? tuning.active).responseVerbosity);
+      setIntelligenceStatus(`Pending tuning staged: ${tuning.pendingVersion ?? "unknown"}.`);
+    } catch {
+      setIntelligenceStatus("Pending tuning stage failed.");
+    }
+  }
+
+  async function runIntelligencePendingEval() {
+    try {
+      const result = await runIntelligenceEval({ scope: "pending" });
+      setIntelligenceEvalResult(result);
+      const [tuning, history] = await Promise.all([
+        getIntelligenceTuningStatus(),
+        listIntelligenceEvalHistory(8),
+      ]);
+      setIntelligenceTuning(tuning);
+      setIntelligencePreset((tuning.pending ?? tuning.active).preset);
+      setIntelligenceVerbosity((tuning.pending ?? tuning.active).responseVerbosity);
+      setIntelligenceEvalHistory(history);
+      setIntelligenceStatus(
+        result.accepted
+          ? `Pending eval: score=${result.score.toFixed(2)} gate=${String(result.gatePassed)}.`
+          : "No pending tuning candidate to evaluate.",
+      );
+    } catch {
+      setIntelligenceStatus("Pending eval failed.");
+    }
+  }
+
+  async function runIntelligenceTuningApplyNow() {
+    try {
+      const response = await applyIntelligenceTuning();
+      setIntelligenceTuning(response.status);
+      setIntelligencePreset((response.status.pending ?? response.status.active).preset);
+      setIntelligenceVerbosity((response.status.pending ?? response.status.active).responseVerbosity);
+      setIntelligenceStatus(
+        response.accepted ? "Pending tuning applied." : `Apply blocked: ${response.reason}.`,
+      );
+    } catch {
+      setIntelligenceStatus("Apply tuning failed.");
+    }
+  }
+
+  async function runIntelligenceTuningDiscardNow() {
+    try {
+      const tuning = await discardIntelligenceTuning();
+      setIntelligenceTuning(tuning);
+      setIntelligencePreset((tuning.pending ?? tuning.active).preset);
+      setIntelligenceVerbosity((tuning.pending ?? tuning.active).responseVerbosity);
+      setIntelligenceStatus("Pending tuning discarded.");
+    } catch {
+      setIntelligenceStatus("Discard pending tuning failed.");
     }
   }
 
@@ -2179,6 +2266,18 @@ export default function App() {
               style: {intelligenceStyle ? intelligenceStyle.languageMode : "unknown"} | slang=
               {intelligenceStyle ? String(intelligenceStyle.slangEnabled) : "unknown"}
             </p>
+            <p>
+              active tuning:{" "}
+              {intelligenceTuning
+                ? `${intelligenceTuning.active.preset}/${intelligenceTuning.active.responseVerbosity}`
+                : "unknown"}
+            </p>
+            <p>
+              pending tuning:{" "}
+              {intelligenceTuning?.pending
+                ? `${intelligenceTuning.pending.preset}/${intelligenceTuning.pending.responseVerbosity}`
+                : "none"}
+            </p>
             <div className="stack">
               <label>
                 Language mode
@@ -2206,6 +2305,37 @@ export default function App() {
                 onChange={(event) => setIntelligenceNewSlang(event.target.value)}
                 placeholder="Add slang term"
               />
+              <label>
+                Preset
+                <select
+                  value={intelligencePreset}
+                  onChange={(event) =>
+                    setIntelligencePreset(event.target.value as "safe" | "balanced" | "companion")
+                  }
+                >
+                  <option value="safe">Safe</option>
+                  <option value="balanced">Balanced</option>
+                  <option value="companion">Companion</option>
+                </select>
+              </label>
+              <label>
+                Response verbosity
+                <select
+                  value={intelligenceVerbosity}
+                  onChange={(event) =>
+                    setIntelligenceVerbosity(event.target.value as "brief" | "balanced" | "detailed")
+                  }
+                >
+                  <option value="brief">Brief</option>
+                  <option value="balanced">Balanced</option>
+                  <option value="detailed">Detailed</option>
+                </select>
+              </label>
+              <input
+                value={intelligenceRiskyTerm}
+                onChange={(event) => setIntelligenceRiskyTerm(event.target.value)}
+                placeholder="Add custom risky term"
+              />
               <div className="row left">
                 <button type="button" onClick={() => void runIntelligenceStyleUpdate()}>
                   Apply Style
@@ -2217,11 +2347,36 @@ export default function App() {
                   Refresh
                 </button>
               </div>
+              <div className="row left">
+                <button type="button" onClick={() => void runIntelligenceTuningStage()}>
+                  Stage Candidate
+                </button>
+                <button type="button" onClick={() => void runIntelligencePendingEval()}>
+                  Eval Pending
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void runIntelligenceTuningApplyNow()}
+                  disabled={!intelligenceTuning?.canApplyPending}
+                >
+                  Apply Pending
+                </button>
+                <button type="button" onClick={() => void runIntelligenceTuningDiscardNow()}>
+                  Discard Pending
+                </button>
+              </div>
             </div>
             <p className="assistant-reply">{intelligenceStatus}</p>
+            <p>
+              gate:{" "}
+              {intelligenceTuning
+                ? `${String(intelligenceTuning.canApplyPending)} (min=${intelligenceTuning.minApplyScore.toFixed(2)})`
+                : "unknown"}
+            </p>
             {intelligenceEvalResult ? (
               <p>
-                latest score={intelligenceEvalResult.score.toFixed(2)} (
+                latest {intelligenceEvalResult.scope} score={intelligenceEvalResult.score.toFixed(2)} gate=
+                {String(intelligenceEvalResult.gatePassed)} (
                 {intelligenceEvalResult.passedCases}/{intelligenceEvalResult.totalCases})
               </p>
             ) : null}
@@ -2239,8 +2394,8 @@ export default function App() {
             <ul>
               {intelligenceEvalHistory.map((item) => (
                 <li key={item.runId}>
-                  {formatIsoTime(item.createdAt)} | score={item.score.toFixed(2)} | passed=
-                  {item.passedCases}/{item.totalCases}
+                  {formatIsoTime(item.createdAt)} | {item.scope} | score={item.score.toFixed(2)} | gate=
+                  {String(item.gatePassed)} | passed={item.passedCases}/{item.totalCases}
                 </li>
               ))}
               {intelligenceEvalHistory.length === 0 ? <li>No eval history yet.</li> : null}
