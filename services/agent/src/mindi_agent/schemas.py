@@ -157,5 +157,38 @@ class MemorySearchResponse(BaseModel):
     items: list[MemoryNote]
 
 
+class DocumentImportRequest(BaseModel):
+    path: str
+
+
+class MemoryDocument(BaseModel):
+    id: str
+    sourcePath: str
+    title: str
+    importedAt: str
+    chunkCount: int
+
+
+class MemoryDocumentChunk(BaseModel):
+    id: str
+    documentId: str
+    sourcePath: str
+    title: str
+    text: str
+    chunkIndex: int
+    score: float
+
+
+class DocumentImportResponse(BaseModel):
+    accepted: bool
+    reason: str
+    document: MemoryDocument | None = None
+
+
+class DocumentSearchResponse(BaseModel):
+    query: str
+    items: list[MemoryDocumentChunk]
+
+
 def now_iso() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")

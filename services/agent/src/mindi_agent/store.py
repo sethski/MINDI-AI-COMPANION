@@ -18,10 +18,15 @@ from .schemas import (
     AssistantResponse,
     CreateMemoryNoteRequest,
     CreateTaskRequest,
+    DocumentImportRequest,
+    DocumentImportResponse,
+    DocumentSearchResponse,
     FileOrganizeItem,
     FileOrganizeRequest,
     FileOrganizeResponse,
     HubSnapshot,
+    MemoryDocument,
+    MemoryDocumentChunk,
     MemoryNote,
     MemorySearchResponse,
     PermissionGrant,
@@ -361,3 +366,32 @@ class RuntimeStore:
 
     def search_memory(self, query: str, limit: int = 50) -> MemorySearchResponse:
         return MemorySearchResponse(query=query, items=self.memory_db.search_notes(query, limit=limit))
+
+    def import_document(self, request: DocumentImportRequest) -> DocumentImportResponse:
+        source = Path(request.path).resolve()
+        if not source.exists() or not source.is_file():
+            return DocumentImportResponse(accepted=False, reason="document_not_found")
+        if not self._is_path_allowed(source):
+            return DocumentImportResponse(accepted=False, reason="folder_not_allowed")
+
+        try:
+            document = self.memory_db.import_document(source)
+        except ValueError as exc:
+            return DocumentImportResponse(accepted=False, reason=str(exc))
+
+        self.logs.insert(
+            0,
+            ActionLogItem(
+                id=str(uuid4()),
+                intent=f"document_import:{source.name}",
+                tier=ActionTier.reversible,
+                result="allowed",
+                reason="document_indexed",
+                createdAt=now_iso(),
+            ),
+        )
+        return DocumentImportResponse(accepted=True, reason="indexed", document=document)
+
+    def search_documents(self, query: str, limit: int = 20) -> DocumentSearchResponse:
+        items = self.memory_db.search_documents(query=query, limit=limit)
+        return DocumentSearchResponse(query=query, items=items)

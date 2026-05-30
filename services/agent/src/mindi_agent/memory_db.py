@@ -3,7 +3,43 @@ import sqlite3
 from threading import Lock
 from uuid import uuid4
 
-from .schemas import CreateMemoryNoteRequest, MemoryNote, now_iso
+from .schemas import CreateMemoryNoteRequest, MemoryDocument, MemoryDocumentChunk, MemoryNote, now_iso
+
+ALLOWED_DOCUMENT_SUFFIXES = {
+    ".txt",
+    ".md",
+    ".json",
+    ".csv",
+    ".log",
+    ".py",
+    ".ts",
+    ".tsx",
+    ".js",
+    ".jsx",
+    ".html",
+    ".css",
+    ".yaml",
+    ".yml",
+}
+
+
+def chunk_text(text: str, chunk_size: int = 700, overlap: int = 120) -> list[str]:
+    clean = " ".join(text.split())
+    if not clean:
+        return []
+    if len(clean) <= chunk_size:
+        return [clean]
+
+    chunks: list[str] = []
+    step = max(1, chunk_size - overlap)
+    start = 0
+    while start < len(clean):
+        end = min(len(clean), start + chunk_size)
+        chunks.append(clean[start:end])
+        if end >= len(clean):
+            break
+        start += step
+    return chunks
 
 
 class MemoryDB:
@@ -30,6 +66,28 @@ class MemoryDB:
                   tags TEXT NOT NULL,
                   created_at TEXT NOT NULL,
                   updated_at TEXT NOT NULL
+                );
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS memory_documents (
+                  id TEXT PRIMARY KEY,
+                  source_path TEXT NOT NULL UNIQUE,
+                  title TEXT NOT NULL,
+                  imported_at TEXT NOT NULL,
+                  chunk_count INTEGER NOT NULL
+                );
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS memory_document_chunks (
+                  id TEXT PRIMARY KEY,
+                  document_id TEXT NOT NULL,
+                  chunk_index INTEGER NOT NULL,
+                  text TEXT NOT NULL,
+                  FOREIGN KEY(document_id) REFERENCES memory_documents(id)
                 );
                 """
             )
@@ -88,6 +146,103 @@ class MemoryDB:
             ).fetchall()
         return [self._row_to_note(row) for row in rows]
 
+    def import_document(self, source_path: Path) -> MemoryDocument:
+        text = self._read_text_file(source_path)
+        chunks = chunk_text(text)
+        imported_at = now_iso()
+        title = source_path.name
+
+        with self._lock, self._connect() as conn:
+            existing = conn.execute(
+                "SELECT id FROM memory_documents WHERE source_path = ?;",
+                (str(source_path),),
+            ).fetchone()
+            if existing:
+                document_id = existing["id"]
+                conn.execute(
+                    """
+                    UPDATE memory_documents
+                    SET title = ?, imported_at = ?, chunk_count = ?
+                    WHERE id = ?;
+                    """,
+                    (title, imported_at, len(chunks), document_id),
+                )
+                conn.execute(
+                    "DELETE FROM memory_document_chunks WHERE document_id = ?;",
+                    (document_id,),
+                )
+            else:
+                document_id = str(uuid4())
+                conn.execute(
+                    """
+                    INSERT INTO memory_documents (id, source_path, title, imported_at, chunk_count)
+                    VALUES (?, ?, ?, ?, ?);
+                    """,
+                    (document_id, str(source_path), title, imported_at, len(chunks)),
+                )
+
+            for index, chunk in enumerate(chunks):
+                conn.execute(
+                    """
+                    INSERT INTO memory_document_chunks (id, document_id, chunk_index, text)
+                    VALUES (?, ?, ?, ?);
+                    """,
+                    (str(uuid4()), document_id, index, chunk),
+                )
+            conn.commit()
+
+        return MemoryDocument(
+            id=document_id,
+            sourcePath=str(source_path),
+            title=title,
+            importedAt=imported_at,
+            chunkCount=len(chunks),
+        )
+
+    def search_documents(self, query: str, limit: int = 20) -> list[MemoryDocumentChunk]:
+        q = query.strip()
+        if not q:
+            return []
+
+        pattern = f"%{q}%"
+        with self._lock, self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                  c.id,
+                  c.document_id,
+                  c.chunk_index,
+                  c.text,
+                  d.source_path,
+                  d.title
+                FROM memory_document_chunks c
+                INNER JOIN memory_documents d ON d.id = c.document_id
+                WHERE c.text LIKE ? OR d.title LIKE ?
+                ORDER BY c.chunk_index ASC
+                LIMIT ?;
+                """,
+                (pattern, pattern, max(1, min(limit, 200))),
+            ).fetchall()
+
+        q_low = q.lower()
+        result: list[MemoryDocumentChunk] = []
+        for row in rows:
+            text = row["text"]
+            score = float(text.lower().count(q_low)) + (1.0 if q_low in row["title"].lower() else 0.0)
+            result.append(
+                MemoryDocumentChunk(
+                    id=row["id"],
+                    documentId=row["document_id"],
+                    sourcePath=row["source_path"],
+                    title=row["title"],
+                    text=text,
+                    chunkIndex=row["chunk_index"],
+                    score=score,
+                )
+            )
+        result.sort(key=lambda item: item.score, reverse=True)
+        return result
+
     @staticmethod
     def _row_to_note(row: sqlite3.Row) -> MemoryNote:
         tags = [tag for tag in (row["tags"] or "").split(",") if tag]
@@ -99,3 +254,12 @@ class MemoryDB:
             createdAt=row["created_at"],
             updatedAt=row["updated_at"],
         )
+
+    @staticmethod
+    def _read_text_file(path: Path) -> str:
+        if path.suffix.lower() not in ALLOWED_DOCUMENT_SUFFIXES:
+            raise ValueError("unsupported_file_type")
+        size = path.stat().st_size
+        if size > 5 * 1024 * 1024:
+            raise ValueError("file_too_large")
+        return path.read_text(encoding="utf-8", errors="ignore")

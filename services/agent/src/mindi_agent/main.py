@@ -7,6 +7,7 @@ from .schemas import (
     AssistantRequest,
     CreateMemoryNoteRequest,
     CreateTaskRequest,
+    DocumentImportRequest,
     FileOrganizeRequest,
     SyncQueueRequest,
 )
@@ -97,3 +98,16 @@ def create_memory_note(payload: CreateMemoryNoteRequest):
 @app.get("/memory/search")
 def memory_search(q: str = Query(default="", alias="query"), limit: int = Query(default=50, ge=1, le=200)):
     return store.search_memory(query=q, limit=limit)
+
+
+@app.post("/memory/documents/import")
+def memory_document_import(payload: DocumentImportRequest):
+    return store.import_document(payload)
+
+
+@app.get("/memory/documents/search")
+def memory_document_search(
+    q: str = Query(default="", alias="query"),
+    limit: int = Query(default=20, ge=1, le=200),
+):
+    return store.search_documents(query=q, limit=limit)
