@@ -1,0 +1,14 @@
+node_modules/
+dist/
+build/
+target/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.sqlite3
+*.log
+apps/desktop/src-tauri/target/
+data/runtime/
+
