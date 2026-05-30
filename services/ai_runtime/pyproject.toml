@@ -7,5 +7,6 @@ dependencies = [
   "uvicorn>=0.32.0",
   "pydantic>=2.9.2",
   "Pillow>=11.0.0",
-  "pytesseract>=0.3.13"
+  "pytesseract>=0.3.13",
+  "qwen-asr>=0.4.0"
 ]
