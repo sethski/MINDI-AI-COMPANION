@@ -3,6 +3,7 @@ import {
   QUICK_TOGGLES,
   TAB_ORDER,
   type AiRuntimeStatusResponse,
+  type AiRuntimeSmokeResponse,
   type AlertFeedResponse,
   type AsrTranscribeResponse,
   type AutoIndexStatus,
@@ -35,6 +36,7 @@ import {
   getAiRuntimeStatus,
   updateAiRuntimeConfig,
   transcribeAsr,
+  runAiSmoke,
   prepareDataset,
   addPermissionGrant,
   appControlAction,
@@ -203,6 +205,11 @@ export default function App() {
   const [asrLanguageHint, setAsrLanguageHint] = useState("");
   const [asrReturnTimestamps, setAsrReturnTimestamps] = useState(false);
   const [asrResult, setAsrResult] = useState<AsrTranscribeResponse | null>(null);
+  const [aiSmokePrompt, setAiSmokePrompt] = useState("Summarize local runtime status in one sentence.");
+  const [aiSmokeLanguageMode, setAiSmokeLanguageMode] = useState<"english" | "taglish" | "tagalog">("english");
+  const [aiSmokeAsrPath, setAiSmokeAsrPath] = useState("data/inbox/sample.wav");
+  const [aiSmokeOcrPath, setAiSmokeOcrPath] = useState("data/inbox/sample.png");
+  const [aiSmokeResult, setAiSmokeResult] = useState<AiRuntimeSmokeResponse | null>(null);
   const [datasetPath, setDatasetPath] = useState("data/datasets/ph-pretrain");
   const [datasetOutputDir, setDatasetOutputDir] = useState("data/runtime/intelligence");
   const [datasetPrepResult, setDatasetPrepResult] = useState<DatasetPrepareResponse | null>(null);
@@ -1880,6 +1887,29 @@ export default function App() {
     }
   }
 
+  async function runAiRuntimeSmoke() {
+    try {
+      const result = await runAiSmoke({
+        includeLlm: true,
+        includeAsr: Boolean(aiSmokeAsrPath.trim()),
+        includeOcr: Boolean(aiSmokeOcrPath.trim()),
+        llmPrompt: aiSmokePrompt.trim() || "Summarize local runtime status in one sentence.",
+        languageMode: aiSmokeLanguageMode,
+        asrFilePath: aiSmokeAsrPath.trim() || undefined,
+        ocrImagePath: aiSmokeOcrPath.trim() || undefined,
+      });
+      setAiSmokeResult(result);
+      if (result.accepted) {
+        setOpsStatus("AI smoke benchmark complete.");
+      } else {
+        setOpsStatus(`AI smoke benchmark finished with failures: ${result.reason}`);
+      }
+      await refreshAiRuntimeState();
+    } catch {
+      setOpsStatus("AI smoke benchmark request failed.");
+    }
+  }
+
   async function runDatasetPreparation() {
     try {
       const result = await prepareDataset({
@@ -2473,6 +2503,68 @@ export default function App() {
                 : "No ASR run yet."}
             </p>
             {asrResult?.text ? <p className="assistant-reply">{asrResult.text}</p> : null}
+          </div>
+
+          <div className="card">
+            <h3>AI Smoke + Benchmark</h3>
+            <div className="stack">
+              <label>
+                LLM language mode
+                <select
+                  value={aiSmokeLanguageMode}
+                  onChange={(event) =>
+                    setAiSmokeLanguageMode(event.target.value as "english" | "taglish" | "tagalog")
+                  }
+                >
+                  <option value="english">English</option>
+                  <option value="taglish">Taglish</option>
+                  <option value="tagalog">Tagalog</option>
+                </select>
+              </label>
+              <input
+                value={aiSmokePrompt}
+                onChange={(event) => setAiSmokePrompt(event.target.value)}
+                placeholder="LLM smoke prompt"
+              />
+              <input
+                value={aiSmokeAsrPath}
+                onChange={(event) => setAiSmokeAsrPath(event.target.value)}
+                placeholder="ASR benchmark audio path (optional)"
+              />
+              <input
+                value={aiSmokeOcrPath}
+                onChange={(event) => setAiSmokeOcrPath(event.target.value)}
+                placeholder="OCR benchmark image path (optional)"
+              />
+              <button type="button" onClick={() => void runAiRuntimeSmoke()}>
+                Run AI Smoke + Benchmark
+              </button>
+            </div>
+            <p>
+              {aiSmokeResult
+                ? `accepted=${String(aiSmokeResult.accepted)} reason=${aiSmokeResult.reason}`
+                : "No smoke benchmark run yet."}
+            </p>
+            {aiSmokeResult ? (
+              <ul>
+                <li>
+                  llm: attempted={String(aiSmokeResult.probes.llm.attempted)} accepted=
+                  {String(aiSmokeResult.probes.llm.accepted)} reason={aiSmokeResult.probes.llm.reason} latencyMs=
+                  {aiSmokeResult.probes.llm.latencyMs ?? "n/a"}
+                </li>
+                <li>
+                  asr: attempted={String(aiSmokeResult.probes.asr.attempted)} accepted=
+                  {String(aiSmokeResult.probes.asr.accepted)} reason={aiSmokeResult.probes.asr.reason} latencyMs=
+                  {aiSmokeResult.probes.asr.latencyMs ?? "n/a"} segments=
+                  {aiSmokeResult.probes.asr.segmentCount ?? "n/a"}
+                </li>
+                <li>
+                  ocr: attempted={String(aiSmokeResult.probes.ocr.attempted)} accepted=
+                  {String(aiSmokeResult.probes.ocr.accepted)} reason={aiSmokeResult.probes.ocr.reason} latencyMs=
+                  {aiSmokeResult.probes.ocr.latencyMs ?? "n/a"}
+                </li>
+              </ul>
+            ) : null}
           </div>
 
           <div className="card">
