@@ -118,6 +118,10 @@ Windows-first local assistant. Current repo layout:
   - `POST /ops/ai/smoke`
   - Runs runtime probes for LLM/ASR/OCR with typed pass/fail reasons and per-feature latency metadata.
   - Ops tab includes a smoke runner for real local model-path validation before release.
+  - CLI capture helper: `pnpm ops:ai-smoke`
+    - Saves timestamped JSON artifacts to `data/runtime/benchmarks/ai_smoke_*.json`.
+    - Optional full probe command:
+      - `pnpm ops:ai-smoke -- --include-asr --include-ocr --asr-file-path C:/path/sample.wav --ocr-image-path C:/path/sample.png --language-mode taglish`
 
 ## Current Implementation (Phase 6 Intelligence)
 
@@ -185,6 +189,8 @@ Release hardening checklist:
 - Validate degraded fallback paths before release:
   - `/assistant/respond` falls back to rule-based response when runtime LLM fails.
   - `/memory/ocr/import` and `/perception/screen/analyze` preserve response structure when OCR runtime fails.
+- Capture and archive a smoke baseline artifact with `pnpm ops:ai-smoke` (or full probe variant) before packaging.
+  - Commit a normalized baseline snapshot under `docs/benchmarks/` for release traceability.
 - Run `pnpm test:agent` before packaging.
 
 ## Test Agent
