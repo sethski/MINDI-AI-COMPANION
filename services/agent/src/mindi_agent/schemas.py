@@ -269,6 +269,8 @@ class AiRuntimeFeatureStatus(BaseModel):
     provider: str = ""
     model: str = ""
     lastError: str | None = None
+    lastLatencyMs: int | None = None
+    lastFailureReason: str | None = None
 
 
 class AiRuntimeServiceStatus(BaseModel):

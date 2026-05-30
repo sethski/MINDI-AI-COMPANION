@@ -98,6 +98,8 @@ class LocalAiRuntimeClient:
                 "provider": str(cfg.get("llmProvider", "llama.cpp")),
                 "model": str(cfg.get("llmModel", "Qwen/Qwen2.5-7B-Instruct")),
                 "lastError": "runtime_unreachable",
+                "lastLatencyMs": None,
+                "lastFailureReason": "runtime_unreachable",
             },
             "asr": {
                 "enabled": True,
@@ -107,6 +109,8 @@ class LocalAiRuntimeClient:
                 "provider": str(cfg.get("asrProvider", "huggingface_local")),
                 "model": str(cfg.get("asrModel", "Qwen/Qwen3-ASR-1.7B")),
                 "lastError": "runtime_unreachable",
+                "lastLatencyMs": None,
+                "lastFailureReason": "runtime_unreachable",
             },
             "ocr": {
                 "enabled": True,
@@ -116,6 +120,8 @@ class LocalAiRuntimeClient:
                 "provider": str(cfg.get("ocrProvider", "huggingface_local")),
                 "model": str(cfg.get("ocrModel", "zai-org/GLM-OCR")),
                 "lastError": "runtime_unreachable",
+                "lastLatencyMs": None,
+                "lastFailureReason": "runtime_unreachable",
             },
         }
 
