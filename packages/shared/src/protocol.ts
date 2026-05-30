@@ -272,6 +272,36 @@ export interface OcrImportResponse {
   document?: MemoryDocument;
 }
 
+export interface PerceptionAnalyzeRequest {
+  path?: string;
+  imageDataUrl?: string;
+  includeOcr?: boolean;
+  maxBlocks?: number;
+}
+
+export interface PerceptionUiBlock {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  kind: "text_region";
+  confidence: number;
+  textSnippet?: string;
+}
+
+export interface PerceptionAnalyzeResponse {
+  accepted: boolean;
+  reason: string;
+  path?: string;
+  imageWidth?: number;
+  imageHeight?: number;
+  ocrMode?: string;
+  ocrError?: string;
+  text?: string;
+  textLength: number;
+  blocks: PerceptionUiBlock[];
+}
+
 export interface AutoIndexStatus {
   running: boolean;
   watchedPaths: string[];
