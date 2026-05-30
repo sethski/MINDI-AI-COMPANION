@@ -29,6 +29,8 @@ import type {
   TaskNextRunResponse,
   TaskTimeParseRequest,
   TaskTimeParseResponse,
+  WebScrapeRequest,
+  WebScrapeResponse,
   CalendarExportRequest,
   CalendarExportResponse,
   CalendarImportRequest,
@@ -240,6 +242,15 @@ export async function parseTaskTime(
   payload: TaskTimeParseRequest,
 ): Promise<TaskTimeParseResponse> {
   return agentFetch<TaskTimeParseResponse>("/ops/scheduler/parse-time", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function scrapeWeb(
+  payload: WebScrapeRequest,
+): Promise<WebScrapeResponse> {
+  return agentFetch<WebScrapeResponse>("/ops/web/scrape", {
     method: "POST",
     body: JSON.stringify(payload),
   });
