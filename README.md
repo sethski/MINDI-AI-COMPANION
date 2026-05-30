@@ -29,6 +29,15 @@ Windows-first local assistant. Current repo layout:
 - Audit log entries for file organize runs.
 - Control tab UI for folder allowlist management and file-organize actions.
 
+## Current Implementation (Phase 3 Memory Foundation)
+
+- Local SQLite memory store at `data/runtime/memory.db`.
+- Memory note APIs:
+  - `GET /memory/notes`
+  - `POST /memory/notes`
+  - `GET /memory/search?query=...`
+- Memory tab UI for note creation and retrieval.
+
 ## Run Desktop
 
 ```bash
