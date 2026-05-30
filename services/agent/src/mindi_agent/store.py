@@ -395,7 +395,12 @@ class RuntimeStore:
                 return AsrTranscribeResponse(accepted=False, reason="audio_file_not_allowed")
             source_value = str(source)
 
-        payload = self.ai_runtime.transcribe(source_type=request.sourceType, source_value=source_value)
+        payload = self.ai_runtime.transcribe(
+            source_type=request.sourceType,
+            source_value=source_value,
+            language_hint=request.languageHint,
+            return_timestamps=request.returnTimestamps,
+        )
         segments_payload = payload.get("segments") or []
         segments: list[AsrSegment] = []
         for item in segments_payload:

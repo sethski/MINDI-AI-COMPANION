@@ -32,6 +32,9 @@ class LocalAiRuntimeClient:
             "llmModel": "Qwen/Qwen2.5-7B-Instruct",
             "asrModel": "Qwen/Qwen3-ASR-1.7B",
             "ocrModel": "zai-org/GLM-OCR",
+            "asrLanguageHint": None,
+            "asrReturnTimestamps": False,
+            "asrMaxTokens": 256,
             "offlineMode": True,
             "experimentalAsr": True,
             "experimentalOcr": True,
@@ -170,6 +173,9 @@ class LocalAiRuntimeClient:
             "llmModel",
             "asrModel",
             "ocrModel",
+            "asrLanguageHint",
+            "asrReturnTimestamps",
+            "asrMaxTokens",
             "offlineMode",
             "experimentalAsr",
             "experimentalOcr",
@@ -207,11 +213,23 @@ class LocalAiRuntimeClient:
             "latencyMs": int(payload.get("latencyMs", latency_ms)),
         }
 
-    def transcribe(self, *, source_type: str, source_value: str) -> dict:
+    def transcribe(
+        self,
+        *,
+        source_type: str,
+        source_value: str,
+        language_hint: str | None = None,
+        return_timestamps: bool | None = None,
+    ) -> dict:
+        payload: dict[str, object] = {"sourceType": source_type, "sourceValue": source_value}
+        if language_hint is not None:
+            payload["languageHint"] = language_hint
+        if return_timestamps is not None:
+            payload["returnTimestamps"] = return_timestamps
         ok, payload = self._request(
             "POST",
             "/asr/transcribe",
-            payload={"sourceType": source_type, "sourceValue": source_value},
+            payload=payload,
             timeout=20.0,
         )
         if not ok:

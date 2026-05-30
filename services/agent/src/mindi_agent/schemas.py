@@ -294,6 +294,9 @@ class AiRuntimeConfig(BaseModel):
     llmModel: str = "Qwen/Qwen2.5-7B-Instruct"
     asrModel: str = "Qwen/Qwen3-ASR-1.7B"
     ocrModel: str = "zai-org/GLM-OCR"
+    asrLanguageHint: str | None = None
+    asrReturnTimestamps: bool = False
+    asrMaxTokens: int = 256
     offlineMode: bool = True
     experimentalAsr: bool = True
     experimentalOcr: bool = True
@@ -321,6 +324,9 @@ class AiRuntimeConfigUpdateRequest(BaseModel):
     llmModel: str | None = None
     asrModel: str | None = None
     ocrModel: str | None = None
+    asrLanguageHint: str | None = None
+    asrReturnTimestamps: bool | None = None
+    asrMaxTokens: int | None = None
     offlineMode: bool | None = None
     experimentalAsr: bool | None = None
     experimentalOcr: bool | None = None
@@ -335,6 +341,8 @@ class AsrSegment(BaseModel):
 class AsrTranscribeRequest(BaseModel):
     sourceType: Literal["file", "mic"]
     sourceValue: str
+    languageHint: str | None = None
+    returnTimestamps: bool | None = None
 
 
 class AsrTranscribeResponse(BaseModel):
