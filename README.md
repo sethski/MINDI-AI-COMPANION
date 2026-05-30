@@ -173,6 +173,15 @@ Notes:
 - ASR uses `qwen-asr`; configure `ASR model path` for `Qwen/Qwen3-ASR-1.7B`.
 - OCR uses GLM-OCR via Hugging Face `transformers`; configure `OCR model path` for `zai-org/GLM-OCR`.
 
+Release hardening checklist:
+- Keep `offlineMode` enabled and provision model files manually (no runtime downloader).
+- Confirm all three model paths resolve locally in `Settings > AI Runtime Config`.
+- Verify `Ops > AI Runtime Observability` shows explicit readiness/error state for `llm`, `asr`, and `ocr`.
+- Validate degraded fallback paths before release:
+  - `/assistant/respond` falls back to rule-based response when runtime LLM fails.
+  - `/memory/ocr/import` and `/perception/screen/analyze` preserve response structure when OCR runtime fails.
+- Run `pnpm test:agent` before packaging.
+
 ## Test Agent
 
 ```bash
