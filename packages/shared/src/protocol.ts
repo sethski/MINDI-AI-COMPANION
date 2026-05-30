@@ -400,6 +400,44 @@ export interface SecurityRecoveryResponse {
   event?: SecurityEvent;
 }
 
+export interface AutomationChainStep {
+  kind: "web_scrape" | "create_task" | "create_note" | "security_scan";
+  title?: string;
+  url?: string;
+  text?: string;
+  dueAt?: string;
+  recurrence?: "daily" | "weekly";
+  storeAsNote?: boolean;
+}
+
+export interface AutomationChainRequest {
+  name: string;
+  continueOnFailure?: boolean;
+  steps: AutomationChainStep[];
+}
+
+export interface AutomationChainStepResult {
+  index: number;
+  kind: string;
+  accepted: boolean;
+  reason: string;
+  startedAt: string;
+  finishedAt: string;
+  recoveryHint?: string;
+  detail?: string;
+}
+
+export interface AutomationChainResponse {
+  accepted: boolean;
+  reason: string;
+  name: string;
+  totalSteps: number;
+  completedSteps: number;
+  failedStepIndex?: number;
+  steps: AutomationChainStepResult[];
+  recoverySummary?: string;
+}
+
 export const TAB_ORDER: MindiTabId[] = [
   "home",
   "control",
