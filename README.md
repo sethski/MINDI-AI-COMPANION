@@ -92,6 +92,13 @@ Windows-first local assistant. Current repo layout:
   - Run scrape jobs from URL input.
   - View scrape output, extracted links, and note-storage result.
   - Manage domain allowlist entries directly from Ops/Control flows.
+- Security monitoring + recovery:
+  - `POST /ops/security/scan`
+  - `GET /ops/security/events`
+  - `POST /ops/security/recover`
+  - Detects suspicious process signatures and Defender-service down state.
+  - Supports recovery actions: dismiss event, deny app, and confirmation-gated kill process.
+  - Ops tab now shows security events and recovery controls.
 
 ## Run Desktop
 
