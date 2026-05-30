@@ -1,11 +1,59 @@
 {
   "version": 1,
   "skills": {
+    "debugging-strategies": {
+      "source": "sickn33/antigravity-awesome-skills",
+      "sourceType": "github",
+      "skillPath": "skills/debugging-strategies/SKILL.md",
+      "computedHash": "a47b44bed74527bb9730f1a0b7eb0a2fdf3f323acd575ed6ace811f5b2a85c34"
+    },
+    "design-taste-frontend": {
+      "source": ".agents/skills/design-taste-frontend",
+      "sourceType": "local",
+      "skillPath": ".agents/skills/design-taste-frontend/SKILL.md",
+      "computedHash": "d7c61a01295aafa62705b48b3732c8aa60f217b2dbe98c505ce757a8c9672caf"
+    },
+    "impeccable": {
+      "source": "pbakaus/impeccable",
+      "sourceType": "github",
+      "skillPath": "skill/SKILL.md",
+      "computedHash": "e08cc9be673b6b5e66eb55cf77eb50a940fc603245b2f75d8370a2043aa926aa"
+    },
     "just-scrape": {
       "source": "scrapegraphai/just-scrape",
       "sourceType": "github",
       "skillPath": "skills/just-scrape/SKILL.md",
       "computedHash": "f8cd998d00c761d5dfc178f906beb3be64544489c8aff711f1fa5abd47e29444"
+    },
+    "ocr-document-processor": {
+      "source": ".agents/skills/ocr-document-processor",
+      "sourceType": "local",
+      "skillPath": ".agents/skills/ocr-document-processor/SKILL.md",
+      "computedHash": "631a936c9a5caa8b6c73257f02f02057f99d86fb2fc55f2a8d8099f97967733f"
+    },
+    "refactoring-ui": {
+      "source": "wondelai/skills",
+      "sourceType": "github",
+      "skillPath": "refactoring-ui/SKILL.md",
+      "computedHash": "a4d8ead4a0c44f3ed6c4228db417ae8c72d29d0b29b4435853239a973fafb6f7"
+    },
+    "ui-ux-pro-max": {
+      "source": "nextlevelbuilder/ui-ux-pro-max-skill",
+      "sourceType": "github",
+      "skillPath": ".claude/skills/ui-ux-pro-max/SKILL.md",
+      "computedHash": "6337038fe1fe6bbe1b9f252ab678ee575859190bab6f0f246f4061824eb40875"
+    },
+    "ux-heuristics": {
+      "source": "wondelai/skills",
+      "sourceType": "github",
+      "skillPath": "ux-heuristics/SKILL.md",
+      "computedHash": "ad7fe92cf0e0758e5274b6b17affbb56d17ce1c9c550b8b0b93c09e37da70960"
+    },
+    "web-typography": {
+      "source": "wondelai/skills",
+      "sourceType": "github",
+      "skillPath": "web-typography/SKILL.md",
+      "computedHash": "be06b421155bd61ddf02e0cc7b0067cec6165672ec29b39fb83d2c19a746126f"
     }
   }
 }
