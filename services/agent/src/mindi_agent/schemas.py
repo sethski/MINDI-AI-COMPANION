@@ -89,6 +89,10 @@ class CreateTaskRequest(BaseModel):
     recurrence: Literal["daily", "weekly"] | None = None
 
 
+class TaskStatusUpdateRequest(BaseModel):
+    status: Literal["todo", "in_progress", "done"]
+
+
 class SyncQueueRequest(BaseModel):
     type: Literal["chat", "action", "note", "scrape", "ocr"]
     payload: dict

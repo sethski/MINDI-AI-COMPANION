@@ -33,6 +33,7 @@ from .schemas import (
     AssistantResponse,
     CreateMemoryNoteRequest,
     CreateTaskRequest,
+    TaskStatusUpdateRequest,
     DocumentImportRequest,
     DocumentImportResponse,
     DocumentSearchResponse,
@@ -198,6 +199,16 @@ class RuntimeStore:
         if task.id in self.scheduler_alerted_due:
             self.scheduler_alerted_due.pop(task.id, None)
         return task
+
+    def update_task_status(self, task_id: str, request: TaskStatusUpdateRequest) -> TaskItem | None:
+        for task in self.tasks:
+            if task.id != task_id:
+                continue
+            task.status = request.status
+            if request.status != "done":
+                self.scheduler_alerted_due.pop(task.id, None)
+            return task
+        return None
 
     def enqueue_sync(self, request: SyncQueueRequest) -> dict:
         item = {

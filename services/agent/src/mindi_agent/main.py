@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
 from .schemas import (
@@ -7,6 +7,7 @@ from .schemas import (
     AssistantRequest,
     CreateMemoryNoteRequest,
     CreateTaskRequest,
+    TaskStatusUpdateRequest,
     DocumentImportRequest,
     FileOrganizeRequest,
     OcrImportRequest,
@@ -53,6 +54,14 @@ def list_tasks():
 @app.post("/tasks")
 def add_task(payload: CreateTaskRequest):
     return store.add_task(payload)
+
+
+@app.patch("/tasks/{task_id}/status")
+def update_task_status(task_id: str, payload: TaskStatusUpdateRequest):
+    task = store.update_task_status(task_id=task_id, request=payload)
+    if task is None:
+        raise HTTPException(status_code=404, detail="task_not_found")
+    return task
 
 
 @app.get("/audit/logs")
