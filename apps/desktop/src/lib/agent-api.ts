@@ -20,6 +20,7 @@ import type {
   OcrImportResponse,
   PerceptionAnalyzeRequest,
   PerceptionAnalyzeResponse,
+  PerceptionPermissionStatus,
   PerceptionSnapshot,
   PerceptionSnapshotSearchResponse,
   PermissionGrant,
@@ -184,6 +185,10 @@ export async function analyzeScreenPerception(
     method: "POST",
     body: JSON.stringify(payload),
   });
+}
+
+export async function getPerceptionPermissionStatus(): Promise<PerceptionPermissionStatus> {
+  return agentFetch<PerceptionPermissionStatus>("/perception/permissions");
 }
 
 export async function listPerceptionSnapshots(limit = 20): Promise<PerceptionSnapshot[]> {
