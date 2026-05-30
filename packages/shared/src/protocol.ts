@@ -365,6 +365,41 @@ export interface WebScrapeResponse {
   storedNoteId?: string;
 }
 
+export interface SecurityEvent {
+  id: string;
+  severity: "info" | "warning" | "critical";
+  title: string;
+  detail: string;
+  source: "process_scan" | "defender_service" | "manual";
+  status: "open" | "resolved";
+  processName?: string;
+  pid?: number;
+  recoveryActions: string[];
+  createdAt: string;
+  resolvedAt?: string;
+}
+
+export interface SecurityScanResponse {
+  accepted: boolean;
+  reason: string;
+  scannedProcessCount: number;
+  newAlerts: number;
+  events: SecurityEvent[];
+}
+
+export interface SecurityRecoveryRequest {
+  eventId: string;
+  action: "dismiss" | "deny_app" | "kill_process";
+  target?: string;
+  confirm?: boolean;
+}
+
+export interface SecurityRecoveryResponse {
+  accepted: boolean;
+  reason: string;
+  event?: SecurityEvent;
+}
+
 export const TAB_ORDER: MindiTabId[] = [
   "home",
   "control",
