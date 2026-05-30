@@ -1110,6 +1110,58 @@ def test_perception_storage_redaction_applies_to_snapshot() -> None:
     assert any("[REDACTED_EMAIL]" in (item.get("text") or "") for item in items)
 
 
+def test_intelligence_style_update_and_reply_mode() -> None:
+    style_before = client.get("/ops/intelligence/style")
+    assert style_before.status_code == 200
+
+    updated = client.post(
+        "/ops/intelligence/style",
+        json={
+            "languageMode": "taglish",
+            "slangEnabled": True,
+            "addSlangTerms": ["solid"],
+        },
+    )
+    assert updated.status_code == 200
+    updated_body = updated.json()
+    assert updated_body["languageMode"] == "taglish"
+    assert updated_body["slangEnabled"] is True
+    assert "solid" in updated_body["slangTerms"]
+
+    assistant = client.post("/assistant/respond", json={"text": "summarize my notes"})
+    assert assistant.status_code == 200
+    reply = assistant.json()["reply"]
+    assert "Sige." in reply
+    assert "[solid]" in reply
+
+    reset = client.post(
+        "/ops/intelligence/style",
+        json={"languageMode": "english", "slangEnabled": False, "resetSlangTerms": True},
+    )
+    assert reset.status_code == 200
+    reset_body = reset.json()
+    assert reset_body["languageMode"] == "english"
+    assert reset_body["slangEnabled"] is False
+    assert reset_body["slangTerms"] == []
+
+
+def test_intelligence_eval_run_and_history() -> None:
+    run = client.post("/ops/intelligence/eval/run")
+    assert run.status_code == 200
+    body = run.json()
+    assert body["accepted"] is True
+    assert body["reason"] == "ok"
+    assert body["totalCases"] >= 3
+    assert body["passedCases"] >= 3
+    assert len(body["cases"]) == body["totalCases"]
+
+    history = client.get("/ops/intelligence/eval/history?limit=5")
+    assert history.status_code == 200
+    items = history.json()
+    assert items
+    assert any(item["runId"] == body["runId"] for item in items)
+
+
 def test_perception_permissions_status_defaults_unset() -> None:
     response = client.get("/perception/permissions")
     assert response.status_code == 200
