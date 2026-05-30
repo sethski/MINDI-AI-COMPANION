@@ -77,6 +77,8 @@ from .schemas import (
     IntelligenceEvalCaseResult,
     IntelligenceEvalRunRequest,
     IntelligenceEvalRunResponse,
+    IntelligenceAdaptationExportResponse,
+    IntelligenceAdaptationStatus,
     IntelligenceLearningApplyRequest,
     IntelligenceLearningApplyResponse,
     IntelligenceLearningCandidate,
@@ -269,6 +271,8 @@ class RuntimeStore:
     intelligence_learning_last_eval_version: str | None = None
     intelligence_learning_last_eval_signature: str | None = None
     intelligence_learning_last_applied_at: str | None = None
+    intelligence_adaptation_last_export_at: str | None = None
+    intelligence_adaptation_last_export_path: str | None = None
 
     def __post_init__(self) -> None:
         # Safe default for local file organization sandbox.
@@ -598,6 +602,76 @@ class RuntimeStore:
             languageMode=self.intelligence_language_mode,  # type: ignore[arg-type]
             slangEnabled=self.intelligence_slang_enabled,
             slangTerms=self.intelligence_slang_terms[:50],
+        )
+
+    def _latest_eval_score(self, scope: str) -> float | None:
+        for item in self.intelligence_eval_history:
+            if item.scope == scope:
+                return item.score
+        return None
+
+    def intelligence_adaptation_status(self) -> IntelligenceAdaptationStatus:
+        total_eval_runs = len(self.intelligence_eval_history)
+        passed_active_runs = sum(
+            1 for item in self.intelligence_eval_history if item.scope == "active" and item.score >= 1.0
+        )
+        passed_pending_runs = sum(
+            1 for item in self.intelligence_eval_history if item.scope == "pending" and item.score >= 1.0
+        )
+        passed_learning_runs = sum(
+            1 for item in self.intelligence_eval_history if item.scope == "learning" and item.score >= 1.0
+        )
+        latest_active_score = self._latest_eval_score("active")
+        latest_pending_score = self._latest_eval_score("pending")
+        latest_learning_score = self._latest_eval_score("learning")
+        approved_source_count = len(self.intelligence_learning_sources)
+        applied_slang_count = len(self.intelligence_slang_terms)
+        custom_risky_term_count = len(self.intelligence_tuning_custom_risky_terms)
+        prompt_stable = bool(
+            total_eval_runs >= 2
+            and passed_active_runs >= 1
+            and passed_pending_runs >= 1
+            and latest_active_score is not None
+            and latest_active_score >= 1.0
+            and latest_pending_score is not None
+            and latest_pending_score >= 1.0
+        )
+        lora_stable = bool(
+            prompt_stable
+            and total_eval_runs >= 3
+            and passed_learning_runs >= 1
+            and latest_learning_score is not None
+            and latest_learning_score >= 1.0
+        )
+        if lora_stable and applied_slang_count > 0:
+            justified = True
+            recommended_method = "lora"
+            reason = "lora_ready"
+        elif prompt_stable:
+            justified = False
+            recommended_method = "prompt_only"
+            reason = "prompt_controls_sufficient"
+        else:
+            justified = False
+            recommended_method = "none"
+            reason = "insufficient_eval_evidence"
+        return IntelligenceAdaptationStatus(
+            justified=justified,
+            recommendedMethod=recommended_method,  # type: ignore[arg-type]
+            reason=reason,
+            totalEvalRuns=total_eval_runs,
+            passedActiveRuns=passed_active_runs,
+            passedPendingRuns=passed_pending_runs,
+            passedLearningRuns=passed_learning_runs,
+            latestActiveScore=latest_active_score,
+            latestPendingScore=latest_pending_score,
+            latestLearningScore=latest_learning_score,
+            approvedSourceCount=approved_source_count,
+            appliedSlangCount=applied_slang_count,
+            customRiskyTermCount=custom_risky_term_count,
+            exportReady=justified and recommended_method == "lora",
+            lastExportAt=self.intelligence_adaptation_last_export_at,
+            lastExportPath=self.intelligence_adaptation_last_export_path,
         )
 
     def intelligence_tuning_status(self) -> IntelligenceTuningStatus:
@@ -1230,6 +1304,84 @@ class RuntimeStore:
             accepted=True,
             reason="applied",
             status=self.intelligence_tuning_status(),
+        )
+
+    def export_intelligence_adaptation(self) -> IntelligenceAdaptationExportResponse:
+        status = self.intelligence_adaptation_status()
+        if not status.justified or not status.exportReady or status.recommendedMethod != "lora":
+            return IntelligenceAdaptationExportResponse(
+                accepted=False,
+                reason="adaptation_not_justified",
+                method=status.recommendedMethod,
+                exportPath=None,
+                exampleCount=0,
+                status=status,
+            )
+
+        active_tuning = self._active_tuning_config()
+        active_style = self.intelligence_style_status()
+        prompts = [
+            "summarize my notes",
+            "what's on screen right now",
+            "delete all files",
+        ]
+        examples: list[dict[str, object]] = []
+        for prompt in prompts:
+            decision = self.policy_decision(AssistantRequest(text=prompt), config=active_tuning)
+            base_reply = (
+                "Acknowledged. I can proceed locally and keep this action in audit logs."
+                if decision.allowed
+                else "Blocked for safety. Confirm or unlock before risky execution."
+            )
+            examples.append(
+                {
+                    "input": prompt,
+                    "targetReply": self._style_reply(base_reply, decision=decision, config=active_tuning),
+                    "policy": {
+                        "allowed": decision.allowed,
+                        "requiresUnlock": decision.requiresUnlock,
+                        "tier": decision.tier,
+                    },
+                }
+            )
+
+        export_dir = Path("data/runtime/exports").resolve()
+        export_dir.mkdir(parents=True, exist_ok=True)
+        export_name = f"mindi-intelligence-lora-pack-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.json"
+        export_path = export_dir / export_name
+        payload = {
+            "createdAt": now_iso(),
+            "recommendedMethod": status.recommendedMethod,
+            "reason": status.reason,
+            "activeStyle": active_style.model_dump(),
+            "activeTuning": active_tuning.model_dump(),
+            "appliedSlangTerms": self.intelligence_slang_terms[:50],
+            "approvedLearningSources": [item.model_dump() for item in self.intelligence_learning_sources.values()],
+            "evalHistory": [item.model_dump() for item in self.intelligence_eval_history[:20]],
+            "status": status.model_dump(),
+            "examples": examples,
+        }
+        export_path.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
+        self.intelligence_adaptation_last_export_at = now_iso()
+        self.intelligence_adaptation_last_export_path = str(export_path)
+        self.logs.insert(
+            0,
+            ActionLogItem(
+                id=str(uuid4()),
+                intent="intelligence_adaptation_export",
+                tier=ActionTier.read_only,
+                result="allowed",
+                reason=f"method:{status.recommendedMethod},examples:{len(examples)}",
+                createdAt=self.intelligence_adaptation_last_export_at,
+            ),
+        )
+        return IntelligenceAdaptationExportResponse(
+            accepted=True,
+            reason="exported",
+            method=status.recommendedMethod,
+            exportPath=str(export_path),
+            exampleCount=len(examples),
+            status=self.intelligence_adaptation_status(),
         )
 
     def _redact_sensitive_text(self, text: str) -> tuple[str, int]:

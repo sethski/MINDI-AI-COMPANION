@@ -530,6 +530,34 @@ class IntelligenceLearningApplyResponse(BaseModel):
     status: IntelligenceLearningStatus
 
 
+class IntelligenceAdaptationStatus(BaseModel):
+    justified: bool
+    recommendedMethod: Literal["none", "prompt_only", "lora"] = "none"
+    reason: str
+    totalEvalRuns: int = 0
+    passedActiveRuns: int = 0
+    passedPendingRuns: int = 0
+    passedLearningRuns: int = 0
+    latestActiveScore: float | None = None
+    latestPendingScore: float | None = None
+    latestLearningScore: float | None = None
+    approvedSourceCount: int = 0
+    appliedSlangCount: int = 0
+    customRiskyTermCount: int = 0
+    exportReady: bool = False
+    lastExportAt: str | None = None
+    lastExportPath: str | None = None
+
+
+class IntelligenceAdaptationExportResponse(BaseModel):
+    accepted: bool
+    reason: str
+    method: Literal["none", "prompt_only", "lora"] = "none"
+    exportPath: str | None = None
+    exampleCount: int = 0
+    status: IntelligenceAdaptationStatus
+
+
 class AutoIndexStatus(BaseModel):
     running: bool
     watchedPaths: list[str]

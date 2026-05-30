@@ -7,6 +7,7 @@ from .schemas import (
     AlertActionRequest,
     AutomationChainRequest,
     AssistantRequest,
+    IntelligenceAdaptationExportResponse,
     IntelligenceLearningApplyRequest,
     IntelligenceEvalRunRequest,
     IntelligenceLearningSourceRequest,
@@ -319,6 +320,16 @@ def ops_intelligence_learning_apply(payload: IntelligenceLearningApplyRequest):
 @app.get("/ops/intelligence/eval/history")
 def ops_intelligence_eval_history(limit: int = Query(default=20, ge=1, le=200)):
     return store.list_intelligence_eval_history(limit=limit)
+
+
+@app.get("/ops/intelligence/adaptation/status")
+def ops_intelligence_adaptation_status():
+    return store.intelligence_adaptation_status()
+
+
+@app.post("/ops/intelligence/adaptation/export")
+def ops_intelligence_adaptation_export() -> IntelligenceAdaptationExportResponse:
+    return store.export_intelligence_adaptation()
 
 
 @app.post("/calendar/export")
