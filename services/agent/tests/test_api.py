@@ -812,3 +812,66 @@ def test_perception_screen_analyze_inline_data_url() -> None:
     assert body["imageHeight"] == 140
     assert body["textLength"] == len("quick panel")
     assert len(body["blocks"]) >= 1
+
+
+def test_perception_snapshot_memory_bridge_list_and_search() -> None:
+    marker = "perception-bridge-marker-9917"
+    image = Image.new("RGB", (220, 120), color="white")
+    draw = ImageDraw.Draw(image)
+    draw.rectangle([10, 10, 160, 38], fill="black")
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+    data_url = f"data:image/png;base64,{encoded}"
+
+    with patch("mindi_agent.store.extract_text_for_ocr") as mock_ocr:
+        mock_ocr.return_value = (f"screen says {marker}", "image_ocr")
+        analyzed = client.post(
+            "/perception/screen/analyze",
+            json={"imageDataUrl": data_url, "includeOcr": True, "maxBlocks": 6},
+        )
+
+    assert analyzed.status_code == 200
+    analyzed_body = analyzed.json()
+    assert analyzed_body["accepted"] is True
+    assert analyzed_body["snapshotId"] is not None
+
+    listed = client.get("/memory/perception?limit=10")
+    assert listed.status_code == 200
+    listed_items = listed.json()
+    assert any(item["id"] == analyzed_body["snapshotId"] for item in listed_items)
+
+    searched = client.get(f"/memory/perception/search?query={marker}&limit=10")
+    assert searched.status_code == 200
+    search_body = searched.json()
+    assert search_body["query"] == marker
+    assert any(marker in (item.get("text") or "") for item in search_body["items"])
+
+
+def test_assistant_uses_latest_perception_snapshot_context() -> None:
+    marker = "assistant-screen-context-7634"
+    image = Image.new("RGB", (180, 100), color="white")
+    draw = ImageDraw.Draw(image)
+    draw.rectangle([8, 8, 130, 34], fill="black")
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+    data_url = f"data:image/png;base64,{encoded}"
+
+    with patch("mindi_agent.store.extract_text_for_ocr") as mock_ocr:
+        mock_ocr.return_value = (f"latest ui text {marker}", "image_ocr")
+        analyzed = client.post(
+            "/perception/screen/analyze",
+            json={"imageDataUrl": data_url, "includeOcr": True, "maxBlocks": 5},
+        )
+    assert analyzed.status_code == 200
+
+    assistant = client.post(
+        "/assistant/respond",
+        json={"text": "what's on screen right now?"},
+    )
+    assert assistant.status_code == 200
+    body = assistant.json()
+    assert body["status"] == "ready"
+    assert "Latest perception snapshot available." in body["reply"]
+    assert marker in body["reply"]
