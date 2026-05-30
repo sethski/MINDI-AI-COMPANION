@@ -33,6 +33,8 @@ import type {
   SecurityRecoveryRequest,
   SecurityRecoveryResponse,
   SecurityScanResponse,
+  AutomationChainRequest,
+  AutomationChainResponse,
   WebScrapeRequest,
   WebScrapeResponse,
   CalendarExportRequest,
@@ -278,6 +280,15 @@ export async function runSecurityRecovery(
   payload: SecurityRecoveryRequest,
 ): Promise<SecurityRecoveryResponse> {
   return agentFetch<SecurityRecoveryResponse>("/ops/security/recover", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function runAutomationChain(
+  payload: AutomationChainRequest,
+): Promise<AutomationChainResponse> {
+  return agentFetch<AutomationChainResponse>("/ops/automation/run", {
     method: "POST",
     body: JSON.stringify(payload),
   });
