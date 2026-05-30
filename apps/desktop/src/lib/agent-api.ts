@@ -13,6 +13,7 @@ import type {
   HubSnapshot,
   MemoryNote,
   MemorySearchResponse,
+  OcrImportResponse,
   PermissionGrant,
   TaskItem,
 } from "@mindi/shared";
@@ -122,4 +123,11 @@ export async function searchDocuments(
   return agentFetch<DocumentSearchResponse>(
     `/memory/documents/search?query=${encoded}&limit=${limit}`,
   );
+}
+
+export async function importOcrDocument(path: string): Promise<OcrImportResponse> {
+  return agentFetch<OcrImportResponse>("/memory/ocr/import", {
+    method: "POST",
+    body: JSON.stringify({ path }),
+  });
 }
