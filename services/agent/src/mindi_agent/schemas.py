@@ -90,5 +90,39 @@ class SyncQueueRequest(BaseModel):
     payload: dict
 
 
+class PermissionGrant(BaseModel):
+    id: str
+    scope: Literal["folder", "app", "domain", "action"]
+    subject: str
+    decision: Literal["allow", "deny"]
+    createdAt: str
+
+
+class AddPermissionGrantRequest(BaseModel):
+    scope: Literal["folder", "app", "domain", "action"]
+    subject: str
+    decision: Literal["allow", "deny"]
+
+
+class FileOrganizeRequest(BaseModel):
+    sourceDir: str
+    targetDir: str
+    mode: Literal["preview", "apply"] = "preview"
+
+
+class FileOrganizeItem(BaseModel):
+    fileName: str
+    sourcePath: str
+    targetPath: str
+    category: str
+
+
+class FileOrganizeResponse(BaseModel):
+    accepted: bool
+    reason: str
+    movedCount: int
+    items: list[FileOrganizeItem]
+
+
 def now_iso() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")

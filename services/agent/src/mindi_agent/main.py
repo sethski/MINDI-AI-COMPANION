@@ -1,7 +1,13 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from .schemas import AssistantRequest, CreateTaskRequest, SyncQueueRequest
+from .schemas import (
+    AddPermissionGrantRequest,
+    AssistantRequest,
+    CreateTaskRequest,
+    FileOrganizeRequest,
+    SyncQueueRequest,
+)
 from .store import RuntimeStore
 
 app = FastAPI(title="MINDI Local Agent", version="0.1.0")
@@ -49,3 +55,18 @@ def list_logs():
 @app.post("/sync/queue")
 def queue_sync(payload: SyncQueueRequest):
     return store.enqueue_sync(payload)
+
+
+@app.get("/control/permissions")
+def list_permissions():
+    return store.list_permissions()
+
+
+@app.post("/control/permissions")
+def add_permission(payload: AddPermissionGrantRequest):
+    return store.add_permission(payload)
+
+
+@app.post("/control/file-organize")
+def control_file_organize(payload: FileOrganizeRequest):
+    return store.file_organize(payload)

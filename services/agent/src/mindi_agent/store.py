@@ -1,21 +1,47 @@
 from dataclasses import dataclass, field
+from pathlib import Path
+from shutil import move
 from time import time
 from uuid import uuid4
 
 from .schemas import (
     ActionLogItem,
     ActionTier,
+    AddPermissionGrantRequest,
     AlertItem,
     AgentStatus,
     AssistantRequest,
     AssistantResponse,
     CreateTaskRequest,
+    FileOrganizeItem,
+    FileOrganizeRequest,
+    FileOrganizeResponse,
     HubSnapshot,
+    PermissionGrant,
     PolicyDecision,
     SyncQueueRequest,
     TaskItem,
     now_iso,
 )
+
+
+def _category_for_suffix(suffix: str) -> str:
+    by_suffix = {
+        ".png": "images",
+        ".jpg": "images",
+        ".jpeg": "images",
+        ".gif": "images",
+        ".webp": "images",
+        ".pdf": "documents",
+        ".docx": "documents",
+        ".txt": "documents",
+        ".md": "documents",
+        ".csv": "data",
+        ".json": "data",
+        ".zip": "archives",
+        ".7z": "archives",
+    }
+    return by_suffix.get(suffix.lower(), "other")
 
 
 @dataclass
@@ -25,13 +51,26 @@ class RuntimeStore:
     alerts: list[AlertItem] = field(default_factory=list)
     logs: list[ActionLogItem] = field(default_factory=list)
     sync_queue: list[dict] = field(default_factory=list)
+    permission_grants: list[PermissionGrant] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        # Safe default for local file organization sandbox.
+        self.permission_grants.append(
+            PermissionGrant(
+                id=str(uuid4()),
+                scope="folder",
+                subject="data",
+                decision="allow",
+                createdAt=now_iso(),
+            )
+        )
 
     def status(self) -> AgentStatus:
         return AgentStatus(
             state="ready",
             uptimeSeconds=max(0, int(time() - self.started_at)),
             listening=True,
-            agentVersion="0.1.0",
+            agentVersion="0.2.0",
             currentProfile="safe",
         )
 
@@ -110,3 +149,91 @@ class RuntimeStore:
         }
         self.sync_queue.insert(0, item)
         return item
+
+    def list_permissions(self) -> list[PermissionGrant]:
+        return self.permission_grants
+
+    def add_permission(self, request: AddPermissionGrantRequest) -> PermissionGrant:
+        grant = PermissionGrant(
+            id=str(uuid4()),
+            scope=request.scope,
+            subject=request.subject,
+            decision=request.decision,
+            createdAt=now_iso(),
+        )
+        self.permission_grants.insert(0, grant)
+        return grant
+
+    def _is_path_allowed(self, path: Path) -> bool:
+        normalized = path.resolve()
+        grants = [g for g in self.permission_grants if g.scope == "folder"]
+        denies = [Path(g.subject).resolve() for g in grants if g.decision == "deny"]
+        allows = [Path(g.subject).resolve() for g in grants if g.decision == "allow"]
+
+        if any(str(normalized).startswith(str(deny)) for deny in denies):
+            return False
+        if not allows:
+            return False
+        return any(str(normalized).startswith(str(allow)) for allow in allows)
+
+    def file_organize(self, request: FileOrganizeRequest) -> FileOrganizeResponse:
+        source = Path(request.sourceDir).resolve()
+        target = Path(request.targetDir).resolve()
+
+        if not source.exists() or not source.is_dir():
+            return FileOrganizeResponse(
+                accepted=False,
+                reason="source_not_found",
+                movedCount=0,
+                items=[],
+            )
+
+        if not self._is_path_allowed(source) or not self._is_path_allowed(target):
+            return FileOrganizeResponse(
+                accepted=False,
+                reason="folder_not_allowed",
+                movedCount=0,
+                items=[],
+            )
+
+        items: list[FileOrganizeItem] = []
+        for child in source.iterdir():
+            if child.is_file():
+                category = _category_for_suffix(child.suffix)
+                dest = target / category / child.name
+                items.append(
+                    FileOrganizeItem(
+                        fileName=child.name,
+                        sourcePath=str(child),
+                        targetPath=str(dest),
+                        category=category,
+                    )
+                )
+
+        if request.mode == "apply":
+            for item in items:
+                destination = Path(item.targetPath)
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                move(item.sourcePath, item.targetPath)
+            reason = "applied"
+        else:
+            reason = "preview_only"
+
+        self.logs.insert(
+            0,
+            ActionLogItem(
+                id=str(uuid4()),
+                intent=f"file_organize:{request.mode}",
+                tier=ActionTier.reversible,
+                result="allowed",
+                reason=reason,
+                createdAt=now_iso(),
+            ),
+        )
+
+        return FileOrganizeResponse(
+            accepted=True,
+            reason=reason,
+            movedCount=len(items) if request.mode == "apply" else 0,
+            items=items,
+        )
