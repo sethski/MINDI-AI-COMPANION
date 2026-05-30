@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import {
   QUICK_TOGGLES,
   TAB_ORDER,
+  type AlertFeedResponse,
   type AutoIndexStatus,
   type AutomationChainResponse,
   type AssistantResponse,
@@ -30,6 +31,7 @@ import {
   updateTaskStatus,
   updateTask,
   fetchAllowedApps,
+  getAlertFeed,
   getAutoIndexStatus,
   fetchHubSnapshot,
   fileOrganize,
@@ -46,6 +48,7 @@ import {
   parseTaskTime,
   listSecurityEvents,
   runAutomationChain,
+  runAlertAction,
   runSecurityRecovery,
   runSecurityScan,
   runSchedulerScanNow,
@@ -130,6 +133,8 @@ export default function App() {
   const [securityEvents, setSecurityEvents] = useState<SecurityEvent[]>([]);
   const [securityScanResult, setSecurityScanResult] = useState<SecurityScanResponse | null>(null);
   const [securityStatus, setSecurityStatus] = useState("No security scan yet.");
+  const [alertFeed, setAlertFeed] = useState<AlertFeedResponse | null>(null);
+  const [alertStatus, setAlertStatus] = useState("No alert action yet.");
   const [opsScrapeUrl, setOpsScrapeUrl] = useState("https://example.com");
   const [opsScrapeStoreAsNote, setOpsScrapeStoreAsNote] = useState(true);
   const [opsScrapeResult, setOpsScrapeResult] = useState<WebScrapeResponse | null>(null);
@@ -180,6 +185,7 @@ export default function App() {
       getPerceptionPermissionStatus(),
       listPerceptionSnapshots(12),
       listSecurityEvents("open", 12),
+      getAlertFeed(12),
     ])
       .then(
         ([
@@ -192,6 +198,7 @@ export default function App() {
           perceptionPermissionStatus,
           snapshotItems,
           securityItems,
+          alertFeedInitial,
         ]) => {
         if (!active) {
           return;
@@ -206,6 +213,8 @@ export default function App() {
         setPerceptionSnapshots(snapshotItems);
         setSecurityEvents(securityItems);
         setSecurityStatus(`Loaded ${securityItems.length} open security events.`);
+        setAlertFeed(alertFeedInitial);
+        setAlertStatus(`Loaded ${alertFeedInitial.items.length} prioritized alerts.`);
         if (snapshotItems.length > 0) {
           setPerceptionSelectedSnapshotId(snapshotItems[0].id);
           setPerceptionSnapshotStatus(`Loaded ${snapshotItems.length} recent snapshots.`);
@@ -427,6 +436,23 @@ export default function App() {
             { kind: "create_task", title: taskTitle },
             { kind: "create_note", title: noteTitle, text: `Automation chain completed for ${name}.` },
           ],
+        });
+        return true;
+      }
+      if (action === "alert_action") {
+        const alertId = typeof payload.alertId === "string" ? payload.alertId : "";
+        const alertAction = payload.alertAction;
+        if (
+          !alertId ||
+          (alertAction !== "dismiss" &&
+            alertAction !== "create_recovery_task" &&
+            alertAction !== "export_report")
+        ) {
+          return false;
+        }
+        await runAlertAction({
+          alertId,
+          action: alertAction,
         });
         return true;
       }
@@ -1260,11 +1286,24 @@ export default function App() {
     }
   }
 
+  async function refreshAlertFeed() {
+    try {
+      const response = await getAlertFeed(12);
+      setAlertFeed(response);
+      setAlertStatus(
+        `alerts=${response.total} (critical=${response.critical}, warning=${response.warning}, info=${response.info})`,
+      );
+    } catch {
+      setAlertStatus("Alert feed unavailable while offline.");
+    }
+  }
+
   async function runOpsSecurityScan() {
     try {
       const result = await runSecurityScan();
       setSecurityScanResult(result);
       await refreshSecurityEvents();
+      await refreshAlertFeed();
       setSecurityStatus(
         `Scan complete: processes=${result.scannedProcessCount}, newAlerts=${result.newAlerts}.`,
       );
@@ -1317,6 +1356,38 @@ export default function App() {
     }
   }
 
+  async function runOpsAlertAction(
+    alertId: string,
+    action: "dismiss" | "create_recovery_task" | "export_report",
+  ) {
+    try {
+      const response = await runAlertAction({ alertId, action });
+      if (response.accepted) {
+        if (action === "create_recovery_task") {
+          setAlertStatus(`Recovery task created: ${response.createdTaskId ?? "unknown"}`);
+        } else if (action === "export_report") {
+          setAlertStatus(`Alert report exported: ${response.reportPath ?? "unknown"}`);
+        } else {
+          setAlertStatus("Alert dismissed.");
+        }
+        await refreshAlertFeed();
+        if (action === "create_recovery_task") {
+          const hub = await fetchHubSnapshot();
+          setSnapshot(hub);
+        }
+      } else {
+        setAlertStatus(`Alert action failed: ${response.reason}`);
+      }
+    } catch {
+      enqueueSyncItem({
+        type: "action",
+        payload: { action: "alert_action", alertId, alertAction: action },
+      });
+      setSyncDepth(loadSyncQueue().length);
+      setAlertStatus("Alert action queued for sync.");
+    }
+  }
+
   async function runOpsAutomationChain() {
     const name = opsChainName.trim();
     const scrapeUrl = opsScrapeUrl.trim();
@@ -1351,6 +1422,7 @@ export default function App() {
       }
       if (response.steps.some((step) => step.kind === "security_scan")) {
         await refreshSecurityEvents();
+        await refreshAlertFeed();
       }
     } catch {
       enqueueSyncItem({
@@ -1898,6 +1970,43 @@ export default function App() {
                 </li>
               ))}
               {securityEvents.length === 0 ? <li>No open security events.</li> : null}
+            </ul>
+          </div>
+
+          <div className="card">
+            <h3>Alert Recovery Flow</h3>
+            <div className="stack">
+              <button type="button" onClick={() => void refreshAlertFeed()}>
+                Refresh Alert Feed
+              </button>
+            </div>
+            <p className="assistant-reply">{alertStatus}</p>
+            {alertFeed ? (
+              <p>
+                total={alertFeed.total} critical={alertFeed.critical} warning={alertFeed.warning} info={alertFeed.info}
+              </p>
+            ) : null}
+            <ul>
+              {(alertFeed?.items ?? []).slice(0, 8).map((alert) => (
+                <li key={alert.id}>
+                  [{alert.severity}] {alert.title}
+                  <div className="row left">
+                    <button type="button" onClick={() => void runOpsAlertAction(alert.id, "dismiss")}>
+                      Dismiss
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void runOpsAlertAction(alert.id, "create_recovery_task")}
+                    >
+                      Recovery Task
+                    </button>
+                    <button type="button" onClick={() => void runOpsAlertAction(alert.id, "export_report")}>
+                      Export Report
+                    </button>
+                  </div>
+                </li>
+              ))}
+              {alertFeed && alertFeed.items.length === 0 ? <li>No alerts in feed.</li> : null}
             </ul>
           </div>
 
