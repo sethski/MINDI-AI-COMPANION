@@ -23,6 +23,7 @@ export function loadToggleState(defaults: QuickToggle[]): QuickToggle[] {
 
 export function saveToggleState(toggles: QuickToggle[]): void {
   localStorage.setItem(TOGGLE_KEY, JSON.stringify(toggles));
+  window.dispatchEvent(new Event("mindi-toggles-changed"));
 }
 
 export function loadSyncQueue(): SyncQueueItem[] {
