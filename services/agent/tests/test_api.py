@@ -204,3 +204,26 @@ def test_ocr_import_missing_file() -> None:
     response = client.post("/memory/ocr/import", json={"path": "missing/file.png"})
     assert response.status_code == 200
     assert response.json()["accepted"] is False
+
+
+def test_auto_index_scan_and_status(tmp_path: Path) -> None:
+    doc = tmp_path / "watcher.md"
+    marker = "autoindex-marker-7734"
+    doc.write_text(f"MINDI {marker}", encoding="utf-8")
+
+    client.post(
+        "/control/permissions",
+        json={"scope": "folder", "subject": str(tmp_path), "decision": "allow"},
+    )
+
+    status_before = client.get("/memory/auto-index/status")
+    assert status_before.status_code == 200
+    assert "running" in status_before.json()
+
+    scan = client.post("/memory/auto-index/scan")
+    assert scan.status_code == 200
+
+    searched = client.get(f"/memory/documents/search?query={marker}")
+    assert searched.status_code == 200
+    items = searched.json()["items"]
+    assert any(item["sourcePath"] == str(doc.resolve()) for item in items)
