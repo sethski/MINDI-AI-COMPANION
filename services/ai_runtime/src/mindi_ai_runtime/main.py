@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import shutil
 import subprocess
@@ -12,6 +13,7 @@ from pydantic import BaseModel
 
 class RuntimeConfig(BaseModel):
     llmModelPath: str = ""
+    llmLanguagePackPath: str = ""
     asrModelPath: str = ""
     ocrModelPath: str = ""
     llmCommand: str = "llama-cli"
@@ -57,6 +59,9 @@ asr_model: Any | None = None
 ocr_runtime_error: str | None = None
 ocr_model_ref: str | None = None
 ocr_pipe: Any | None = None
+language_pack_runtime_error: str | None = None
+language_pack_ref: str | None = None
+language_pack_payload: dict[str, Any] | None = None
 feature_telemetry: dict[str, dict[str, Any]] = {
     "llm": {"lastLatencyMs": None, "lastFailureReason": None},
     "asr": {"lastLatencyMs": None, "lastFailureReason": None},
@@ -75,6 +80,13 @@ def _resolve_asr_model_ref() -> str:
     if model_path:
         return str(Path(model_path).expanduser())
     return runtime_config.asrModel
+
+
+def _resolve_language_pack_path() -> Path | None:
+    raw_path = runtime_config.llmLanguagePackPath.strip()
+    if not raw_path:
+        return None
+    return Path(raw_path).expanduser()
 
 
 def _resolve_ocr_model_ref() -> str:
@@ -132,10 +144,74 @@ def _build_llm_prompt(*, prompt: str, language_mode: str) -> str:
     return (
         "<|system|>\n"
         f"{system_instruction}\n"
+        f"{_language_pack_prompt_hint()}"
         "<|user|>\n"
         f"{prompt.strip()}\n"
         "<|assistant|>\n"
     )
+
+
+def _load_language_pack() -> tuple[bool, dict]:
+    global language_pack_runtime_error, language_pack_ref, language_pack_payload
+
+    language_pack_path = _resolve_language_pack_path()
+    if language_pack_path is None:
+        language_pack_runtime_error = None
+        language_pack_ref = None
+        language_pack_payload = None
+        return True, {"reason": "none"}
+
+    path_str = str(language_pack_path.resolve())
+    if language_pack_payload is not None and language_pack_ref == path_str and language_pack_runtime_error is None:
+        return True, {"reason": "ok"}
+
+    if not language_pack_path.exists() or not language_pack_path.is_file():
+        language_pack_runtime_error = "language_pack_not_found"
+        language_pack_ref = None
+        language_pack_payload = None
+        return False, {"reason": language_pack_runtime_error}
+    try:
+        payload = json.loads(language_pack_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        language_pack_runtime_error = "language_pack_invalid_json"
+        language_pack_ref = None
+        language_pack_payload = None
+        return False, {"reason": language_pack_runtime_error}
+    if not isinstance(payload, dict):
+        language_pack_runtime_error = "language_pack_schema_invalid"
+        language_pack_ref = None
+        language_pack_payload = None
+        return False, {"reason": language_pack_runtime_error}
+    top_terms = payload.get("topTerms")
+    if not isinstance(top_terms, list):
+        language_pack_runtime_error = "language_pack_schema_invalid"
+        language_pack_ref = None
+        language_pack_payload = None
+        return False, {"reason": language_pack_runtime_error}
+
+    language_pack_runtime_error = None
+    language_pack_ref = path_str
+    language_pack_payload = payload
+    return True, {"reason": "ok"}
+
+
+def _language_pack_prompt_hint() -> str:
+    ok, _ = _load_language_pack()
+    if not ok or not isinstance(language_pack_payload, dict):
+        return ""
+    top_terms = language_pack_payload.get("topTerms")
+    if not isinstance(top_terms, list):
+        return ""
+    terms: list[str] = []
+    for item in top_terms:
+        token = str(item).strip()
+        if token and token not in terms:
+            terms.append(token)
+        if len(terms) >= 20:
+            break
+    if not terms:
+        return ""
+    return f"Use practical Filipino/Taglish phrasing when relevant. Preferred terms: {', '.join(terms)}.\n"
 
 
 def _clean_llama_output(text: str) -> str:
@@ -415,6 +491,7 @@ def runtime_status() -> dict:
 @app.post("/runtime/config")
 def runtime_update_config(payload: RuntimeConfig) -> dict:
     global runtime_config, asr_runtime_error, asr_model_ref, asr_model, ocr_runtime_error, ocr_model_ref, ocr_pipe
+    global language_pack_runtime_error, language_pack_ref, language_pack_payload
     runtime_config = payload
     # Reset ASR cache to force reload after config changes.
     asr_runtime_error = None
@@ -423,6 +500,9 @@ def runtime_update_config(payload: RuntimeConfig) -> dict:
     ocr_runtime_error = None
     ocr_model_ref = None
     ocr_pipe = None
+    language_pack_runtime_error = None
+    language_pack_ref = None
+    language_pack_payload = None
     for telemetry in feature_telemetry.values():
         telemetry["lastLatencyMs"] = None
         telemetry["lastFailureReason"] = None
