@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import subprocess
 from unittest.mock import patch
+from PIL import Image, ImageDraw
 
 from mindi_agent.main import app
 
@@ -706,3 +707,80 @@ def test_calendar_export_writes_valarm_when_reminder_present(tmp_path: Path) -> 
     assert "SUMMARY:Alarm Export Task" in text
     assert "BEGIN:VALARM" in text
     assert "TRIGGER:-PT45M" in text
+
+
+def test_perception_screen_analyze_success(tmp_path: Path) -> None:
+    image_path = tmp_path / "screen.png"
+    image = Image.new("RGB", (320, 180), color="white")
+    draw = ImageDraw.Draw(image)
+    draw.rectangle([20, 20, 260, 60], fill="black")
+    draw.rectangle([20, 80, 220, 120], fill="black")
+    image.save(image_path)
+
+    client.post(
+        "/control/permissions",
+        json={"scope": "folder", "subject": str(tmp_path), "decision": "allow"},
+    )
+
+    with patch("mindi_agent.store.extract_text_for_ocr") as mock_ocr:
+        mock_ocr.return_value = ("open settings panel", "image_ocr")
+        response = client.post(
+            "/perception/screen/analyze",
+            json={"path": str(image_path), "includeOcr": True, "maxBlocks": 10},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["accepted"] is True
+    assert body["reason"] == "ok"
+    assert body["ocrMode"] == "image_ocr"
+    assert body["textLength"] == len("open settings panel")
+    assert body["imageWidth"] == 320
+    assert body["imageHeight"] == 180
+    assert len(body["blocks"]) >= 1
+
+
+def test_perception_screen_analyze_allows_blocks_when_ocr_fails(tmp_path: Path) -> None:
+    image_path = tmp_path / "screen-ocr-fail.png"
+    image = Image.new("RGB", (300, 160), color="white")
+    draw = ImageDraw.Draw(image)
+    draw.rectangle([30, 30, 240, 70], fill="black")
+    image.save(image_path)
+
+    client.post(
+        "/control/permissions",
+        json={"scope": "folder", "subject": str(tmp_path), "decision": "allow"},
+    )
+
+    with patch("mindi_agent.store.extract_text_for_ocr") as mock_ocr:
+        mock_ocr.side_effect = ValueError("tesseract_not_installed")
+        response = client.post(
+            "/perception/screen/analyze",
+            json={"path": str(image_path), "includeOcr": True, "maxBlocks": 5},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["accepted"] is True
+    assert body["reason"] == "ocr_unavailable_blocks_extracted"
+    assert body["ocrError"] == "tesseract_not_installed"
+    assert body["text"] is None
+    assert len(body["blocks"]) >= 1
+
+
+def test_perception_screen_analyze_rejects_unsupported_type(tmp_path: Path) -> None:
+    payload = tmp_path / "note.txt"
+    payload.write_text("not an image", encoding="utf-8")
+    client.post(
+        "/control/permissions",
+        json={"scope": "folder", "subject": str(tmp_path), "decision": "allow"},
+    )
+
+    response = client.post(
+        "/perception/screen/analyze",
+        json={"path": str(payload), "includeOcr": False},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["accepted"] is False
+    assert body["reason"] == "unsupported_file_type"
