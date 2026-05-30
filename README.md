@@ -114,6 +114,10 @@ Windows-first local assistant. Current repo layout:
   - `POST /ops/privacy/update`
   - Sensitive-text redaction toggle (enabled by default) for stored scrape notes and stored perception snapshots.
   - Response metadata reports whether storage redaction was applied and match count.
+- AI smoke and benchmark run:
+  - `POST /ops/ai/smoke`
+  - Runs runtime probes for LLM/ASR/OCR with typed pass/fail reasons and per-feature latency metadata.
+  - Ops tab includes a smoke runner for real local model-path validation before release.
 
 ## Current Implementation (Phase 6 Intelligence)
 
