@@ -1,5 +1,7 @@
 import type {
   AiRuntimeConfigUpdateRequest,
+  AiRuntimeSmokeRequest,
+  AiRuntimeSmokeResponse,
   AiRuntimeStatusResponse,
   AsrTranscribeRequest,
   AsrTranscribeResponse,
@@ -116,6 +118,15 @@ export async function transcribeAsr(
   payload: AsrTranscribeRequest,
 ): Promise<AsrTranscribeResponse> {
   return agentFetch<AsrTranscribeResponse>("/ops/asr/transcribe", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function runAiSmoke(
+  payload: AiRuntimeSmokeRequest,
+): Promise<AiRuntimeSmokeResponse> {
+  return agentFetch<AiRuntimeSmokeResponse>("/ops/ai/smoke", {
     method: "POST",
     body: JSON.stringify(payload),
   });
