@@ -2382,6 +2382,7 @@ export default function App() {
                     ocr: ready={String(aiRuntimeStatus.features.ocr.ready)} provider=
                     {aiRuntimeStatus.features.ocr.provider} model={aiRuntimeStatus.features.ocr.model}
                   </li>
+                  <li>language pack: {aiRuntimeStatus.config.llmLanguagePackPath || "not configured"}</li>
                 </ul>
               </>
             ) : (
@@ -2404,6 +2405,7 @@ export default function App() {
                 <li>url: {aiRuntimeStatus.runtime.url}</li>
                 <li>reachable: {String(aiRuntimeStatus.runtime.reachable)}</li>
                 <li>lastError: {aiRuntimeStatus.runtime.lastError ?? "none"}</li>
+                <li>languagePackPath: {aiRuntimeStatus.config.llmLanguagePackPath || "not configured"}</li>
                 <li>
                   llm: pathConfigured={String(aiRuntimeStatus.features.llm.pathConfigured)} lastError=
                   {aiRuntimeStatus.features.llm.lastError ?? "none"} lastFailure=
@@ -2495,6 +2497,18 @@ export default function App() {
                 ? `accepted=${String(datasetPrepResult.accepted)} reason=${datasetPrepResult.reason} train=${datasetPrepResult.trainSamples} val=${datasetPrepResult.valSamples}`
                 : "No dataset prep run yet."}
             </p>
+            {datasetPrepResult ? (
+              <p>
+                validation={String(datasetPrepResult.validationPassed)} languagePackLoaded=
+                {String(datasetPrepResult.languagePackLoaded)}
+              </p>
+            ) : null}
+            {datasetPrepResult?.languagePackLoadReason ? (
+              <p className="assistant-reply">language-pack load: {datasetPrepResult.languagePackLoadReason}</p>
+            ) : null}
+            {datasetPrepResult && datasetPrepResult.validationIssues.length > 0 ? (
+              <p className="assistant-reply">issues: {datasetPrepResult.validationIssues.join(", ")}</p>
+            ) : null}
             {datasetPrepResult?.manifestPath ? (
               <p className="assistant-reply">manifest: {datasetPrepResult.manifestPath}</p>
             ) : null}

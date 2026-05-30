@@ -172,6 +172,7 @@ Notes:
 - Configure `LLM model path (GGUF)` in Settings before using `/assistant/respond` runtime inference.
 - ASR uses `qwen-asr`; configure `ASR model path` for `Qwen/Qwen3-ASR-1.7B`.
 - OCR uses GLM-OCR via Hugging Face `transformers`; configure `OCR model path` for `zai-org/GLM-OCR`.
+- Dataset prep endpoint `/ops/intelligence/dataset/prepare` now validates artifact schemas and auto-registers the generated `language_pack_ph.json` into runtime config (`llmLanguagePackPath`) for prompt-time style hints.
 
 Release hardening checklist:
 - Keep `offlineMode` enabled and provision model files manually (no runtime downloader).
