@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .schemas import (
+    AppControlRequest,
     AddPermissionGrantRequest,
     AssistantRequest,
     CreateTaskRequest,
@@ -70,3 +71,13 @@ def add_permission(payload: AddPermissionGrantRequest):
 @app.post("/control/file-organize")
 def control_file_organize(payload: FileOrganizeRequest):
     return store.file_organize(payload)
+
+
+@app.get("/control/apps/allowlist")
+def control_apps_allowlist():
+    return {"apps": store.list_allowed_apps()}
+
+
+@app.post("/control/apps/action")
+def control_apps_action(payload: AppControlRequest):
+    return store.control_app(payload)

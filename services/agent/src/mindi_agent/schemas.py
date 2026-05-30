@@ -124,5 +124,18 @@ class FileOrganizeResponse(BaseModel):
     items: list[FileOrganizeItem]
 
 
+class AppControlRequest(BaseModel):
+    action: Literal["open", "focus", "close"]
+    appId: str
+    confirm: bool = False
+
+
+class AppControlResponse(BaseModel):
+    accepted: bool
+    reason: str
+    tier: ActionTier
+    requiresConfirmation: bool
+
+
 def now_iso() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")

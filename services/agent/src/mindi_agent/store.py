@@ -1,10 +1,13 @@
 from dataclasses import dataclass, field
 from pathlib import Path
 from shutil import move
+import subprocess
 from time import time
 from uuid import uuid4
 
 from .schemas import (
+    AppControlRequest,
+    AppControlResponse,
     ActionLogItem,
     ActionTier,
     AddPermissionGrantRequest,
@@ -60,6 +63,15 @@ class RuntimeStore:
                 id=str(uuid4()),
                 scope="folder",
                 subject="data",
+                decision="allow",
+                createdAt=now_iso(),
+            )
+        )
+        self.permission_grants.append(
+            PermissionGrant(
+                id=str(uuid4()),
+                scope="app",
+                subject="notepad.exe",
                 decision="allow",
                 createdAt=now_iso(),
             )
@@ -164,6 +176,15 @@ class RuntimeStore:
         self.permission_grants.insert(0, grant)
         return grant
 
+    def list_allowed_apps(self) -> list[str]:
+        app_grants = [grant for grant in self.permission_grants if grant.scope == "app"]
+        denied = {grant.subject.lower() for grant in app_grants if grant.decision == "deny"}
+        allowed = [grant.subject for grant in app_grants if grant.decision == "allow"]
+        return [app for app in allowed if app.lower() not in denied]
+
+    def _is_app_allowed(self, app_id: str) -> bool:
+        return app_id.lower() in {app.lower() for app in self.list_allowed_apps()}
+
     def _is_path_allowed(self, path: Path) -> bool:
         normalized = path.resolve()
         grants = [g for g in self.permission_grants if g.scope == "folder"]
@@ -236,4 +257,81 @@ class RuntimeStore:
             reason=reason,
             movedCount=len(items) if request.mode == "apply" else 0,
             items=items,
+        )
+
+    def control_app(self, request: AppControlRequest) -> AppControlResponse:
+        app_id = request.appId.strip()
+        if not app_id:
+            return AppControlResponse(
+                accepted=False,
+                reason="app_id_required",
+                tier=ActionTier.read_only,
+                requiresConfirmation=False,
+            )
+
+        if not self._is_app_allowed(app_id):
+            return AppControlResponse(
+                accepted=False,
+                reason="app_not_allowlisted",
+                tier=ActionTier.risky,
+                requiresConfirmation=False,
+            )
+
+        tier = ActionTier.reversible
+        requires_confirmation = False
+        if request.action == "close":
+            tier = ActionTier.risky
+            if not request.confirm:
+                return AppControlResponse(
+                    accepted=False,
+                    reason="confirmation_required_for_close",
+                    tier=tier,
+                    requiresConfirmation=True,
+                )
+            requires_confirmation = True
+
+        try:
+            if request.action == "open":
+                subprocess.Popen(
+                    ["cmd", "/c", "start", "", app_id],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                reason = "opened"
+            elif request.action == "close":
+                subprocess.run(
+                    ["taskkill", "/IM", app_id, "/T"],
+                    check=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                reason = "close_requested"
+            else:
+                # Windows focus control is layered for now; this is a readiness hook.
+                reason = "focus_requested"
+        except Exception as exc:
+            return AppControlResponse(
+                accepted=False,
+                reason=f"app_control_failed:{exc.__class__.__name__}",
+                tier=tier,
+                requiresConfirmation=requires_confirmation,
+            )
+
+        self.logs.insert(
+            0,
+            ActionLogItem(
+                id=str(uuid4()),
+                intent=f"app_control:{request.action}:{app_id}",
+                tier=tier,
+                result="allowed",
+                reason=reason,
+                createdAt=now_iso(),
+            ),
+        )
+
+        return AppControlResponse(
+            accepted=True,
+            reason=reason,
+            tier=tier,
+            requiresConfirmation=requires_confirmation,
         )
