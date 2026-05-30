@@ -146,6 +146,26 @@ export interface AppControlResponse {
   requiresConfirmation: boolean;
 }
 
+export interface MemoryNote {
+  id: string;
+  title: string;
+  content: string;
+  tags: string[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CreateMemoryNoteRequest {
+  title: string;
+  content: string;
+  tags?: string[];
+}
+
+export interface MemorySearchResponse {
+  query: string;
+  items: MemoryNote[];
+}
+
 export const TAB_ORDER: MindiTabId[] = [
   "home",
   "control",
