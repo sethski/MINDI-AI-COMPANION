@@ -6,6 +6,7 @@ import {
   type AutoIndexStatus,
   type AutomationChainResponse,
   type IntelligenceEvalRunResponse,
+  type IntelligenceLearningStatus,
   type IntelligenceTuningStatus,
   type IntelligenceStyleStatus,
   type AssistantResponse,
@@ -59,11 +60,15 @@ import {
   runSchedulerScanNow,
   scrapeWeb,
   getPrivacyStatus,
+  getIntelligenceLearningStatus,
   getIntelligenceStyleStatus,
   getIntelligenceTuningStatus,
   listIntelligenceEvalHistory,
+  runIntelligenceLearning,
   runIntelligenceEval,
+  updateIntelligenceLearningSource,
   applyIntelligenceTuning,
+  applyIntelligenceLearning,
   stageIntelligenceTuning,
   updatePrivacyStatus,
   updateIntelligenceStyleStatus,
@@ -157,6 +162,8 @@ export default function App() {
   );
   const [intelligenceSlangEnabled, setIntelligenceSlangEnabled] = useState(false);
   const [intelligenceNewSlang, setIntelligenceNewSlang] = useState("solid");
+  const [intelligenceLearning, setIntelligenceLearning] = useState<IntelligenceLearningStatus | null>(null);
+  const [intelligenceLearningNoteId, setIntelligenceLearningNoteId] = useState("");
   const [intelligenceTuning, setIntelligenceTuning] = useState<IntelligenceTuningStatus | null>(null);
   const [intelligencePreset, setIntelligencePreset] = useState<"safe" | "balanced" | "companion">("safe");
   const [intelligenceVerbosity, setIntelligenceVerbosity] = useState<"brief" | "balanced" | "detailed">(
@@ -219,6 +226,7 @@ export default function App() {
       getAlertFeed(12),
       getPrivacyStatus(),
       getIntelligenceStyleStatus(),
+      getIntelligenceLearningStatus(),
       getIntelligenceTuningStatus(),
       listIntelligenceEvalHistory(8),
     ])
@@ -236,6 +244,7 @@ export default function App() {
           alertFeedInitial,
           privacyInitial,
           intelligenceStyleInitial,
+          intelligenceLearningInitial,
           intelligenceTuningInitial,
           intelligenceEvalHistoryInitial,
         ]) => {
@@ -259,6 +268,8 @@ export default function App() {
         setIntelligenceStyle(intelligenceStyleInitial);
         setIntelligenceLanguageMode(intelligenceStyleInitial.languageMode);
         setIntelligenceSlangEnabled(intelligenceStyleInitial.slangEnabled);
+        setIntelligenceLearning(intelligenceLearningInitial);
+        setIntelligenceLearningNoteId((notes[0] && notes[0].id) || "");
         setIntelligenceTuning(intelligenceTuningInitial);
         setIntelligencePreset((intelligenceTuningInitial.pending ?? intelligenceTuningInitial.active).preset);
         setIntelligenceVerbosity(
@@ -1025,6 +1036,7 @@ export default function App() {
         tags: [],
       });
       setMemoryNotes((current) => [note, ...current]);
+      setIntelligenceLearningNoteId(note.id);
       setMemoryTitle("");
       setMemoryContent("");
       setMemoryStatus("Note stored locally.");
@@ -1397,14 +1409,16 @@ export default function App() {
 
   async function refreshIntelligenceState() {
     try {
-      const [style, tuning, history] = await Promise.all([
+      const [style, learning, tuning, history] = await Promise.all([
         getIntelligenceStyleStatus(),
+        getIntelligenceLearningStatus(),
         getIntelligenceTuningStatus(),
         listIntelligenceEvalHistory(8),
       ]);
       setIntelligenceStyle(style);
       setIntelligenceLanguageMode(style.languageMode);
       setIntelligenceSlangEnabled(style.slangEnabled);
+      setIntelligenceLearning(learning);
       setIntelligenceTuning(tuning);
       setIntelligencePreset((tuning.pending ?? tuning.active).preset);
       setIntelligenceVerbosity((tuning.pending ?? tuning.active).responseVerbosity);
@@ -1439,6 +1453,55 @@ export default function App() {
       });
       setSyncDepth(loadSyncQueue().length);
       setIntelligenceStatus("Intelligence style update queued for sync.");
+    }
+  }
+
+  async function runIntelligenceLearningSourceUpdate(approved: boolean) {
+    const noteId = intelligenceLearningNoteId.trim();
+    if (!noteId) {
+      setIntelligenceStatus("Choose a note before updating learning approval.");
+      return;
+    }
+    try {
+      const response = await updateIntelligenceLearningSource({ noteId, approved });
+      setIntelligenceLearning(response.status);
+      setIntelligenceStatus(
+        approved ? "Learning source approved." : "Learning source removed.",
+      );
+    } catch {
+      setIntelligenceStatus("Learning source update failed.");
+    }
+  }
+
+  async function runIntelligenceLearningNow() {
+    try {
+      const response = await runIntelligenceLearning();
+      setIntelligenceLearning(response.status);
+      setIntelligenceStatus(
+        response.accepted
+          ? `Learning run: sources=${response.scannedSources}, candidates=${response.candidateCount}.`
+          : "No approved learning sources.",
+      );
+    } catch {
+      setIntelligenceStatus("Learning run failed.");
+    }
+  }
+
+  async function runIntelligenceLearningApplyNow() {
+    try {
+      const terms = intelligenceLearning?.candidates.map((item) => item.term) ?? [];
+      const response = await applyIntelligenceLearning({ terms, enableSlang: true });
+      setIntelligenceLearning(response.status);
+      setIntelligenceStyle(response.style);
+      setIntelligenceLanguageMode(response.style.languageMode);
+      setIntelligenceSlangEnabled(response.style.slangEnabled);
+      setIntelligenceStatus(
+        response.accepted
+          ? `Learned slang applied: ${response.appliedTerms.join(", ")}.`
+          : `Learning apply blocked: ${response.reason}.`,
+      );
+    } catch {
+      setIntelligenceStatus("Learning apply failed.");
     }
   }
 
@@ -2305,6 +2368,62 @@ export default function App() {
                 onChange={(event) => setIntelligenceNewSlang(event.target.value)}
                 placeholder="Add slang term"
               />
+              <label>
+                Learning source note
+                <select
+                  value={intelligenceLearningNoteId}
+                  onChange={(event) => setIntelligenceLearningNoteId(event.target.value)}
+                >
+                  <option value="">Select a recent note</option>
+                  {memoryNotes.slice(0, 12).map((note) => (
+                    <option key={note.id} value={note.id}>
+                      {note.title}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <div className="row left">
+                <button type="button" onClick={() => void runIntelligenceLearningSourceUpdate(true)}>
+                  Approve Source
+                </button>
+                <button type="button" onClick={() => void runIntelligenceLearningSourceUpdate(false)}>
+                  Remove Source
+                </button>
+                <button type="button" onClick={() => void runIntelligenceLearningNow()}>
+                  Run Learning
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void runIntelligenceLearningApplyNow()}
+                  disabled={!intelligenceLearning || intelligenceLearning.candidates.length === 0}
+                >
+                  Apply Learned Slang
+                </button>
+              </div>
+              <p>
+                learning sources: {intelligenceLearning ? intelligenceLearning.approvedSources.length : 0} | candidates:{" "}
+                {intelligenceLearning ? intelligenceLearning.candidates.length : 0}
+              </p>
+              <ul>
+                {(intelligenceLearning?.approvedSources ?? []).slice(0, 4).map((item) => (
+                  <li key={item.noteId}>
+                    approved: {item.title} ({formatIsoTime(item.approvedAt)})
+                  </li>
+                ))}
+                {intelligenceLearning && intelligenceLearning.approvedSources.length === 0 ? (
+                  <li>No approved learning sources.</li>
+                ) : null}
+              </ul>
+              <ul>
+                {(intelligenceLearning?.candidates ?? []).slice(0, 6).map((item) => (
+                  <li key={`${item.sourceNoteId}:${item.term}`}>
+                    {item.term} from {item.sourceTitle}: {item.evidence}
+                  </li>
+                ))}
+                {intelligenceLearning && intelligenceLearning.candidates.length === 0 ? (
+                  <li>No learning candidates. Use explicit markers like `slang: astig` in approved notes.</li>
+                ) : null}
+              </ul>
               <label>
                 Preset
                 <select
