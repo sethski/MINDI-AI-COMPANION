@@ -41,6 +41,9 @@ Windows-first local assistant. Current repo layout:
   - `GET /memory/documents/search?query=...`
 - OCR ingestion API:
   - `POST /memory/ocr/import`
+- Background auto-index watcher:
+  - `GET /memory/auto-index/status`
+  - `POST /memory/auto-index/scan`
 - Memory tab UI for note creation and retrieval.
 
 ## Run Desktop
