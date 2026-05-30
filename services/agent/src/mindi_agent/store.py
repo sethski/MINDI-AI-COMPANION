@@ -20,6 +20,8 @@ from .schemas import (
     TaskTimeParseResponse,
     CalendarExportRequest,
     CalendarExportResponse,
+    CalendarImportRequest,
+    CalendarImportResponse,
     AppControlRequest,
     AppControlResponse,
     ActionLogItem,
@@ -812,6 +814,115 @@ class RuntimeStore:
             reason="exported",
             filePath=str(target),
             eventCount=event_count,
+        )
+
+    @staticmethod
+    def _ics_unescape(value: str) -> str:
+        return (
+            value.replace("\\n", "\n")
+            .replace("\\,", ",")
+            .replace("\\;", ";")
+            .replace("\\\\", "\\")
+        )
+
+    def _parse_ics_datetime(self, raw: str) -> datetime | None:
+        value = raw.strip()
+        if not value:
+            return None
+        try:
+            if value.endswith("Z"):
+                dt = datetime.strptime(value, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+                return dt.astimezone(timezone.utc)
+            if "T" in value:
+                dt = datetime.strptime(value, "%Y%m%dT%H%M%S").replace(tzinfo=timezone.utc)
+                return dt.astimezone(timezone.utc)
+            dt = datetime.strptime(value, "%Y%m%d").replace(tzinfo=timezone.utc)
+            return dt.astimezone(timezone.utc)
+        except ValueError:
+            return None
+
+    def import_calendar(self, request: CalendarImportRequest) -> CalendarImportResponse:
+        source = Path(request.filePath).resolve()
+        if not source.exists() or not source.is_file():
+            return CalendarImportResponse(accepted=False, reason="file_not_found", importedCount=0)
+        if source.suffix.lower() != ".ics":
+            return CalendarImportResponse(accepted=False, reason="unsupported_file_type", importedCount=0)
+        if not self._is_path_allowed(source):
+            return CalendarImportResponse(accepted=False, reason="folder_not_allowed", importedCount=0)
+
+        raw_text = source.read_text(encoding="utf-8", errors="ignore")
+        lines = raw_text.splitlines()
+        imported_count = 0
+        current: dict[str, str] = {}
+        in_event = False
+
+        def flush_event() -> None:
+            nonlocal imported_count, current
+            title_raw = current.get("SUMMARY", "").strip()
+            dtstart_raw = current.get("DTSTART", "").strip()
+            if not title_raw or not dtstart_raw:
+                current = {}
+                return
+            due = self._parse_ics_datetime(dtstart_raw)
+            if due is None:
+                current = {}
+                return
+            recurrence: str | None = None
+            rrule = current.get("RRULE", "").upper()
+            if "FREQ=DAILY" in rrule:
+                recurrence = "daily"
+            elif "FREQ=WEEKLY" in rrule:
+                recurrence = "weekly"
+
+            task = TaskItem(
+                id=str(uuid4()),
+                title=self._ics_unescape(title_raw),
+                dueAt=self._format_utc(due),
+                recurrence=recurrence,
+                nextRunAt=self._format_utc(due),
+                status="todo",
+                source="assistant",
+            )
+            self.tasks.insert(0, task)
+            imported_count += 1
+            current = {}
+
+        for raw_line in lines:
+            line = raw_line.strip()
+            if line == "BEGIN:VEVENT":
+                in_event = True
+                current = {}
+                continue
+            if line == "END:VEVENT":
+                if in_event:
+                    flush_event()
+                in_event = False
+                continue
+            if not in_event:
+                continue
+            if ":" not in line:
+                continue
+            key, value = line.split(":", 1)
+            key = key.split(";", 1)[0].upper().strip()
+            current[key] = value.strip()
+
+        if imported_count > 0:
+            self.logs.insert(
+                0,
+                ActionLogItem(
+                    id=str(uuid4()),
+                    intent="calendar_import",
+                    tier=ActionTier.reversible,
+                    result="allowed",
+                    reason=f"events:{imported_count}",
+                    createdAt=now_iso(),
+                ),
+            )
+
+        return CalendarImportResponse(
+            accepted=True,
+            reason="imported",
+            importedCount=imported_count,
         )
 
     def scheduler_scan_once(self) -> SchedulerStatus:

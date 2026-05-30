@@ -255,5 +255,15 @@ class CalendarExportResponse(BaseModel):
     eventCount: int
 
 
+class CalendarImportRequest(BaseModel):
+    filePath: str
+
+
+class CalendarImportResponse(BaseModel):
+    accepted: bool
+    reason: str
+    importedCount: int
+
+
 def now_iso() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
