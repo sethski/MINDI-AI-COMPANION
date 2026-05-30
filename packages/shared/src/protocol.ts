@@ -66,6 +66,7 @@ export interface TaskItem {
   status: "todo" | "in_progress" | "done";
   dueAt?: string;
   recurrence?: "daily" | "weekly";
+  reminderMinutesBefore?: number;
   nextRunAt?: string;
   source: "manual" | "assistant";
 }
