@@ -79,6 +79,7 @@ Windows-first local assistant. Current repo layout:
 - Vision tab capture hook:
   - Captures a live screen frame via browser display-capture API.
   - Sends the frame to local perception analysis and renders block + OCR summary.
+  - Includes richer live diagnostics: confidence/coverage metrics, OCR metadata, and local snapshot-history search/details.
 
 ## Run Desktop
 
