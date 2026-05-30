@@ -61,6 +61,8 @@ class TaskItem(BaseModel):
     title: str
     status: Literal["todo", "in_progress", "done"] = "todo"
     dueAt: str | None = None
+    recurrence: Literal["daily", "weekly"] | None = None
+    nextRunAt: str | None = None
     source: Literal["manual", "assistant"] = "manual"
 
 
@@ -83,6 +85,7 @@ class HubSnapshot(BaseModel):
 class CreateTaskRequest(BaseModel):
     title: str
     dueAt: str | None = None
+    recurrence: Literal["daily", "weekly"] | None = None
 
 
 class SyncQueueRequest(BaseModel):
@@ -216,6 +219,17 @@ class SchedulerStatus(BaseModel):
     alertsLastRun: int = 0
     trackedTasks: int = 0
     lastError: str | None = None
+
+
+class TaskNextRunRequest(BaseModel):
+    dueAt: str
+    recurrence: Literal["daily", "weekly"]
+
+
+class TaskNextRunResponse(BaseModel):
+    accepted: bool
+    reason: str
+    nextRunAt: str | None = None
 
 
 def now_iso() -> str:

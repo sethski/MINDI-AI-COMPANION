@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from shutil import move
 import subprocess
@@ -12,6 +12,8 @@ from .ocr_service import OCR_IMAGE_SUFFIXES, extract_text_for_ocr
 from .schemas import (
     AutoIndexStatus,
     SchedulerStatus,
+    TaskNextRunRequest,
+    TaskNextRunResponse,
     AppControlRequest,
     AppControlResponse,
     ActionLogItem,
@@ -178,6 +180,8 @@ class RuntimeStore:
             id=str(uuid4()),
             title=request.title,
             dueAt=request.dueAt,
+            recurrence=request.recurrence,
+            nextRunAt=request.dueAt,
             status="todo",
             source="manual",
         )
@@ -573,6 +577,29 @@ class RuntimeStore:
             parsed = parsed.replace(tzinfo=timezone.utc)
         return parsed.astimezone(timezone.utc)
 
+    @staticmethod
+    def _format_utc(value: datetime) -> str:
+        return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    def _compute_next_run(self, due: datetime, recurrence: str, now_utc: datetime) -> datetime:
+        interval = timedelta(days=1) if recurrence == "daily" else timedelta(days=7)
+        next_due = due
+        while next_due <= now_utc:
+            next_due = next_due + interval
+        return next_due
+
+    def task_next_run(self, request: TaskNextRunRequest) -> TaskNextRunResponse:
+        due = self._parse_due_at(request.dueAt)
+        if due is None:
+            return TaskNextRunResponse(accepted=False, reason="invalid_dueAt")
+        now_utc = datetime.now(timezone.utc)
+        next_due = self._compute_next_run(due=due, recurrence=request.recurrence, now_utc=now_utc)
+        return TaskNextRunResponse(
+            accepted=True,
+            reason="ok",
+            nextRunAt=self._format_utc(next_due),
+        )
+
     def scheduler_scan_once(self) -> SchedulerStatus:
         now_utc = datetime.now(timezone.utc)
         created_alerts = 0
@@ -605,6 +632,14 @@ class RuntimeStore:
                     ),
                 )
                 self.scheduler_alerted_due[task.id] = marker
+                if task.recurrence in {"daily", "weekly"}:
+                    next_due = self._compute_next_run(
+                        due=due,
+                        recurrence=task.recurrence,
+                        now_utc=now_utc,
+                    )
+                    task.nextRunAt = self._format_utc(next_due)
+                    task.dueAt = task.nextRunAt
                 created_alerts += 1
 
         self.alerts = self.alerts[:100]

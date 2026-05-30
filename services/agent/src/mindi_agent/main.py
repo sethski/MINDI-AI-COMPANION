@@ -11,6 +11,7 @@ from .schemas import (
     FileOrganizeRequest,
     OcrImportRequest,
     SyncQueueRequest,
+    TaskNextRunRequest,
 )
 from .store import RuntimeStore
 
@@ -137,3 +138,8 @@ def ops_scheduler_status():
 @app.post("/ops/scheduler/scan")
 def ops_scheduler_scan():
     return store.scheduler_scan_once()
+
+
+@app.post("/ops/scheduler/next-run")
+def ops_scheduler_next_run(payload: TaskNextRunRequest):
+    return store.task_next_run(payload)
