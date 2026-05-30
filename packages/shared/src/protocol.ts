@@ -218,6 +218,15 @@ export interface AutoIndexStatus {
   lastError?: string;
 }
 
+export interface SchedulerStatus {
+  running: boolean;
+  lastScanAt?: string;
+  alertsTotal: number;
+  alertsLastRun: number;
+  trackedTasks: number;
+  lastError?: string;
+}
+
 export const TAB_ORDER: MindiTabId[] = [
   "home",
   "control",
