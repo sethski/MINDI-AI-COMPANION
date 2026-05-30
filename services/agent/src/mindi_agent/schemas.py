@@ -283,6 +283,11 @@ class AiRuntimeConfig(BaseModel):
     llmModelPath: str = ""
     asrModelPath: str = ""
     ocrModelPath: str = ""
+    llmCommand: str = "llama-cli"
+    llmContextSize: int = 4096
+    llmMaxTokens: int = 256
+    llmTemperature: float = 0.2
+    llmThreads: int = 0
     llmProvider: str = "llama.cpp"
     asrProvider: str = "huggingface_local"
     ocrProvider: str = "huggingface_local"
@@ -305,6 +310,11 @@ class AiRuntimeConfigUpdateRequest(BaseModel):
     llmModelPath: str | None = None
     asrModelPath: str | None = None
     ocrModelPath: str | None = None
+    llmCommand: str | None = None
+    llmContextSize: int | None = None
+    llmMaxTokens: int | None = None
+    llmTemperature: float | None = None
+    llmThreads: int | None = None
     llmProvider: str | None = None
     asrProvider: str | None = None
     ocrProvider: str | None = None

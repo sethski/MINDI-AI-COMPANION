@@ -17,28 +17,36 @@ class LocalAiRuntimeClient:
         self._config = self._load_config()
 
     def _load_config(self) -> dict:
+        defaults = {
+            "llmModelPath": "",
+            "asrModelPath": "",
+            "ocrModelPath": "",
+            "llmCommand": "llama-cli",
+            "llmContextSize": 4096,
+            "llmMaxTokens": 256,
+            "llmTemperature": 0.2,
+            "llmThreads": 0,
+            "llmProvider": "llama.cpp",
+            "asrProvider": "huggingface_local",
+            "ocrProvider": "huggingface_local",
+            "llmModel": "Qwen/Qwen2.5-7B-Instruct",
+            "asrModel": "Qwen/Qwen3-ASR-1.7B",
+            "ocrModel": "zai-org/GLM-OCR",
+            "offlineMode": True,
+            "experimentalAsr": True,
+            "experimentalOcr": True,
+        }
         if not self.config_path.exists():
-            return {
-                "llmModelPath": "",
-                "asrModelPath": "",
-                "ocrModelPath": "",
-                "llmProvider": "llama.cpp",
-                "asrProvider": "huggingface_local",
-                "ocrProvider": "huggingface_local",
-                "llmModel": "Qwen/Qwen2.5-7B-Instruct",
-                "asrModel": "Qwen/Qwen3-ASR-1.7B",
-                "ocrModel": "zai-org/GLM-OCR",
-                "offlineMode": True,
-                "experimentalAsr": True,
-                "experimentalOcr": True,
-            }
+            return defaults
         try:
             payload = json.loads(self.config_path.read_text(encoding="utf-8"))
             if isinstance(payload, dict):
-                return payload
+                merged = dict(defaults)
+                merged.update(payload)
+                return merged
         except Exception:
             pass
-        return {}
+        return defaults
 
     def _save_config(self, config: dict) -> None:
         self.config_path.write_text(json.dumps(config, ensure_ascii=True, indent=2), encoding="utf-8")
@@ -151,6 +159,11 @@ class LocalAiRuntimeClient:
             "llmModelPath",
             "asrModelPath",
             "ocrModelPath",
+            "llmCommand",
+            "llmContextSize",
+            "llmMaxTokens",
+            "llmTemperature",
+            "llmThreads",
             "llmProvider",
             "asrProvider",
             "ocrProvider",
