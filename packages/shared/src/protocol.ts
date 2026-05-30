@@ -209,6 +209,15 @@ export interface OcrImportResponse {
   document?: MemoryDocument;
 }
 
+export interface AutoIndexStatus {
+  running: boolean;
+  watchedPaths: string[];
+  lastScanAt?: string;
+  indexedTotal: number;
+  indexedLastRun: number;
+  lastError?: string;
+}
+
 export const TAB_ORDER: MindiTabId[] = [
   "home",
   "control",
