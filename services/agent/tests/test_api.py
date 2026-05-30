@@ -282,6 +282,42 @@ def test_update_task_status_roundtrip() -> None:
     assert reopened.json()["status"] == "todo"
 
 
+def test_update_task_fields_and_clear_due_recurrence() -> None:
+    due_at = (datetime.now(timezone.utc) + timedelta(hours=3)).isoformat().replace("+00:00", "Z")
+    created = client.post(
+        "/tasks",
+        json={"title": "task-edit-source-8834", "dueAt": due_at, "recurrence": "weekly"},
+    )
+    assert created.status_code == 200
+    task_id = created.json()["id"]
+
+    updated = client.patch(
+        f"/tasks/{task_id}",
+        json={"title": "task-edit-target-8834", "dueAt": None, "recurrence": None, "status": "in_progress"},
+    )
+    assert updated.status_code == 200
+    body = updated.json()
+    assert body["title"] == "task-edit-target-8834"
+    assert body["dueAt"] is None
+    assert body["recurrence"] is None
+    assert body["status"] == "in_progress"
+
+
+def test_delete_task_removes_task() -> None:
+    created = client.post("/tasks", json={"title": "task-delete-1229"})
+    assert created.status_code == 200
+    task_id = created.json()["id"]
+
+    deleted = client.delete(f"/tasks/{task_id}")
+    assert deleted.status_code == 200
+    assert deleted.json()["accepted"] is True
+    assert deleted.json()["deletedId"] == task_id
+
+    tasks = client.get("/tasks")
+    assert tasks.status_code == 200
+    assert not any(item["id"] == task_id for item in tasks.json())
+
+
 def test_scheduler_skips_done_task_and_realerts_when_reopened() -> None:
     title = "scheduler-status-gate-9143"
     due_at = (datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat().replace("+00:00", "Z")
