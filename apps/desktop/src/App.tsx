@@ -35,6 +35,7 @@ import {
   parseTaskTime,
   runSchedulerScanNow,
   exportCalendar,
+  importCalendar,
 } from "./lib/agent-api";
 import { enqueueSyncItem, loadSyncQueue, loadToggleState, saveToggleState } from "./lib/local-state";
 
@@ -499,6 +500,56 @@ export default function App() {
     }
   }
 
+  async function runCalendarImport() {
+    const filePath = prompt(
+      "Calendar file path (.ics)",
+      "data/runtime/exports/mindi-tasks.ics",
+    );
+    if (!filePath) {
+      return;
+    }
+    try {
+      const result = await importCalendar({ filePath: filePath.trim() });
+      if (result.accepted) {
+        setAssistant({
+          reply: `Calendar imported: ${result.importedCount} events converted to tasks.`,
+          decision: {
+            allowed: true,
+            tier: "reversible",
+            reason: "calendar_imported",
+            requiresUnlock: false,
+          },
+          suggestedActions: ["View tasks", "Run scheduler scan"],
+          status: "ready",
+        });
+      } else {
+        setAssistant({
+          reply: `Calendar import failed: ${result.reason}`,
+          decision: {
+            allowed: false,
+            tier: "read_only",
+            reason: "calendar_import_failed",
+            requiresUnlock: false,
+          },
+          suggestedActions: ["Retry import"],
+          status: "blocked",
+        });
+      }
+    } catch {
+      setAssistant({
+        reply: "Calendar import unavailable while offline.",
+        decision: {
+          allowed: false,
+          tier: "read_only",
+          reason: "calendar_import_unavailable",
+          requiresUnlock: false,
+        },
+        suggestedActions: ["Run local agent", "Retry import"],
+        status: "blocked",
+      });
+    }
+  }
+
   return (
     <div className="frame">
       <header className="topbar">
@@ -789,6 +840,9 @@ export default function App() {
             </button>
             <button type="button" onClick={() => void runCalendarExport()}>
               Export Calendar (.ics)
+            </button>
+            <button type="button" onClick={() => void runCalendarImport()}>
+              Import Calendar (.ics)
             </button>
             <div className="toggles">
               {toggles.map((toggle) => (
