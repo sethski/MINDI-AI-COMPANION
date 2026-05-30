@@ -64,6 +64,8 @@ export interface TaskItem {
   title: string;
   status: "todo" | "in_progress" | "done";
   dueAt?: string;
+  recurrence?: "daily" | "weekly";
+  nextRunAt?: string;
   source: "manual" | "assistant";
 }
 
@@ -86,6 +88,18 @@ export interface HubSnapshot {
 export interface CreateTaskRequest {
   title: string;
   dueAt?: string;
+  recurrence?: "daily" | "weekly";
+}
+
+export interface TaskNextRunRequest {
+  dueAt: string;
+  recurrence: "daily" | "weekly";
+}
+
+export interface TaskNextRunResponse {
+  accepted: boolean;
+  reason: string;
+  nextRunAt?: string;
 }
 
 export interface SyncQueueItem {
