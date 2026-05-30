@@ -420,6 +420,42 @@ export interface AsrTranscribeResponse {
   fallbackReason?: string;
 }
 
+export interface AiSmokeProbeResult {
+  attempted: boolean;
+  accepted: boolean;
+  reason: string;
+  provider?: string;
+  model?: string;
+  latencyMs?: number;
+  degraded: boolean;
+  fallbackReason?: string;
+  textPreview?: string;
+  segmentCount?: number;
+}
+
+export interface AiRuntimeSmokeRequest {
+  includeLlm?: boolean;
+  includeAsr?: boolean;
+  includeOcr?: boolean;
+  llmPrompt?: string;
+  languageMode?: "english" | "taglish" | "tagalog";
+  asrFilePath?: string;
+  asrLanguageHint?: string;
+  ocrImagePath?: string;
+}
+
+export interface AiRuntimeSmokeResponse {
+  accepted: boolean;
+  reason: string;
+  startedAt: string;
+  finishedAt: string;
+  probes: {
+    llm: AiSmokeProbeResult;
+    asr: AiSmokeProbeResult;
+    ocr: AiSmokeProbeResult;
+  };
+}
+
 export interface DatasetPrepareRequest {
   datasetPath: string;
   outputDir?: string;
