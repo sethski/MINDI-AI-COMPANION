@@ -438,3 +438,63 @@ def test_calendar_import_dedup_updates_existing_tasks(tmp_path: Path) -> None:
     assert tasks.status_code == 200
     dedup_titles = [item for item in tasks.json() if item["title"] == "Dedup Task"]
     assert len(dedup_titles) == 1
+
+
+def test_calendar_import_uid_match_updates_even_if_due_changes(tmp_path: Path) -> None:
+    first = tmp_path / "uid-first.ics"
+    first.write_text(
+        "\r\n".join(
+            [
+                "BEGIN:VCALENDAR",
+                "VERSION:2.0",
+                "BEGIN:VEVENT",
+                "UID:u-123@test",
+                "DTSTART:20260705T080000Z",
+                "SUMMARY:UID Task",
+                "END:VEVENT",
+                "END:VCALENDAR",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    second = tmp_path / "uid-second.ics"
+    second.write_text(
+        "\r\n".join(
+            [
+                "BEGIN:VCALENDAR",
+                "VERSION:2.0",
+                "BEGIN:VEVENT",
+                "UID:u-123@test",
+                "DTSTART:20260706T090000Z",
+                "SUMMARY:UID Task Renamed",
+                "RRULE:FREQ=DAILY",
+                "END:VEVENT",
+                "END:VCALENDAR",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    client.post(
+        "/control/permissions",
+        json={"scope": "folder", "subject": str(tmp_path), "decision": "allow"},
+    )
+    one = client.post("/calendar/import", json={"filePath": str(first)})
+    assert one.status_code == 200
+    assert one.json()["createdCount"] == 1
+
+    two = client.post("/calendar/import", json={"filePath": str(second)})
+    assert two.status_code == 200
+    body = two.json()
+    assert body["createdCount"] == 0
+    assert body["updatedCount"] == 1
+
+    tasks = client.get("/tasks")
+    assert tasks.status_code == 200
+    uid_tasks = [item for item in tasks.json() if item.get("externalId") == "u-123@test"]
+    assert len(uid_tasks) == 1
+    assert uid_tasks[0]["title"] == "UID Task Renamed"
+    assert uid_tasks[0]["dueAt"] == "2026-07-06T09:00:00Z"
+    assert uid_tasks[0]["recurrence"] == "daily"
