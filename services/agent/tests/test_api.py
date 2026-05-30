@@ -289,3 +289,25 @@ def test_recurring_task_rolls_to_next_due() -> None:
     assert task["nextRunAt"] is not None
     # Should roll forward after scan for recurring task.
     assert task["dueAt"] != due_at
+
+
+def test_parse_time_relative_phrase() -> None:
+    response = client.post(
+        "/ops/scheduler/parse-time",
+        json={"text": "in 2 hours", "timezone": "UTC"},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["accepted"] is True
+    assert body["dueAt"] is not None
+
+
+def test_parse_time_next_weekday_phrase() -> None:
+    response = client.post(
+        "/ops/scheduler/parse-time",
+        json={"text": "next monday 9am", "timezone": "Asia/Manila"},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["accepted"] is True
+    assert body["dueAt"] is not None
