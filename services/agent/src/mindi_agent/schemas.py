@@ -137,5 +137,25 @@ class AppControlResponse(BaseModel):
     requiresConfirmation: bool
 
 
+class MemoryNote(BaseModel):
+    id: str
+    title: str
+    content: str
+    tags: list[str]
+    createdAt: str
+    updatedAt: str
+
+
+class CreateMemoryNoteRequest(BaseModel):
+    title: str
+    content: str
+    tags: list[str] = Field(default_factory=list)
+
+
+class MemorySearchResponse(BaseModel):
+    query: str
+    items: list[MemoryNote]
+
+
 def now_iso() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")

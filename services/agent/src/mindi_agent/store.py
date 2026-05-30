@@ -5,6 +5,7 @@ import subprocess
 from time import time
 from uuid import uuid4
 
+from .memory_db import MemoryDB
 from .schemas import (
     AppControlRequest,
     AppControlResponse,
@@ -15,11 +16,14 @@ from .schemas import (
     AgentStatus,
     AssistantRequest,
     AssistantResponse,
+    CreateMemoryNoteRequest,
     CreateTaskRequest,
     FileOrganizeItem,
     FileOrganizeRequest,
     FileOrganizeResponse,
     HubSnapshot,
+    MemoryNote,
+    MemorySearchResponse,
     PermissionGrant,
     PolicyDecision,
     SyncQueueRequest,
@@ -55,6 +59,7 @@ class RuntimeStore:
     logs: list[ActionLogItem] = field(default_factory=list)
     sync_queue: list[dict] = field(default_factory=list)
     permission_grants: list[PermissionGrant] = field(default_factory=list)
+    memory_db: MemoryDB = field(default_factory=MemoryDB)
 
     def __post_init__(self) -> None:
         # Safe default for local file organization sandbox.
@@ -335,3 +340,24 @@ class RuntimeStore:
             tier=tier,
             requiresConfirmation=requires_confirmation,
         )
+
+    def add_memory_note(self, request: CreateMemoryNoteRequest) -> MemoryNote:
+        note = self.memory_db.add_note(request)
+        self.logs.insert(
+            0,
+            ActionLogItem(
+                id=str(uuid4()),
+                intent=f"memory_note:create:{note.title}",
+                tier=ActionTier.reversible,
+                result="allowed",
+                reason="stored_locally",
+                createdAt=now_iso(),
+            ),
+        )
+        return note
+
+    def list_memory_notes(self, limit: int = 50) -> list[MemoryNote]:
+        return self.memory_db.list_notes(limit=limit)
+
+    def search_memory(self, query: str, limit: int = 50) -> MemorySearchResponse:
+        return MemorySearchResponse(query=query, items=self.memory_db.search_notes(query, limit=limit))

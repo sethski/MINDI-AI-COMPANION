@@ -1,10 +1,11 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 
 from .schemas import (
     AppControlRequest,
     AddPermissionGrantRequest,
     AssistantRequest,
+    CreateMemoryNoteRequest,
     CreateTaskRequest,
     FileOrganizeRequest,
     SyncQueueRequest,
@@ -81,3 +82,18 @@ def control_apps_allowlist():
 @app.post("/control/apps/action")
 def control_apps_action(payload: AppControlRequest):
     return store.control_app(payload)
+
+
+@app.get("/memory/notes")
+def memory_notes(limit: int = Query(default=50, ge=1, le=200)):
+    return store.list_memory_notes(limit=limit)
+
+
+@app.post("/memory/notes")
+def create_memory_note(payload: CreateMemoryNoteRequest):
+    return store.add_memory_note(payload)
+
+
+@app.get("/memory/search")
+def memory_search(q: str = Query(default="", alias="query"), limit: int = Query(default=50, ge=1, le=200)):
+    return store.search_memory(query=q, limit=limit)
