@@ -53,6 +53,7 @@ Windows-first local assistant. Current repo layout:
   - `POST /calendar/export` (`.ics`)
   - `POST /calendar/import` (`.ics` -> tasks)
   - Import path includes conflict detection (UID-first, then title + dueAt fallback).
+  - Import parses `DTSTART;TZID=...`, `VALARM` reminder triggers, and `EXDATE` exclusions.
 - Memory tab UI for note creation and retrieval.
 
 ## Run Desktop
