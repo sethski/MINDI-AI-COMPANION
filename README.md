@@ -115,19 +115,30 @@ Windows-first local assistant. Current repo layout:
   - Sensitive-text redaction toggle (enabled by default) for stored scrape notes and stored perception snapshots.
   - Response metadata reports whether storage redaction was applied and match count.
 
-## Current Implementation (Phase 6 Intelligence Slice)
+## Current Implementation (Phase 6 Intelligence)
 
 - Style profile controls:
   - `GET /ops/intelligence/style`
   - `POST /ops/intelligence/style`
-  - Supports language mode (`english`, `taglish`, `tagalog`) and optional slang-layer terms.
-- Measurable eval loop:
+  - Supports language mode (`english`, `taglish`, `tagalog`) and curated slang-layer terms.
+- Eval suite and reliability loop:
   - `POST /ops/intelligence/eval/run`
   - `GET /ops/intelligence/eval/history`
-  - Local eval run checks core policy behavior and stores score history for controlled tuning.
+  - Supports `active`, `pending`, and `learning` eval scopes with stored score history and gate state.
+- Prompt and policy tuning:
+  - Stage pending tuning candidates before apply.
+  - Apply is blocked unless the exact pending candidate set has already passed eval.
+  - Supports preset, verbosity, and risky-term tuning with discard/reset controls.
+- Self-improvement loop:
+  - Approved local memory notes can be used as learning sources.
+  - Extraction only accepts explicit style markers and filters blocked or risky terms.
+  - Learned slang must pass its own eval gate before apply.
+- Light LoRA-prep export, if justified:
+  - `GET /ops/intelligence/adaptation/status`
+  - `POST /ops/intelligence/adaptation/export`
+  - Recommends `none`, `prompt_only`, or `lora` from local evidence and can export a bounded local adaptation pack when justified.
 - Ops tab intelligence panel:
-  - Update style mode/slang settings.
-  - Run eval and inspect case-level outcomes + historical scores.
+  - Manage active and pending tuning, run evals, review learning sources and candidates, apply gated slang, and export adaptation artifacts.
 
 ## Run Desktop
 
