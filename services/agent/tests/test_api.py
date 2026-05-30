@@ -5,6 +5,7 @@ import base64
 import io
 import subprocess
 from unittest.mock import patch
+from uuid import uuid4
 from PIL import Image, ImageDraw
 
 from mindi_agent.main import app
@@ -213,7 +214,7 @@ def test_ocr_import_missing_file() -> None:
 
 def test_auto_index_scan_and_status(tmp_path: Path) -> None:
     doc = tmp_path / "watcher.md"
-    marker = "autoindex-marker-7734"
+    marker = f"autoindex-marker-{uuid4()}"
     doc.write_text(f"MINDI {marker}", encoding="utf-8")
 
     client.post(
