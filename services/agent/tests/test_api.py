@@ -394,3 +394,47 @@ def test_calendar_import_rejects_non_ics(tmp_path: Path) -> None:
     body = imported.json()
     assert body["accepted"] is False
     assert body["reason"] == "unsupported_file_type"
+
+
+def test_calendar_import_dedup_updates_existing_tasks(tmp_path: Path) -> None:
+    ics = tmp_path / "dedup.ics"
+    ics.write_text(
+        "\r\n".join(
+            [
+                "BEGIN:VCALENDAR",
+                "VERSION:2.0",
+                "BEGIN:VEVENT",
+                "UID:d1@test",
+                "DTSTART:20260703T110000Z",
+                "SUMMARY:Dedup Task",
+                "RRULE:FREQ=WEEKLY",
+                "END:VEVENT",
+                "END:VCALENDAR",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    client.post(
+        "/control/permissions",
+        json={"scope": "folder", "subject": str(tmp_path), "decision": "allow"},
+    )
+
+    first = client.post("/calendar/import", json={"filePath": str(ics)})
+    assert first.status_code == 200
+    first_body = first.json()
+    assert first_body["accepted"] is True
+    assert first_body["createdCount"] == 1
+    assert first_body["updatedCount"] == 0
+
+    second = client.post("/calendar/import", json={"filePath": str(ics)})
+    assert second.status_code == 200
+    second_body = second.json()
+    assert second_body["accepted"] is True
+    assert second_body["createdCount"] == 0
+    assert second_body["updatedCount"] == 1
+
+    tasks = client.get("/tasks")
+    assert tasks.status_code == 200
+    dedup_titles = [item for item in tasks.json() if item["title"] == "Dedup Task"]
+    assert len(dedup_titles) == 1
