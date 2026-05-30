@@ -1,4 +1,8 @@
 import type {
+  AiRuntimeConfigUpdateRequest,
+  AiRuntimeStatusResponse,
+  AsrTranscribeRequest,
+  AsrTranscribeResponse,
   AddPermissionGrantRequest,
   AppControlRequest,
   AppControlResponse,
@@ -61,6 +65,8 @@ import type {
   CalendarExportResponse,
   CalendarImportRequest,
   CalendarImportResponse,
+  DatasetPrepareRequest,
+  DatasetPrepareResponse,
 } from "@mindi/shared";
 
 const AGENT_URL = "http://127.0.0.1:8765";
@@ -88,6 +94,37 @@ export async function sendAssistantRequest(
   payload: AssistantRequest,
 ): Promise<AssistantResponse> {
   return agentFetch<AssistantResponse>("/assistant/respond", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function getAiRuntimeStatus(): Promise<AiRuntimeStatusResponse> {
+  return agentFetch<AiRuntimeStatusResponse>("/ops/ai/status");
+}
+
+export async function updateAiRuntimeConfig(
+  payload: AiRuntimeConfigUpdateRequest,
+): Promise<AiRuntimeStatusResponse> {
+  return agentFetch<AiRuntimeStatusResponse>("/ops/ai/config", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function transcribeAsr(
+  payload: AsrTranscribeRequest,
+): Promise<AsrTranscribeResponse> {
+  return agentFetch<AsrTranscribeResponse>("/ops/asr/transcribe", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function prepareDataset(
+  payload: DatasetPrepareRequest,
+): Promise<DatasetPrepareResponse> {
+  return agentFetch<DatasetPrepareResponse>("/ops/intelligence/dataset/prepare", {
     method: "POST",
     body: JSON.stringify(payload),
   });
