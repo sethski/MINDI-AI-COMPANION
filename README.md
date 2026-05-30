@@ -52,7 +52,7 @@ Windows-first local assistant. Current repo layout:
 - Calendar export:
   - `POST /calendar/export` (`.ics`)
   - `POST /calendar/import` (`.ics` -> tasks)
-  - Import path includes conflict detection (dedupe by title + dueAt, update in-place).
+  - Import path includes conflict detection (UID-first, then title + dueAt fallback).
 - Memory tab UI for note creation and retrieval.
 
 ## Run Desktop
