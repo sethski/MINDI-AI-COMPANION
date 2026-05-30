@@ -293,6 +293,8 @@ export interface PerceptionAnalyzeResponse {
   accepted: boolean;
   reason: string;
   snapshotId?: string;
+  storageRedacted: boolean;
+  redactionCount: number;
   path?: string;
   imageWidth?: number;
   imageHeight?: number;
@@ -358,6 +360,8 @@ export interface WebScrapeResponse {
   accepted: boolean;
   reason: string;
   url: string;
+  storageRedacted: boolean;
+  redactionCount: number;
   title?: string;
   text?: string;
   textLength: number;
@@ -458,6 +462,16 @@ export interface AlertActionResponse {
   reason: string;
   createdTaskId?: string;
   reportPath?: string;
+}
+
+export interface PrivacyStatus {
+  redactionEnabled: boolean;
+  safeStorageDefault: boolean;
+  sensitivePatternCount: number;
+}
+
+export interface PrivacyUpdateRequest {
+  redactionEnabled: boolean;
 }
 
 export const TAB_ORDER: MindiTabId[] = [
