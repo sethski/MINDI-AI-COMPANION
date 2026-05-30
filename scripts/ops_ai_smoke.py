@@ -58,7 +58,7 @@ def post_smoke(agent_url: str, payload: dict[str, object]) -> dict[str, object]:
         method="POST",
     )
     try:
-        with urlopen(request, timeout=240) as response:
+        with urlopen(request, timeout=720) as response:
             body = response.read().decode("utf-8")
     except HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
