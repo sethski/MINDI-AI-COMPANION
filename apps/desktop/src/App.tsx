@@ -200,6 +200,8 @@ export default function App() {
   const [ocrModelPath, setOcrModelPath] = useState("");
   const [asrSourceType, setAsrSourceType] = useState<"file" | "mic">("file");
   const [asrSourceValue, setAsrSourceValue] = useState("data/inbox/sample.wav");
+  const [asrLanguageHint, setAsrLanguageHint] = useState("");
+  const [asrReturnTimestamps, setAsrReturnTimestamps] = useState(false);
   const [asrResult, setAsrResult] = useState<AsrTranscribeResponse | null>(null);
   const [datasetPath, setDatasetPath] = useState("data/datasets/ph-pretrain");
   const [datasetOutputDir, setDatasetOutputDir] = useState("data/runtime/intelligence");
@@ -1864,6 +1866,8 @@ export default function App() {
       const result = await transcribeAsr({
         sourceType: asrSourceType,
         sourceValue: asrSourceValue,
+        languageHint: asrLanguageHint.trim() || undefined,
+        returnTimestamps: asrReturnTimestamps,
       });
       setAsrResult(result);
       if (result.accepted) {
@@ -2419,6 +2423,19 @@ export default function App() {
                 onChange={(event) => setAsrSourceValue(event.target.value)}
                 placeholder={asrSourceType === "file" ? "Audio file path" : "Mic capture token"}
               />
+              <input
+                value={asrLanguageHint}
+                onChange={(event) => setAsrLanguageHint(event.target.value)}
+                placeholder="Language hint (optional, e.g. Filipino)"
+              />
+              <label>
+                <input
+                  type="checkbox"
+                  checked={asrReturnTimestamps}
+                  onChange={(event) => setAsrReturnTimestamps(event.target.checked)}
+                />
+                Request timestamps
+              </label>
               <button type="button" onClick={() => void runAsrTranscription()}>
                 Run ASR
               </button>
