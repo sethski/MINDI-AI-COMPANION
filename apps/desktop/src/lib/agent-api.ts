@@ -24,6 +24,8 @@ import type {
   PerceptionAnalyzeRequest,
   PerceptionAnalyzeResponse,
   PerceptionPermissionStatus,
+  PrivacyStatus,
+  PrivacyUpdateRequest,
   PerceptionSnapshot,
   PerceptionSnapshotSearchResponse,
   PermissionGrant,
@@ -305,6 +307,19 @@ export async function runAlertAction(
   payload: AlertActionRequest,
 ): Promise<AlertActionResponse> {
   return agentFetch<AlertActionResponse>("/ops/alerts/action", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function getPrivacyStatus(): Promise<PrivacyStatus> {
+  return agentFetch<PrivacyStatus>("/ops/privacy/status");
+}
+
+export async function updatePrivacyStatus(
+  payload: PrivacyUpdateRequest,
+): Promise<PrivacyStatus> {
+  return agentFetch<PrivacyStatus>("/ops/privacy/update", {
     method: "POST",
     body: JSON.stringify(payload),
   });
