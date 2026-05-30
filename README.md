@@ -72,6 +72,10 @@ Windows-first local assistant. Current repo layout:
   - `GET /memory/perception`
   - `GET /memory/perception/search?query=...`
   - Assistant context can answer screen-oriented prompts using the latest stored snapshot.
+- Perception safety gate:
+  - `GET /perception/permissions` reports current screen/camera action-permission decisions.
+  - `POST /perception/screen/analyze` now enforces `action=perception.screen.capture` allow grant.
+  - Blocked perception attempts are appended to audit logs with explicit denial/required reasons.
 - Vision tab capture hook:
   - Captures a live screen frame via browser display-capture API.
   - Sends the frame to local perception analysis and renders block + OCR summary.
