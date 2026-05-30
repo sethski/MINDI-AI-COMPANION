@@ -1297,6 +1297,16 @@ def test_intelligence_learning_can_extract_and_apply_slang_from_approved_note() 
     extracted_terms = {item["term"] for item in learning_run_body["candidates"]}
     assert {"astig", "lodi", "solid"}.issubset(extracted_terms)
 
+    learning_eval = client.post(
+        "/ops/intelligence/eval/run",
+        json={"scope": "learning", "terms": ["astig", "solid"]},
+    )
+    assert learning_eval.status_code == 200
+    learning_eval_body = learning_eval.json()
+    assert learning_eval_body["accepted"] is True
+    assert learning_eval_body["scope"] == "learning"
+    assert learning_eval_body["gatePassed"] is True
+
     apply = client.post(
         "/ops/intelligence/learning/apply",
         json={"terms": ["astig", "solid"], "enableSlang": True},
@@ -1315,6 +1325,95 @@ def test_intelligence_learning_can_extract_and_apply_slang_from_approved_note() 
     assert reply.status_code == 200
     assert "[astig]" in reply.json()["reply"]
 
+
+def test_intelligence_learning_source_requires_style_context() -> None:
+    note = client.post(
+        "/memory/notes",
+        json={
+            "title": "General note",
+            "content": "This is a generic memory note without explicit learning markers.",
+            "tags": ["general"],
+        },
+    )
+    assert note.status_code == 200
+    note_body = note.json()
+
+    approved = client.post(
+        "/ops/intelligence/learning/source",
+        json={"noteId": note_body["id"], "approved": True},
+    )
+    assert approved.status_code == 200
+    approved_body = approved.json()
+    assert approved_body["accepted"] is False
+    assert approved_body["reason"] == "note_not_learning_source"
+
+
+def test_intelligence_learning_filters_candidates_and_requires_eval_gate() -> None:
+    style_reset = client.post(
+        "/ops/intelligence/style",
+        json={"languageMode": "english", "slangEnabled": False, "resetSlangTerms": True},
+    )
+    assert style_reset.status_code == 200
+
+    note = client.post(
+        "/memory/notes",
+        json={
+            "title": "Filtered style note",
+            "content": "slang: astig\nslang: notepad\nterm: lodi\nfirewall - taglish",
+            "tags": ["style", "taglish"],
+        },
+    )
+    assert note.status_code == 200
+    note_body = note.json()
+
+    approved = client.post(
+        "/ops/intelligence/learning/source",
+        json={"noteId": note_body["id"], "approved": True},
+    )
+    assert approved.status_code == 200
+    assert approved.json()["accepted"] is True
+
+    learning_run = client.post("/ops/intelligence/learning/run")
+    assert learning_run.status_code == 200
+    learning_run_body = learning_run.json()
+    assert learning_run_body["accepted"] is True
+    extracted_terms = {item["term"] for item in learning_run_body["candidates"]}
+    assert "astig" in extracted_terms
+    assert "lodi" in extracted_terms
+    assert "notepad" not in extracted_terms
+    assert "firewall" not in extracted_terms
+
+    blocked_apply = client.post(
+        "/ops/intelligence/learning/apply",
+        json={"terms": ["astig"], "enableSlang": True},
+    )
+    assert blocked_apply.status_code == 200
+    blocked_apply_body = blocked_apply.json()
+    assert blocked_apply_body["accepted"] is False
+    assert blocked_apply_body["reason"] == "learning_candidates_not_evaluated"
+
+    learning_eval = client.post(
+        "/ops/intelligence/eval/run",
+        json={"scope": "learning", "terms": ["astig"]},
+    )
+    assert learning_eval.status_code == 200
+    learning_eval_body = learning_eval.json()
+    assert learning_eval_body["accepted"] is True
+    assert learning_eval_body["scope"] == "learning"
+    assert learning_eval_body["gatePassed"] is True
+    assert learning_eval_body["score"] == 1.0
+    assert any(case["id"] == "style_learned_slang_reply" and case["accepted"] is True for case in learning_eval_body["cases"])
+
+    applied = client.post(
+        "/ops/intelligence/learning/apply",
+        json={"terms": ["astig"], "enableSlang": True},
+    )
+    assert applied.status_code == 200
+    applied_body = applied.json()
+    assert applied_body["accepted"] is True
+    assert applied_body["reason"] == "applied"
+    assert applied_body["appliedTerms"] == ["astig"]
+    assert "astig" in applied_body["style"]["slangTerms"]
 
 def test_perception_permissions_status_defaults_unset() -> None:
     response = client.get("/perception/permissions")
