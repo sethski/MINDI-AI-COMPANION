@@ -2074,6 +2074,177 @@ def test_ai_runtime_config_update_roundtrip() -> None:
     assert body["config"]["asrReturnTimestamps"] is True
 
 
+def test_ai_runtime_smoke_runtime_unreachable() -> None:
+    with patch.object(
+        store.ai_runtime,
+        "get_status",
+        return_value={
+            "accepted": True,
+            "runtime": {
+                "service": "mindi-ai-runtime",
+                "reachable": False,
+                "url": store.ai_runtime.base_url,
+                "offlineMode": True,
+                "lastError": "runtime_unreachable",
+            },
+            "features": {
+                "llm": {
+                    "enabled": True,
+                    "ready": False,
+                    "experimental": False,
+                    "pathConfigured": False,
+                    "provider": "llama.cpp",
+                    "model": "Qwen/Qwen2.5-7B-Instruct",
+                },
+                "asr": {
+                    "enabled": True,
+                    "ready": False,
+                    "experimental": True,
+                    "pathConfigured": False,
+                    "provider": "huggingface_local",
+                    "model": "Qwen/Qwen3-ASR-1.7B",
+                },
+                "ocr": {
+                    "enabled": True,
+                    "ready": False,
+                    "experimental": True,
+                    "pathConfigured": False,
+                    "provider": "huggingface_local",
+                    "model": "zai-org/GLM-OCR",
+                },
+            },
+            "config": store.ai_runtime._config,
+        },
+    ):
+        response = client.post("/ops/ai/smoke", json={"includeLlm": True, "includeAsr": True, "includeOcr": True})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["accepted"] is False
+    assert body["reason"] == "runtime_unreachable"
+    assert body["probes"]["llm"]["attempted"] is False
+    assert body["probes"]["asr"]["attempted"] is False
+    assert body["probes"]["ocr"]["attempted"] is False
+
+
+def test_ai_runtime_smoke_success_with_mocked_probes(tmp_path: Path) -> None:
+    audio = tmp_path / "sample.wav"
+    audio.write_bytes(b"RIFF....WAVEfmt ")
+    image = tmp_path / "sample.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    client.post(
+        "/control/permissions",
+        json={"scope": "folder", "subject": str(tmp_path), "decision": "allow"},
+    )
+
+    runtime_status = {
+        "accepted": True,
+        "runtime": {
+            "service": "mindi-ai-runtime",
+            "reachable": True,
+            "url": store.ai_runtime.base_url,
+            "offlineMode": True,
+            "lastError": None,
+        },
+        "features": {
+            "llm": {
+                "enabled": True,
+                "ready": True,
+                "experimental": False,
+                "pathConfigured": True,
+                "provider": "llama.cpp",
+                "model": "Qwen/Qwen2.5-7B-Instruct",
+                "lastLatencyMs": 41,
+            },
+            "asr": {
+                "enabled": True,
+                "ready": True,
+                "experimental": True,
+                "pathConfigured": True,
+                "provider": "huggingface_local",
+                "model": "Qwen/Qwen3-ASR-1.7B",
+                "lastLatencyMs": 133,
+            },
+            "ocr": {
+                "enabled": True,
+                "ready": True,
+                "experimental": True,
+                "pathConfigured": True,
+                "provider": "huggingface_local",
+                "model": "zai-org/GLM-OCR",
+                "lastLatencyMs": 88,
+            },
+        },
+        "config": store.ai_runtime._config,
+    }
+
+    with patch.object(store.ai_runtime, "get_status", return_value=runtime_status):
+        with patch.object(
+            store.ai_runtime,
+            "generate_reply",
+            return_value={
+                "accepted": True,
+                "reason": "ok",
+                "reply": "runtime llm ok",
+                "provider": "llama.cpp",
+                "model": "Qwen/Qwen2.5-7B-Instruct",
+                "latencyMs": 41,
+            },
+        ):
+            with patch.object(
+                store.ai_runtime,
+                "transcribe",
+                return_value={
+                    "accepted": True,
+                    "reason": "ok",
+                    "text": "kumusta mundo",
+                    "segments": [{"startMs": 0, "endMs": 900, "text": "kumusta mundo"}],
+                    "provider": "huggingface_local",
+                    "model": "Qwen/Qwen3-ASR-1.7B",
+                    "degraded": False,
+                },
+            ):
+                with patch.object(
+                    store.ai_runtime,
+                    "extract_ocr",
+                    return_value={
+                        "accepted": True,
+                        "reason": "ok",
+                        "text": "OCR sample",
+                        "provider": "huggingface_local",
+                        "model": "zai-org/GLM-OCR",
+                        "degraded": False,
+                        "latencyMs": 88,
+                    },
+                ):
+                    response = client.post(
+                        "/ops/ai/smoke",
+                        json={
+                            "includeLlm": True,
+                            "includeAsr": True,
+                            "includeOcr": True,
+                            "llmPrompt": "hello",
+                            "languageMode": "taglish",
+                            "asrFilePath": str(audio),
+                            "ocrImagePath": str(image),
+                        },
+                    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["accepted"] is True
+    assert body["reason"] == "ok"
+    assert body["probes"]["llm"]["attempted"] is True
+    assert body["probes"]["llm"]["accepted"] is True
+    assert body["probes"]["llm"]["latencyMs"] == 41
+    assert body["probes"]["asr"]["attempted"] is True
+    assert body["probes"]["asr"]["accepted"] is True
+    assert body["probes"]["asr"]["segmentCount"] == 1
+    assert body["probes"]["asr"]["latencyMs"] == 133
+    assert body["probes"]["ocr"]["attempted"] is True
+    assert body["probes"]["ocr"]["accepted"] is True
+    assert body["probes"]["ocr"]["latencyMs"] == 88
+
+
 def test_dataset_prepare_missing_path() -> None:
     response = client.post(
         "/ops/intelligence/dataset/prepare",
