@@ -51,6 +51,51 @@ export interface QuickToggle {
   enabled: boolean;
 }
 
+export interface AlertItem {
+  id: string;
+  severity: "info" | "warning" | "critical";
+  title: string;
+  detail: string;
+  createdAt: string;
+}
+
+export interface TaskItem {
+  id: string;
+  title: string;
+  status: "todo" | "in_progress" | "done";
+  dueAt?: string;
+  source: "manual" | "assistant";
+}
+
+export interface ActionLogItem {
+  id: string;
+  intent: string;
+  tier: ActionTier;
+  result: "allowed" | "blocked";
+  reason: string;
+  createdAt: string;
+}
+
+export interface HubSnapshot {
+  status: AgentStatus;
+  alerts: AlertItem[];
+  tasks: TaskItem[];
+  logs: ActionLogItem[];
+}
+
+export interface CreateTaskRequest {
+  title: string;
+  dueAt?: string;
+}
+
+export interface SyncQueueItem {
+  id: string;
+  type: "chat" | "action" | "note" | "scrape" | "ocr";
+  payload: Record<string, unknown>;
+  createdAt: string;
+  status: "queued" | "synced" | "failed";
+}
+
 export const TAB_ORDER: MindiTabId[] = [
   "home",
   "control",
