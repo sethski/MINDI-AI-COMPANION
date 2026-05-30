@@ -142,3 +142,40 @@ def test_memory_note_create_and_search() -> None:
     body = searched.json()
     assert body["query"] == "memory"
     assert any(item["id"] == created["id"] for item in body["items"])
+
+
+def test_document_import_and_search(tmp_path: Path) -> None:
+    doc = tmp_path / "knowledge.md"
+    doc.write_text("MINDI local memory retrieval and chunk index", encoding="utf-8")
+
+    client.post(
+        "/control/permissions",
+        json={"scope": "folder", "subject": str(tmp_path), "decision": "allow"},
+    )
+
+    imported = client.post("/memory/documents/import", json={"path": str(doc)})
+    assert imported.status_code == 200
+    imported_body = imported.json()
+    assert imported_body["accepted"] is True
+    assert imported_body["document"]["chunkCount"] >= 1
+
+    searched = client.get("/memory/documents/search?query=chunk")
+    assert searched.status_code == 200
+    items = searched.json()["items"]
+    assert any(item["sourcePath"] == str(doc.resolve()) for item in items)
+
+
+def test_document_import_rejects_unsupported_type(tmp_path: Path) -> None:
+    doc = tmp_path / "payload.exe"
+    doc.write_bytes(b"MZ")
+
+    client.post(
+        "/control/permissions",
+        json={"scope": "folder", "subject": str(tmp_path), "decision": "allow"},
+    )
+
+    imported = client.post("/memory/documents/import", json={"path": str(doc)})
+    assert imported.status_code == 200
+    body = imported.json()
+    assert body["accepted"] is False
+    assert body["reason"] == "unsupported_file_type"
