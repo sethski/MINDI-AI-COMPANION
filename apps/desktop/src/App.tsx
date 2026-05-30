@@ -9,6 +9,7 @@ import {
   type MemoryDocumentChunk,
   type MemoryNote,
   type MindiTabId,
+  type PerceptionAnalyzeResponse,
   type PermissionGrant,
   type QuickToggle,
   type SchedulerStatus,
@@ -40,6 +41,7 @@ import {
   runSchedulerScanNow,
   exportCalendar,
   importCalendar,
+  analyzeScreenPerception,
 } from "./lib/agent-api";
 import {
   enqueueSyncItem,
@@ -97,6 +99,11 @@ export default function App() {
   const [autoIndexStatus, setAutoIndexStatus] = useState<AutoIndexStatus | null>(null);
   const [schedulerStatus, setSchedulerStatus] = useState<SchedulerStatus | null>(null);
   const [memoryStatus, setMemoryStatus] = useState("No memory action yet.");
+  const [perceptionStatus, setPerceptionStatus] = useState("No perception run yet.");
+  const [perceptionResult, setPerceptionResult] = useState<PerceptionAnalyzeResponse | null>(null);
+  const [perceptionCapturePreview, setPerceptionCapturePreview] = useState<string | null>(null);
+  const [perceptionIncludeOcr, setPerceptionIncludeOcr] = useState(true);
+  const [perceptionBusy, setPerceptionBusy] = useState(false);
   const [syncReplayBusy, setSyncReplayBusy] = useState(false);
   const [syncReplayRetryToken, setSyncReplayRetryToken] = useState(0);
   const [syncReplayDelayMs, setSyncReplayDelayMs] = useState(2000);
@@ -915,6 +922,81 @@ export default function App() {
     }
   }
 
+  async function runCaptureAndAnalyzeScreen() {
+    if (perceptionBusy) {
+      return;
+    }
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+      setPerceptionStatus("Screen capture is not available in this runtime.");
+      return;
+    }
+
+    let stream: MediaStream | null = null;
+    setPerceptionBusy(true);
+    setPerceptionStatus("Waiting for screen selection...");
+
+    try {
+      stream = await navigator.mediaDevices.getDisplayMedia({
+        video: true,
+        audio: false,
+      });
+      const video = document.createElement("video");
+      video.srcObject = stream;
+
+      await new Promise<void>((resolve, reject) => {
+        const cleanup = () => {
+          video.onloadedmetadata = null;
+          video.onerror = null;
+        };
+        video.onloadedmetadata = () => {
+          cleanup();
+          resolve();
+        };
+        video.onerror = () => {
+          cleanup();
+          reject(new Error("capture_metadata_failed"));
+        };
+      });
+
+      await video.play();
+      const width = Math.max(1, video.videoWidth || 1);
+      const height = Math.max(1, video.videoHeight || 1);
+
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      const context = canvas.getContext("2d");
+      if (!context) {
+        throw new Error("capture_canvas_unavailable");
+      }
+      context.drawImage(video, 0, 0, width, height);
+      const imageDataUrl = canvas.toDataURL("image/png");
+      setPerceptionCapturePreview(imageDataUrl);
+
+      const response = await analyzeScreenPerception({
+        imageDataUrl,
+        includeOcr: perceptionIncludeOcr,
+        maxBlocks: 25,
+      });
+      setPerceptionResult(response);
+      if (response.accepted) {
+        setPerceptionStatus(
+          `Perception ok: ${response.blocks.length} blocks, textLength=${response.textLength}.`,
+        );
+      } else {
+        setPerceptionStatus(`Perception failed: ${response.reason}`);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "capture_failed";
+      setPerceptionStatus(`Screen capture failed: ${message}`);
+    } finally {
+      if (stream) {
+        stream.getTracks().forEach((track) => track.stop());
+      }
+      setPerceptionBusy(false);
+    }
+  }
+
   return (
     <div className="frame">
       <header className="topbar">
@@ -1137,6 +1219,53 @@ export default function App() {
             <p>Only allowlisted folders can be organized.</p>
             <p>Risky actions remain blocked by policy gate.</p>
             <p>All control runs append audit logs.</p>
+          </div>
+        </section>
+      ) : tab === "vision" ? (
+        <section className="hub">
+          <div className="card">
+            <h3>Screen Perception</h3>
+            <div className="stack">
+              <button type="button" onClick={() => void runCaptureAndAnalyzeScreen()} disabled={perceptionBusy}>
+                {perceptionBusy ? "Capturing..." : "Capture Screen + Analyze"}
+              </button>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={perceptionIncludeOcr}
+                  onChange={(event) => setPerceptionIncludeOcr(event.target.checked)}
+                />
+                Include OCR text extraction
+              </label>
+            </div>
+            <p className="assistant-reply">{perceptionStatus}</p>
+            {perceptionCapturePreview ? (
+              <img
+                src={perceptionCapturePreview}
+                alt="Latest screen capture preview"
+                style={{ width: "100%", borderRadius: 8, border: "1px solid #333" }}
+              />
+            ) : null}
+          </div>
+          <div className="card">
+            <h3>Perception Result</h3>
+            <p>
+              {perceptionResult
+                ? `accepted=${String(perceptionResult.accepted)} reason=${perceptionResult.reason}`
+                : "No result yet."}
+            </p>
+            {perceptionResult?.text ? (
+              <p className="assistant-reply">{perceptionResult.text.slice(0, 400)}</p>
+            ) : null}
+            <ul>
+              {(perceptionResult?.blocks ?? []).slice(0, 10).map((block, index) => (
+                <li key={`${block.x}-${block.y}-${index}`}>
+                  [{block.kind}] x={block.x} y={block.y} w={block.width} h={block.height} c=
+                  {block.confidence.toFixed(2)}
+                </li>
+              ))}
+              {perceptionResult && perceptionResult.blocks.length === 0 ? <li>No blocks detected.</li> : null}
+            </ul>
           </div>
         </section>
       ) : (
