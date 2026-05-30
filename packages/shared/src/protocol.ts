@@ -342,6 +342,7 @@ export interface AiRuntimeConfig {
   llmLanguagePackPath: string;
   asrModelPath: string;
   ocrModelPath: string;
+  ocrPythonExecutable: string;
   llmCommand: string;
   llmContextSize: number;
   llmMaxTokens: number;
@@ -377,6 +378,7 @@ export interface AiRuntimeConfigUpdateRequest {
   llmLanguagePackPath?: string;
   asrModelPath?: string;
   ocrModelPath?: string;
+  ocrPythonExecutable?: string;
   llmCommand?: string;
   llmContextSize?: number;
   llmMaxTokens?: number;
