@@ -61,6 +61,7 @@ export interface AlertItem {
 
 export interface TaskItem {
   id: string;
+  externalId?: string;
   title: string;
   status: "todo" | "in_progress" | "done";
   dueAt?: string;
