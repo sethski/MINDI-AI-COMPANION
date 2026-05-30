@@ -5,6 +5,7 @@ import {
   type AssistantResponse,
   type FileOrganizeResponse,
   type HubSnapshot,
+  type MemoryNote,
   type MindiTabId,
   type PermissionGrant,
   type QuickToggle,
@@ -12,11 +13,14 @@ import {
 import {
   addPermissionGrant,
   appControlAction,
+  createMemoryNote,
   createTask,
   fetchAllowedApps,
   fetchHubSnapshot,
   fileOrganize,
   listPermissionGrants,
+  listMemoryNotes,
+  searchMemory,
   sendAssistantRequest,
 } from "./lib/agent-api";
 import { enqueueSyncItem, loadSyncQueue, loadToggleState, saveToggleState } from "./lib/local-state";
@@ -58,6 +62,11 @@ export default function App() {
   const [newAllowApp, setNewAllowApp] = useState("notepad.exe");
   const [closeConfirm, setCloseConfirm] = useState(false);
   const [appResult, setAppResult] = useState<string>("No app action run yet.");
+  const [memoryQuery, setMemoryQuery] = useState("");
+  const [memoryTitle, setMemoryTitle] = useState("");
+  const [memoryContent, setMemoryContent] = useState("");
+  const [memoryNotes, setMemoryNotes] = useState<MemoryNote[]>([]);
+  const [memoryStatus, setMemoryStatus] = useState("No memory action yet.");
 
   useEffect(() => {
     saveToggleState(toggles);
@@ -76,14 +85,20 @@ export default function App() {
 
   useEffect(() => {
     let active = true;
-    Promise.all([fetchHubSnapshot(), listPermissionGrants(), fetchAllowedApps()])
-      .then(([hub, grantList, appAllowlist]) => {
+    Promise.all([
+      fetchHubSnapshot(),
+      listPermissionGrants(),
+      fetchAllowedApps(),
+      listMemoryNotes(20),
+    ])
+      .then(([hub, grantList, appAllowlist, notes]) => {
         if (!active) {
           return;
         }
         setSnapshot(hub);
         setPermissions(grantList);
         setAllowedApps(appAllowlist.apps);
+        setMemoryNotes(notes);
       })
       .catch(() => {
         if (active) {
@@ -240,6 +255,43 @@ export default function App() {
     }
   }
 
+  async function addMemoryNote() {
+    const title = memoryTitle.trim();
+    const content = memoryContent.trim();
+    if (!title || !content) {
+      return;
+    }
+
+    try {
+      const note = await createMemoryNote({
+        title,
+        content,
+        tags: [],
+      });
+      setMemoryNotes((current) => [note, ...current]);
+      setMemoryTitle("");
+      setMemoryContent("");
+      setMemoryStatus("Note stored locally.");
+    } catch {
+      enqueueSyncItem({
+        type: "note",
+        payload: { title, content },
+      });
+      setSyncDepth(loadSyncQueue().length);
+      setMemoryStatus("Agent unavailable. Note queued for sync.");
+    }
+  }
+
+  async function runMemorySearch() {
+    try {
+      const response = await searchMemory(memoryQuery);
+      setMemoryNotes(response.items);
+      setMemoryStatus(`Loaded ${response.items.length} notes.`);
+    } catch {
+      setMemoryStatus("Search failed while offline.");
+    }
+  }
+
   return (
     <div className="frame">
       <header className="topbar">
@@ -263,7 +315,59 @@ export default function App() {
         ))}
       </nav>
 
-      {tab === "control" ? (
+      {tab === "memory" ? (
+        <section className="hub">
+          <div className="card">
+            <h3>Create Memory Note</h3>
+            <div className="stack">
+              <input
+                value={memoryTitle}
+                onChange={(e) => setMemoryTitle(e.target.value)}
+                placeholder="Note title"
+              />
+              <textarea
+                value={memoryContent}
+                onChange={(e) => setMemoryContent(e.target.value)}
+                placeholder="Note content"
+                rows={6}
+              />
+              <button type="button" onClick={() => void addMemoryNote()}>
+                Save Note
+              </button>
+            </div>
+            <p className="assistant-reply">{memoryStatus}</p>
+          </div>
+
+          <div className="card">
+            <h3>Search Memory</h3>
+            <div className="stack">
+              <input
+                value={memoryQuery}
+                onChange={(e) => setMemoryQuery(e.target.value)}
+                placeholder="Search notes by title/content"
+              />
+              <button type="button" onClick={() => void runMemorySearch()}>
+                Search
+              </button>
+            </div>
+            <ul>
+              {memoryNotes.slice(0, 10).map((note) => (
+                <li key={note.id}>
+                  <strong>{note.title}</strong>: {note.content.slice(0, 80)}
+                </li>
+              ))}
+              {memoryNotes.length === 0 && <li>No notes yet.</li>}
+            </ul>
+          </div>
+
+          <div className="card">
+            <h3>Memory Policy</h3>
+            <p>Stored locally in SQLite.</p>
+            <p>Cloud sync remains optional and queued.</p>
+            <p>Use concise notes for faster retrieval.</p>
+          </div>
+        </section>
+      ) : tab === "control" ? (
         <section className="hub">
           <div className="card">
             <h3>File Organize</h3>
