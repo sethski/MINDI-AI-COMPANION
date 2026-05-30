@@ -4,6 +4,7 @@ from pathlib import Path
 import shutil
 import subprocess
 from time import time
+from typing import Any
 
 from fastapi import FastAPI
 from pydantic import BaseModel
@@ -24,6 +25,9 @@ class RuntimeConfig(BaseModel):
     llmModel: str = "Qwen/Qwen2.5-7B-Instruct"
     asrModel: str = "Qwen/Qwen3-ASR-1.7B"
     ocrModel: str = "zai-org/GLM-OCR"
+    asrLanguageHint: str | None = None
+    asrReturnTimestamps: bool = False
+    asrMaxTokens: int = 256
     offlineMode: bool = True
     experimentalAsr: bool = True
     experimentalOcr: bool = True
@@ -37,6 +41,8 @@ class LlmGenerateRequest(BaseModel):
 class AsrTranscribeRequest(BaseModel):
     sourceType: str
     sourceValue: str
+    languageHint: str | None = None
+    returnTimestamps: bool | None = None
 
 
 class OcrExtractRequest(BaseModel):
@@ -45,12 +51,22 @@ class OcrExtractRequest(BaseModel):
 
 app = FastAPI(title="MINDI AI Runtime", version="0.1.0")
 runtime_config = RuntimeConfig()
+asr_runtime_error: str | None = None
+asr_model_ref: str | None = None
+asr_model: Any | None = None
 
 
 def _resolve_model_path(raw_path: str) -> Path | None:
     if not raw_path.strip():
         return None
     return Path(raw_path).expanduser()
+
+
+def _resolve_asr_model_ref() -> str:
+    model_path = runtime_config.asrModelPath.strip()
+    if model_path:
+        return str(Path(model_path).expanduser())
+    return runtime_config.asrModel
 
 
 def _llm_runtime_error(model_path: Path | None) -> str | None:
@@ -62,6 +78,19 @@ def _llm_runtime_error(model_path: Path | None) -> str | None:
         return "llama_cpp_command_missing"
     if shutil.which(runtime_config.llmCommand.strip()) is None:
         return "llama_cpp_binary_missing"
+    return None
+
+
+def _asr_runtime_error(asr_path: Path | None) -> str | None:
+    global asr_runtime_error
+    if asr_path is None:
+        return "model_path_missing"
+    if not asr_path.exists():
+        return "model_path_missing"
+    if not asr_path.is_dir() and not asr_path.is_file():
+        return "model_path_missing"
+    if asr_runtime_error is not None:
+        return asr_runtime_error
     return None
 
 
@@ -140,11 +169,69 @@ def _run_llama_cpp(prompt: str) -> tuple[bool, dict]:
     return True, {"reply": output_text}
 
 
+def _load_qwen_asr_model() -> tuple[bool, dict]:
+    global asr_runtime_error, asr_model_ref, asr_model
+
+    model_ref = _resolve_asr_model_ref()
+    if asr_model is not None and asr_model_ref == model_ref and asr_runtime_error is None:
+        return True, {"reason": "ok"}
+
+    try:
+        from qwen_asr import Qwen3ASRModel
+    except Exception:
+        asr_runtime_error = "qwen_asr_dependency_missing"
+        asr_model = None
+        asr_model_ref = None
+        return False, {"reason": asr_runtime_error}
+
+    kwargs: dict[str, Any] = {
+        "max_new_tokens": max(1, int(runtime_config.asrMaxTokens)),
+    }
+    try:
+        asr_model = Qwen3ASRModel.from_pretrained(model_ref, **kwargs)
+    except Exception:
+        asr_runtime_error = "asr_model_load_failed"
+        asr_model = None
+        asr_model_ref = None
+        return False, {"reason": asr_runtime_error}
+
+    asr_model_ref = model_ref
+    asr_runtime_error = None
+    return True, {"reason": "ok"}
+
+
+def _asr_segments_from_result(text: str, stamp_payload: Any) -> list[dict]:
+    segments: list[dict] = []
+    if isinstance(stamp_payload, list):
+        for item in stamp_payload:
+            start_raw = getattr(item, "start_time", None)
+            end_raw = getattr(item, "end_time", None)
+            label = getattr(item, "text", None)
+            if start_raw is None or end_raw is None:
+                continue
+            try:
+                start_ms = max(0, int(float(start_raw) * 1000))
+                end_ms = max(start_ms, int(float(end_raw) * 1000))
+            except (TypeError, ValueError):
+                continue
+            segments.append(
+                {
+                    "startMs": start_ms,
+                    "endMs": end_ms,
+                    "text": str(label or text),
+                }
+            )
+    if segments:
+        return segments
+    return [{"startMs": 0, "endMs": max(1200, len(text) * 30), "text": text}]
+
+
 def _feature_status() -> dict:
     llm_path = _resolve_model_path(runtime_config.llmModelPath)
     asr_path = _resolve_model_path(runtime_config.asrModelPath)
     ocr_path = _resolve_model_path(runtime_config.ocrModelPath)
     llm_runtime_error = _llm_runtime_error(llm_path)
+    asr_ready_error = _asr_runtime_error(asr_path)
     return {
         "llm": {
             "enabled": True,
@@ -158,13 +245,13 @@ def _feature_status() -> dict:
         },
         "asr": {
             "enabled": True,
-            "ready": bool(asr_path and asr_path.exists()),
+            "ready": asr_ready_error is None,
             "experimental": runtime_config.experimentalAsr,
             "pathConfigured": bool(runtime_config.asrModelPath.strip()),
             "provider": runtime_config.asrProvider,
             "model": runtime_config.asrModel,
             "modelPath": runtime_config.asrModelPath,
-            "lastError": None if (asr_path and asr_path.exists()) else "model_path_missing",
+            "lastError": asr_ready_error,
         },
         "ocr": {
             "enabled": True,
@@ -201,8 +288,12 @@ def runtime_status() -> dict:
 
 @app.post("/runtime/config")
 def runtime_update_config(payload: RuntimeConfig) -> dict:
-    global runtime_config
+    global runtime_config, asr_runtime_error, asr_model_ref, asr_model
     runtime_config = payload
+    # Reset ASR cache to force reload after config changes.
+    asr_runtime_error = None
+    asr_model_ref = None
+    asr_model = None
     return runtime_status()
 
 
@@ -262,19 +353,88 @@ def asr_transcribe(payload: AsrTranscribeRequest) -> dict:
     value = payload.sourceValue.strip()
     if not value:
         return {"accepted": False, "reason": "source_value_required"}
+
     if payload.sourceType == "file":
-        file_path = Path(value).resolve()
+        audio_input = str(Path(value).resolve())
+        file_path = Path(audio_input)
         if not file_path.exists() or not file_path.is_file():
             return {"accepted": False, "reason": "audio_not_found"}
-        label = file_path.stem
     else:
-        label = "live-mic"
-    text = f"Transcribed ({label}) using local ASR runtime."
+        # Mic capture is expected to pass a local audio path or a supported audio URI payload.
+        audio_input = value
+
+    ok, load_result = _load_qwen_asr_model()
+    if not ok:
+        return {
+            "accepted": False,
+            "reason": load_result.get("reason", "asr_backend_unavailable"),
+            "provider": runtime_config.asrProvider,
+            "model": runtime_config.asrModel,
+            "degraded": True,
+        }
+
+    assert asr_model is not None
+    language_hint = payload.languageHint if payload.languageHint is not None else runtime_config.asrLanguageHint
+    return_timestamps = (
+        payload.returnTimestamps if payload.returnTimestamps is not None else runtime_config.asrReturnTimestamps
+    )
+    try:
+        results = asr_model.transcribe(
+            audio=audio_input,
+            language=language_hint,
+            return_time_stamps=bool(return_timestamps),
+        )
+    except ValueError:
+        # Retry without forced-align timestamps when aligner is not configured.
+        try:
+            results = asr_model.transcribe(
+                audio=audio_input,
+                language=language_hint,
+                return_time_stamps=False,
+            )
+        except Exception:
+            return {
+                "accepted": False,
+                "reason": "asr_inference_failed",
+                "provider": runtime_config.asrProvider,
+                "model": runtime_config.asrModel,
+                "degraded": True,
+            }
+    except Exception:
+        return {
+            "accepted": False,
+            "reason": "asr_inference_failed",
+            "provider": runtime_config.asrProvider,
+            "model": runtime_config.asrModel,
+            "degraded": True,
+        }
+
+    if not results:
+        return {
+            "accepted": False,
+            "reason": "asr_empty_result",
+            "provider": runtime_config.asrProvider,
+            "model": runtime_config.asrModel,
+            "degraded": True,
+        }
+
+    first = results[0]
+    text = str(getattr(first, "text", "") or "").strip()
+    if not text:
+        return {
+            "accepted": False,
+            "reason": "asr_no_text_detected",
+            "provider": runtime_config.asrProvider,
+            "model": runtime_config.asrModel,
+            "degraded": True,
+        }
+    time_stamps = getattr(first, "time_stamps", None)
+    segments = _asr_segments_from_result(text, time_stamps)
     return {
         "accepted": True,
         "reason": "ok",
         "text": text,
-        "segments": [{"startMs": 0, "endMs": 1200, "text": text}],
+        "segments": segments,
         "provider": runtime_config.asrProvider,
         "model": runtime_config.asrModel,
         "degraded": False,
