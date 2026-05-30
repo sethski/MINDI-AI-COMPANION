@@ -170,6 +170,8 @@ pnpm dev:ai-runtime
 Notes:
 - Install `llama.cpp` and make sure `llama-cli` is available in your shell `PATH`.
 - Configure `LLM model path (GGUF)` in Settings before using `/assistant/respond` runtime inference.
+- ASR uses `qwen-asr`; configure `ASR model path` for `Qwen/Qwen3-ASR-1.7B`.
+- OCR uses GLM-OCR via Hugging Face `transformers`; configure `OCR model path` for `zai-org/GLM-OCR`.
 
 ## Test Agent
 
