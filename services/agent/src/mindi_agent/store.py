@@ -53,6 +53,7 @@ from .schemas import (
     OcrImportResponse,
     PerceptionAnalyzeRequest,
     PerceptionAnalyzeResponse,
+    PerceptionPermissionStatus,
     PerceptionSnapshot,
     PerceptionSnapshotSearchResponse,
     PerceptionUiBlock,
@@ -62,6 +63,9 @@ from .schemas import (
     TaskItem,
     now_iso,
 )
+
+PERCEPTION_SCREEN_SUBJECT = "perception.screen.capture"
+PERCEPTION_CAMERA_SUBJECT = "perception.camera.capture"
 
 
 def _category_for_suffix(suffix: str) -> str:
@@ -287,7 +291,56 @@ class RuntimeStore:
             createdAt=now_iso(),
         )
         self.permission_grants.insert(0, grant)
+        self.logs.insert(
+            0,
+            ActionLogItem(
+                id=str(uuid4()),
+                intent=f"permission_grant:{grant.scope}:{grant.subject}",
+                tier=ActionTier.reversible,
+                result="allowed",
+                reason=f"decision:{grant.decision}",
+                createdAt=now_iso(),
+            ),
+        )
         return grant
+
+    @staticmethod
+    def _subject_matches(grant_subject: str, target_subject: str) -> bool:
+        grant_value = grant_subject.strip().lower()
+        target_value = target_subject.strip().lower()
+        if not grant_value:
+            return False
+        if grant_value == "*" or grant_value == target_value:
+            return True
+        if grant_value.endswith("*"):
+            return target_value.startswith(grant_value[:-1])
+        return False
+
+    def _resolve_action_permission_decision(self, subject: str) -> str:
+        normalized = subject.strip().lower()
+        if not normalized:
+            return "deny"
+        for grant in self.permission_grants:
+            if grant.scope != "action":
+                continue
+            if self._subject_matches(grant.subject, normalized):
+                return grant.decision
+        return "unset"
+
+    def _is_action_allowed(self, subject: str) -> bool:
+        return self._resolve_action_permission_decision(subject) == "allow"
+
+    def perception_permission_status(self) -> PerceptionPermissionStatus:
+        screen_decision = self._resolve_action_permission_decision(PERCEPTION_SCREEN_SUBJECT)
+        camera_decision = self._resolve_action_permission_decision(PERCEPTION_CAMERA_SUBJECT)
+        return PerceptionPermissionStatus(
+            screenSubject=PERCEPTION_SCREEN_SUBJECT,
+            cameraSubject=PERCEPTION_CAMERA_SUBJECT,
+            screenAllowed=screen_decision == "allow",
+            cameraAllowed=camera_decision == "allow",
+            screenDecision=screen_decision,
+            cameraDecision=camera_decision,
+        )
 
     def list_allowed_apps(self) -> list[str]:
         app_grants = [grant for grant in self.permission_grants if grant.scope == "app"]
@@ -682,6 +735,25 @@ class RuntimeStore:
         return width, height, ui_blocks
 
     def analyze_screen(self, request: PerceptionAnalyzeRequest) -> PerceptionAnalyzeResponse:
+        if not self._is_action_allowed(PERCEPTION_SCREEN_SUBJECT):
+            decision = self._resolve_action_permission_decision(PERCEPTION_SCREEN_SUBJECT)
+            reason = "screen_permission_denied" if decision == "deny" else "screen_permission_required"
+            self.logs.insert(
+                0,
+                ActionLogItem(
+                    id=str(uuid4()),
+                    intent="perception_screen_analyze",
+                    tier=ActionTier.risky,
+                    result="blocked",
+                    reason=reason,
+                    createdAt=now_iso(),
+                ),
+            )
+            return PerceptionAnalyzeResponse(
+                accepted=False,
+                reason=reason,
+            )
+
         source: Path | None = None
         remove_source_after = False
 

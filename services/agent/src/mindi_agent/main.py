@@ -155,6 +155,11 @@ def perception_screen_analyze(payload: PerceptionAnalyzeRequest):
     return store.analyze_screen(payload)
 
 
+@app.get("/perception/permissions")
+def perception_permissions():
+    return store.perception_permission_status()
+
+
 @app.get("/memory/perception")
 def memory_perception(limit: int = Query(default=20, ge=1, le=200)):
     return store.list_perception_snapshots(limit=limit)

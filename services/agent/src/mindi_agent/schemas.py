@@ -265,6 +265,15 @@ class PerceptionSnapshotSearchResponse(BaseModel):
     items: list[PerceptionSnapshot]
 
 
+class PerceptionPermissionStatus(BaseModel):
+    screenSubject: str
+    cameraSubject: str
+    screenAllowed: bool
+    cameraAllowed: bool
+    screenDecision: Literal["allow", "deny", "unset"] = "unset"
+    cameraDecision: Literal["allow", "deny", "unset"] = "unset"
+
+
 class AutoIndexStatus(BaseModel):
     running: bool
     watchedPaths: list[str]
