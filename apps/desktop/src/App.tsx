@@ -5,6 +5,8 @@ import {
   type AlertFeedResponse,
   type AutoIndexStatus,
   type AutomationChainResponse,
+  type IntelligenceEvalRunResponse,
+  type IntelligenceStyleStatus,
   type AssistantResponse,
   type FileOrganizeResponse,
   type HubSnapshot,
@@ -55,7 +57,11 @@ import {
   runSchedulerScanNow,
   scrapeWeb,
   getPrivacyStatus,
+  getIntelligenceStyleStatus,
+  listIntelligenceEvalHistory,
+  runIntelligenceEval,
   updatePrivacyStatus,
+  updateIntelligenceStyleStatus,
   exportCalendar,
   importCalendar,
   analyzeScreenPerception,
@@ -140,6 +146,15 @@ export default function App() {
   const [alertStatus, setAlertStatus] = useState("No alert action yet.");
   const [privacyStatus, setPrivacyStatus] = useState<PrivacyStatus | null>(null);
   const [privacyUiEnabled, setPrivacyUiEnabled] = useState(true);
+  const [intelligenceStyle, setIntelligenceStyle] = useState<IntelligenceStyleStatus | null>(null);
+  const [intelligenceLanguageMode, setIntelligenceLanguageMode] = useState<"english" | "taglish" | "tagalog">(
+    "english",
+  );
+  const [intelligenceSlangEnabled, setIntelligenceSlangEnabled] = useState(false);
+  const [intelligenceNewSlang, setIntelligenceNewSlang] = useState("solid");
+  const [intelligenceEvalResult, setIntelligenceEvalResult] = useState<IntelligenceEvalRunResponse | null>(null);
+  const [intelligenceEvalHistory, setIntelligenceEvalHistory] = useState<IntelligenceEvalRunResponse[]>([]);
+  const [intelligenceStatus, setIntelligenceStatus] = useState("No intelligence run yet.");
   const [opsScrapeUrl, setOpsScrapeUrl] = useState("https://example.com");
   const [opsScrapeStoreAsNote, setOpsScrapeStoreAsNote] = useState(true);
   const [opsScrapeResult, setOpsScrapeResult] = useState<WebScrapeResponse | null>(null);
@@ -192,6 +207,8 @@ export default function App() {
       listSecurityEvents("open", 12),
       getAlertFeed(12),
       getPrivacyStatus(),
+      getIntelligenceStyleStatus(),
+      listIntelligenceEvalHistory(8),
     ])
       .then(
         ([
@@ -206,6 +223,8 @@ export default function App() {
           securityItems,
           alertFeedInitial,
           privacyInitial,
+          intelligenceStyleInitial,
+          intelligenceEvalHistoryInitial,
         ]) => {
         if (!active) {
           return;
@@ -224,6 +243,11 @@ export default function App() {
         setAlertStatus(`Loaded ${alertFeedInitial.items.length} prioritized alerts.`);
         setPrivacyStatus(privacyInitial);
         setPrivacyUiEnabled(privacyInitial.redactionEnabled);
+        setIntelligenceStyle(intelligenceStyleInitial);
+        setIntelligenceLanguageMode(intelligenceStyleInitial.languageMode);
+        setIntelligenceSlangEnabled(intelligenceStyleInitial.slangEnabled);
+        setIntelligenceEvalHistory(intelligenceEvalHistoryInitial);
+        setIntelligenceStatus(`Loaded ${intelligenceEvalHistoryInitial.length} eval history items.`);
         if (snapshotItems.length > 0) {
           setPerceptionSelectedSnapshotId(snapshotItems[0].id);
           setPerceptionSnapshotStatus(`Loaded ${snapshotItems.length} recent snapshots.`);
@@ -468,6 +492,21 @@ export default function App() {
       if (action === "privacy_update") {
         const enabled = Boolean(payload.redactionEnabled);
         await updatePrivacyStatus({ redactionEnabled: enabled });
+        return true;
+      }
+      if (action === "intelligence_style_update") {
+        const languageMode = payload.languageMode;
+        if (languageMode !== "english" && languageMode !== "taglish" && languageMode !== "tagalog") {
+          return false;
+        }
+        await updateIntelligenceStyleStatus({
+          languageMode,
+          slangEnabled: Boolean(payload.slangEnabled),
+          addSlangTerms:
+            typeof payload.addSlangTerm === "string" && payload.addSlangTerm.trim()
+              ? [payload.addSlangTerm.trim()]
+              : [],
+        });
         return true;
       }
     }
@@ -1338,6 +1377,63 @@ export default function App() {
     }
   }
 
+  async function refreshIntelligenceState() {
+    try {
+      const [style, history] = await Promise.all([
+        getIntelligenceStyleStatus(),
+        listIntelligenceEvalHistory(8),
+      ]);
+      setIntelligenceStyle(style);
+      setIntelligenceLanguageMode(style.languageMode);
+      setIntelligenceSlangEnabled(style.slangEnabled);
+      setIntelligenceEvalHistory(history);
+      setIntelligenceStatus(`Intelligence loaded: ${history.length} eval runs.`);
+    } catch {
+      setIntelligenceStatus("Intelligence status unavailable while offline.");
+    }
+  }
+
+  async function runIntelligenceStyleUpdate() {
+    const slangTerm = intelligenceNewSlang.trim();
+    try {
+      const style = await updateIntelligenceStyleStatus({
+        languageMode: intelligenceLanguageMode,
+        slangEnabled: intelligenceSlangEnabled,
+        addSlangTerms: slangTerm ? [slangTerm] : [],
+      });
+      setIntelligenceStyle(style);
+      setIntelligenceLanguageMode(style.languageMode);
+      setIntelligenceSlangEnabled(style.slangEnabled);
+      setIntelligenceStatus("Intelligence style updated.");
+    } catch {
+      enqueueSyncItem({
+        type: "action",
+        payload: {
+          action: "intelligence_style_update",
+          languageMode: intelligenceLanguageMode,
+          slangEnabled: intelligenceSlangEnabled,
+          addSlangTerm: slangTerm,
+        },
+      });
+      setSyncDepth(loadSyncQueue().length);
+      setIntelligenceStatus("Intelligence style update queued for sync.");
+    }
+  }
+
+  async function runIntelligenceEvalNow() {
+    try {
+      const result = await runIntelligenceEval();
+      setIntelligenceEvalResult(result);
+      const history = await listIntelligenceEvalHistory(8);
+      setIntelligenceEvalHistory(history);
+      setIntelligenceStatus(
+        `Eval complete: score=${result.score.toFixed(2)} (${result.passedCases}/${result.totalCases}).`,
+      );
+    } catch {
+      setIntelligenceStatus("Eval run failed.");
+    }
+  }
+
   async function runOpsSecurityScan() {
     try {
       const result = await runSecurityScan();
@@ -2075,6 +2171,80 @@ export default function App() {
                 Refresh Privacy Status
               </button>
             </div>
+          </div>
+
+          <div className="card">
+            <h3>Intelligence Loop</h3>
+            <p>
+              style: {intelligenceStyle ? intelligenceStyle.languageMode : "unknown"} | slang=
+              {intelligenceStyle ? String(intelligenceStyle.slangEnabled) : "unknown"}
+            </p>
+            <div className="stack">
+              <label>
+                Language mode
+                <select
+                  value={intelligenceLanguageMode}
+                  onChange={(event) =>
+                    setIntelligenceLanguageMode(event.target.value as "english" | "taglish" | "tagalog")
+                  }
+                >
+                  <option value="english">English</option>
+                  <option value="taglish">Taglish</option>
+                  <option value="tagalog">Tagalog</option>
+                </select>
+              </label>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={intelligenceSlangEnabled}
+                  onChange={(event) => setIntelligenceSlangEnabled(event.target.checked)}
+                />
+                Enable slang style layer
+              </label>
+              <input
+                value={intelligenceNewSlang}
+                onChange={(event) => setIntelligenceNewSlang(event.target.value)}
+                placeholder="Add slang term"
+              />
+              <div className="row left">
+                <button type="button" onClick={() => void runIntelligenceStyleUpdate()}>
+                  Apply Style
+                </button>
+                <button type="button" onClick={() => void runIntelligenceEvalNow()}>
+                  Run Eval
+                </button>
+                <button type="button" onClick={() => void refreshIntelligenceState()}>
+                  Refresh
+                </button>
+              </div>
+            </div>
+            <p className="assistant-reply">{intelligenceStatus}</p>
+            {intelligenceEvalResult ? (
+              <p>
+                latest score={intelligenceEvalResult.score.toFixed(2)} (
+                {intelligenceEvalResult.passedCases}/{intelligenceEvalResult.totalCases})
+              </p>
+            ) : null}
+            <ul>
+              {(intelligenceEvalResult?.cases ?? []).map((item) => (
+                <li key={item.id}>
+                  {item.id}: {item.accepted ? "pass" : "fail"} ({item.observed})
+                </li>
+              ))}
+              {intelligenceEvalResult && intelligenceEvalResult.cases.length === 0 ? (
+                <li>No eval case results.</li>
+              ) : null}
+            </ul>
+            <h4>Eval History</h4>
+            <ul>
+              {intelligenceEvalHistory.map((item) => (
+                <li key={item.runId}>
+                  {formatIsoTime(item.createdAt)} | score={item.score.toFixed(2)} | passed=
+                  {item.passedCases}/{item.totalCases}
+                </li>
+              ))}
+              {intelligenceEvalHistory.length === 0 ? <li>No eval history yet.</li> : null}
+            </ul>
           </div>
 
           <div className="card">
