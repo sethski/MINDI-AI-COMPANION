@@ -18,6 +18,7 @@ from .schemas import (
     TaskTimeParseRequest,
     CalendarExportRequest,
     CalendarImportRequest,
+    WebScrapeRequest,
 )
 from .store import RuntimeStore
 
@@ -201,6 +202,11 @@ def ops_scheduler_next_run(payload: TaskNextRunRequest):
 @app.post("/ops/scheduler/parse-time")
 def ops_scheduler_parse_time(payload: TaskTimeParseRequest):
     return store.parse_task_time(payload)
+
+
+@app.post("/ops/web/scrape")
+def ops_web_scrape(payload: WebScrapeRequest):
+    return store.scrape_web(payload)
 
 
 @app.post("/calendar/export")

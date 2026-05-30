@@ -274,6 +274,23 @@ class PerceptionPermissionStatus(BaseModel):
     cameraDecision: Literal["allow", "deny", "unset"] = "unset"
 
 
+class WebScrapeRequest(BaseModel):
+    url: str
+    maxChars: int = Field(default=3500, ge=200, le=15000)
+    storeAsNote: bool = False
+
+
+class WebScrapeResponse(BaseModel):
+    accepted: bool
+    reason: str
+    url: str
+    title: str | None = None
+    text: str | None = None
+    textLength: int = 0
+    links: list[str] = Field(default_factory=list)
+    storedNoteId: str | None = None
+
+
 class AutoIndexStatus(BaseModel):
     running: bool
     watchedPaths: list[str]

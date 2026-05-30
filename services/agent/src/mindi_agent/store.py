@@ -2,12 +2,16 @@ import base64
 import binascii
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from html.parser import HTMLParser
 from pathlib import Path
 import re
 from shutil import move
 import subprocess
 from threading import Event, Thread
 from time import time
+from urllib.error import URLError
+from urllib.parse import urljoin, urlparse
+from urllib.request import Request, urlopen
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 from PIL import Image
@@ -61,11 +65,71 @@ from .schemas import (
     PolicyDecision,
     SyncQueueRequest,
     TaskItem,
+    WebScrapeRequest,
+    WebScrapeResponse,
     now_iso,
 )
 
 PERCEPTION_SCREEN_SUBJECT = "perception.screen.capture"
 PERCEPTION_CAMERA_SUBJECT = "perception.camera.capture"
+
+
+class _ScrapeHtmlParser(HTMLParser):
+    def __init__(self, base_url: str, max_links: int = 20) -> None:
+        super().__init__()
+        self.base_url = base_url
+        self.max_links = max_links
+        self.title: str | None = None
+        self._capture_title = False
+        self._skip_depth = 0
+        self._chunks: list[str] = []
+        self._links: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        normalized = tag.lower()
+        if normalized == "title":
+            self._capture_title = True
+        if normalized in {"script", "style", "noscript"}:
+            self._skip_depth += 1
+            return
+        if normalized == "a" and len(self._links) < self.max_links:
+            href = ""
+            for key, value in attrs:
+                if key.lower() == "href" and value:
+                    href = value.strip()
+                    break
+            if href:
+                joined = urljoin(self.base_url, href)
+                if joined not in self._links:
+                    self._links.append(joined)
+
+    def handle_endtag(self, tag: str) -> None:
+        normalized = tag.lower()
+        if normalized == "title":
+            self._capture_title = False
+        if normalized in {"script", "style", "noscript"} and self._skip_depth > 0:
+            self._skip_depth -= 1
+
+    def handle_data(self, data: str) -> None:
+        if self._skip_depth > 0:
+            return
+        text = " ".join(data.split()).strip()
+        if not text:
+            return
+        if self._capture_title:
+            if self.title:
+                self.title = f"{self.title} {text}".strip()
+            else:
+                self.title = text
+            return
+        self._chunks.append(text)
+
+    def parsed_text(self, max_chars: int) -> str:
+        joined = " ".join(self._chunks)
+        return joined[:max_chars].strip()
+
+    def parsed_links(self) -> list[str]:
+        return self._links
 
 
 def _category_for_suffix(suffix: str) -> str:
@@ -351,6 +415,33 @@ class RuntimeStore:
     def _is_app_allowed(self, app_id: str) -> bool:
         return app_id.lower() in {app.lower() for app in self.list_allowed_apps()}
 
+    def _resolve_domain_permission_decision(self, hostname: str) -> str:
+        host = hostname.strip().lower()
+        if not host:
+            return "deny"
+        domain_grants = [grant for grant in self.permission_grants if grant.scope == "domain"]
+        for grant in domain_grants:
+            subject = grant.subject.strip().lower()
+            if not subject:
+                continue
+            if subject == "*" or host == subject or host.endswith(f".{subject}"):
+                return grant.decision
+            if subject.startswith("*."):
+                root = subject[2:]
+                if host == root or host.endswith(f".{root}"):
+                    return grant.decision
+        return "unset"
+
+    def _is_domain_allowed(self, hostname: str) -> bool:
+        decision = self._resolve_domain_permission_decision(hostname)
+        if decision == "deny":
+            return False
+        domain_grants = [grant for grant in self.permission_grants if grant.scope == "domain"]
+        has_allow = any(grant.decision == "allow" for grant in domain_grants)
+        if has_allow:
+            return decision == "allow"
+        return True
+
     def _is_path_allowed(self, path: Path) -> bool:
         normalized = path.resolve()
         grants = [g for g in self.permission_grants if g.scope == "folder"]
@@ -423,6 +514,110 @@ class RuntimeStore:
             reason=reason,
             movedCount=len(items) if request.mode == "apply" else 0,
             items=items,
+        )
+
+    def scrape_web(self, request: WebScrapeRequest) -> WebScrapeResponse:
+        raw_url = (request.url or "").strip()
+        parsed = urlparse(raw_url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            return WebScrapeResponse(
+                accepted=False,
+                reason="invalid_url",
+                url=raw_url,
+            )
+
+        host = parsed.hostname or ""
+        if not self._is_domain_allowed(host):
+            return WebScrapeResponse(
+                accepted=False,
+                reason="domain_not_allowed",
+                url=raw_url,
+            )
+
+        headers = {
+            "User-Agent": "MINDI-Local-Agent/0.2 (+local-safe-scrape)",
+            "Accept": "text/html,text/plain;q=0.9,*/*;q=0.2",
+        }
+        http_request = Request(raw_url, headers=headers, method="GET")
+
+        try:
+            with urlopen(http_request, timeout=10) as response:
+                content_type = str(response.headers.get("Content-Type", "")).lower()
+                body = response.read(512_000)
+        except URLError:
+            return WebScrapeResponse(
+                accepted=False,
+                reason="fetch_failed",
+                url=raw_url,
+            )
+        except Exception:
+            return WebScrapeResponse(
+                accepted=False,
+                reason="fetch_error",
+                url=raw_url,
+            )
+
+        if not body:
+            return WebScrapeResponse(
+                accepted=False,
+                reason="empty_response",
+                url=raw_url,
+            )
+
+        decoded = body.decode("utf-8", errors="ignore")
+        title: str | None = None
+        links: list[str] = []
+        text_content = ""
+
+        if "text/html" in content_type or "<html" in decoded.lower():
+            parser = _ScrapeHtmlParser(base_url=raw_url, max_links=20)
+            parser.feed(decoded)
+            parser.close()
+            title = parser.title
+            links = parser.parsed_links()
+            text_content = parser.parsed_text(max_chars=request.maxChars)
+        elif "text/plain" in content_type:
+            text_content = " ".join(decoded.split())[: request.maxChars].strip()
+        else:
+            return WebScrapeResponse(
+                accepted=False,
+                reason="unsupported_content_type",
+                url=raw_url,
+            )
+
+        stored_note_id: str | None = None
+        if request.storeAsNote and text_content:
+            note_title = (title or parsed.netloc or raw_url)[:140]
+            note = self.add_memory_note(
+                CreateMemoryNoteRequest(
+                    title=f"Web scrape: {note_title}",
+                    content=text_content,
+                    tags=["web", "ops", "scrape"],
+                )
+            )
+            stored_note_id = note.id
+
+        self.logs.insert(
+            0,
+            ActionLogItem(
+                id=str(uuid4()),
+                intent=f"web_scrape:{parsed.netloc}",
+                tier=ActionTier.read_only,
+                result="allowed",
+                reason=f"text:{len(text_content)}",
+                createdAt=now_iso(),
+            ),
+        )
+
+        return WebScrapeResponse(
+            accepted=True,
+            reason="ok",
+            url=raw_url,
+            title=title,
+            text=text_content,
+            textLength=len(text_content),
+            links=links,
+            storedNoteId=stored_note_id,
         )
 
     def control_app(self, request: AppControlRequest) -> AppControlResponse:
