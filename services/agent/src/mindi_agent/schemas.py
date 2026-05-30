@@ -1,0 +1,94 @@
+from datetime import UTC, datetime
+from enum import Enum
+from typing import Literal
+
+from pydantic import BaseModel, Field
+
+
+class ActionTier(str, Enum):
+    read_only = "read_only"
+    reversible = "reversible"
+    risky = "risky"
+    destructive = "destructive"
+
+
+class PolicyDecision(BaseModel):
+    allowed: bool
+    tier: ActionTier
+    reason: str
+    requiresUnlock: bool
+
+
+class ChatMessage(BaseModel):
+    role: Literal["system", "user", "assistant"]
+    content: str
+    timestamp: str | None = None
+
+
+class AssistantRequest(BaseModel):
+    text: str
+    mode: Literal["chat", "action"] = "chat"
+    tab: str | None = None
+    conversation: list[ChatMessage] | None = None
+
+
+class AssistantResponse(BaseModel):
+    reply: str
+    decision: PolicyDecision
+    suggestedActions: list[str]
+    status: str
+
+
+class AgentStatus(BaseModel):
+    state: Literal["ready", "offline", "busy", "blocked"] = "ready"
+    uptimeSeconds: int
+    activeTask: str | None = None
+    listening: bool = True
+    agentVersion: str = "0.1.0"
+    currentProfile: str = "safe"
+
+
+class AlertItem(BaseModel):
+    id: str
+    severity: Literal["info", "warning", "critical"]
+    title: str
+    detail: str
+    createdAt: str
+
+
+class TaskItem(BaseModel):
+    id: str
+    title: str
+    status: Literal["todo", "in_progress", "done"] = "todo"
+    dueAt: str | None = None
+    source: Literal["manual", "assistant"] = "manual"
+
+
+class ActionLogItem(BaseModel):
+    id: str
+    intent: str
+    tier: ActionTier
+    result: Literal["allowed", "blocked"]
+    reason: str
+    createdAt: str
+
+
+class HubSnapshot(BaseModel):
+    status: AgentStatus
+    alerts: list[AlertItem] = Field(default_factory=list)
+    tasks: list[TaskItem] = Field(default_factory=list)
+    logs: list[ActionLogItem] = Field(default_factory=list)
+
+
+class CreateTaskRequest(BaseModel):
+    title: str
+    dueAt: str | None = None
+
+
+class SyncQueueRequest(BaseModel):
+    type: Literal["chat", "action", "note", "scrape", "ocr"]
+    payload: dict
+
+
+def now_iso() -> str:
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
