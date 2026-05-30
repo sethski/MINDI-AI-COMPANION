@@ -141,7 +141,8 @@ body {
 
 button,
 input,
-textarea {
+textarea,
+select {
   border: 1px solid var(--line);
   border-radius: 9px;
   padding: 8px 10px;
