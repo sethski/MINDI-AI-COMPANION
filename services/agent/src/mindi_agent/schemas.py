@@ -360,6 +360,38 @@ class AsrTranscribeResponse(BaseModel):
     fallbackReason: str | None = None
 
 
+class AiSmokeProbeResult(BaseModel):
+    attempted: bool = False
+    accepted: bool = False
+    reason: str
+    provider: str | None = None
+    model: str | None = None
+    latencyMs: int | None = None
+    degraded: bool = False
+    fallbackReason: str | None = None
+    textPreview: str | None = None
+    segmentCount: int | None = None
+
+
+class AiRuntimeSmokeRequest(BaseModel):
+    includeLlm: bool = True
+    includeAsr: bool = False
+    includeOcr: bool = False
+    llmPrompt: str = "Summarize this system status in one sentence."
+    languageMode: Literal["english", "taglish", "tagalog"] = "english"
+    asrFilePath: str | None = None
+    asrLanguageHint: str | None = None
+    ocrImagePath: str | None = None
+
+
+class AiRuntimeSmokeResponse(BaseModel):
+    accepted: bool
+    reason: str
+    startedAt: str
+    finishedAt: str
+    probes: dict[Literal["llm", "asr", "ocr"], AiSmokeProbeResult]
+
+
 class DatasetPrepareRequest(BaseModel):
     datasetPath: str
     outputDir: str | None = None

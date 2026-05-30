@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .schemas import (
     AiRuntimeConfigUpdateRequest,
+    AiRuntimeSmokeRequest,
     AsrTranscribeRequest,
     AppControlRequest,
     DatasetPrepareRequest,
@@ -75,6 +76,11 @@ def ops_ai_config(payload: AiRuntimeConfigUpdateRequest):
 @app.post("/ops/asr/transcribe")
 def ops_asr_transcribe(payload: AsrTranscribeRequest):
     return store.transcribe_audio(payload)
+
+
+@app.post("/ops/ai/smoke")
+def ops_ai_smoke(payload: AiRuntimeSmokeRequest):
+    return store.ai_runtime_smoke(payload)
 
 
 @app.get("/tasks")

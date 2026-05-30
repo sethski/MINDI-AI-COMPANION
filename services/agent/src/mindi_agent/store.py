@@ -26,7 +26,10 @@ from .ocr_service import OCR_IMAGE_SUFFIXES, extract_text_for_ocr
 from .schemas import (
     AiRuntimeConfig,
     AiRuntimeConfigUpdateRequest,
+    AiRuntimeSmokeRequest,
+    AiRuntimeSmokeResponse,
     AiRuntimeFeatureStatus,
+    AiSmokeProbeResult,
     AiRuntimeServiceStatus,
     AiRuntimeStatusResponse,
     AsrSegment,
@@ -381,6 +384,130 @@ class RuntimeStore:
                 "ocr": AiRuntimeFeatureStatus(**feature_payload.get("ocr", {})),
             },
             config=AiRuntimeConfig(**config_payload),
+        )
+
+    def ai_runtime_smoke(self, request: AiRuntimeSmokeRequest) -> AiRuntimeSmokeResponse:
+        started_at = now_iso()
+        status = self.ai_runtime_status()
+        llm_probe = AiSmokeProbeResult(
+            attempted=False,
+            accepted=False,
+            reason="not_requested",
+            degraded=False,
+        )
+        asr_probe = AiSmokeProbeResult(
+            attempted=False,
+            accepted=False,
+            reason="not_requested",
+            degraded=False,
+        )
+        ocr_probe = AiSmokeProbeResult(
+            attempted=False,
+            accepted=False,
+            reason="not_requested",
+            degraded=False,
+        )
+
+        if not status.runtime.reachable:
+            finished_at = now_iso()
+            return AiRuntimeSmokeResponse(
+                accepted=False,
+                reason="runtime_unreachable",
+                startedAt=started_at,
+                finishedAt=finished_at,
+                probes={
+                    "llm": llm_probe,
+                    "asr": asr_probe,
+                    "ocr": ocr_probe,
+                },
+            )
+
+        if request.includeLlm:
+            llm_probe.attempted = True
+            llm_result = self.ai_runtime.generate_reply(
+                prompt=(request.llmPrompt or "").strip(),
+                language_mode=request.languageMode,
+            )
+            llm_probe.accepted = bool(llm_result.get("accepted", False))
+            llm_probe.reason = str(llm_result.get("reason", "runtime_unavailable"))
+            llm_probe.provider = llm_result.get("provider")
+            llm_probe.model = llm_result.get("model")
+            llm_probe.latencyMs = int(llm_result.get("latencyMs", 0)) if llm_result.get("latencyMs") is not None else None
+            llm_probe.degraded = not llm_probe.accepted
+            llm_probe.fallbackReason = None if llm_probe.accepted else llm_probe.reason
+            if llm_probe.accepted:
+                llm_probe.textPreview = str(llm_result.get("reply", ""))[:180]
+
+        if request.includeAsr:
+            asr_probe.attempted = True
+            source_value = (request.asrFilePath or "").strip()
+            if not source_value:
+                asr_probe.reason = "asr_file_path_required"
+            else:
+                asr_response = self.transcribe_audio(
+                    AsrTranscribeRequest(
+                        sourceType="file",
+                        sourceValue=source_value,
+                        languageHint=request.asrLanguageHint,
+                        returnTimestamps=True,
+                    )
+                )
+                asr_probe.accepted = asr_response.accepted
+                asr_probe.reason = asr_response.reason
+                asr_probe.provider = asr_response.provider
+                asr_probe.model = asr_response.model
+                asr_probe.degraded = asr_response.degraded
+                asr_probe.fallbackReason = asr_response.fallbackReason
+                asr_probe.textPreview = (asr_response.text or "")[:180] if asr_response.text else None
+                asr_probe.segmentCount = len(asr_response.segments)
+                status_after_asr = self.ai_runtime_status()
+                asr_probe.latencyMs = status_after_asr.features["asr"].lastLatencyMs
+
+        if request.includeOcr:
+            ocr_probe.attempted = True
+            ocr_path_raw = (request.ocrImagePath or "").strip()
+            if not ocr_path_raw:
+                ocr_probe.reason = "ocr_image_path_required"
+            else:
+                source = Path(ocr_path_raw).resolve()
+                if not source.exists() or not source.is_file():
+                    ocr_probe.reason = "image_not_found"
+                elif not self._is_path_allowed(source):
+                    ocr_probe.reason = "image_file_not_allowed"
+                else:
+                    payload = self.ai_runtime.extract_ocr(path=source)
+                    ocr_probe.accepted = bool(payload.get("accepted", False))
+                    ocr_probe.reason = str(payload.get("reason", "runtime_unavailable"))
+                    ocr_probe.provider = payload.get("provider")
+                    ocr_probe.model = payload.get("model")
+                    ocr_probe.degraded = bool(payload.get("degraded", not ocr_probe.accepted))
+                    ocr_probe.fallbackReason = (
+                        None if ocr_probe.accepted else str(payload.get("fallbackReason") or payload.get("reason"))
+                    )
+                    ocr_text = str(payload.get("text", "") or "")
+                    ocr_probe.textPreview = ocr_text[:180] if ocr_text else None
+                    if payload.get("latencyMs") is not None:
+                        ocr_probe.latencyMs = int(payload.get("latencyMs"))
+                    else:
+                        status_after_ocr = self.ai_runtime_status()
+                        ocr_probe.latencyMs = status_after_ocr.features["ocr"].lastLatencyMs
+
+        all_ok = True
+        for probe in (llm_probe, asr_probe, ocr_probe):
+            if probe.attempted and not probe.accepted:
+                all_ok = False
+                break
+        finished_at = now_iso()
+        return AiRuntimeSmokeResponse(
+            accepted=all_ok,
+            reason="ok" if all_ok else "one_or_more_probes_failed",
+            startedAt=started_at,
+            finishedAt=finished_at,
+            probes={
+                "llm": llm_probe,
+                "asr": asr_probe,
+                "ocr": ocr_probe,
+            },
         )
 
     def transcribe_audio(self, request: AsrTranscribeRequest) -> AsrTranscribeResponse:
