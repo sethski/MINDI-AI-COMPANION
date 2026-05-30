@@ -15,6 +15,7 @@ from .schemas import (
     FileOrganizeRequest,
     OcrImportRequest,
     PerceptionAnalyzeRequest,
+    PrivacyUpdateRequest,
     SyncQueueRequest,
     TaskNextRunRequest,
     TaskTimeParseRequest,
@@ -243,6 +244,16 @@ def ops_alerts_feed(limit: int = Query(default=25, ge=1, le=200)):
 @app.post("/ops/alerts/action")
 def ops_alerts_action(payload: AlertActionRequest):
     return store.alerts_action(payload)
+
+
+@app.get("/ops/privacy/status")
+def ops_privacy_status():
+    return store.privacy_status()
+
+
+@app.post("/ops/privacy/update")
+def ops_privacy_update(payload: PrivacyUpdateRequest):
+    return store.update_privacy(payload)
 
 
 @app.post("/calendar/export")

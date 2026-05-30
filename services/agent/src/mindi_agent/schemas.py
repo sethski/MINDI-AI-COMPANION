@@ -237,6 +237,8 @@ class PerceptionAnalyzeResponse(BaseModel):
     accepted: bool
     reason: str
     snapshotId: str | None = None
+    storageRedacted: bool = False
+    redactionCount: int = 0
     path: str | None = None
     imageWidth: int | None = None
     imageHeight: int | None = None
@@ -284,6 +286,8 @@ class WebScrapeResponse(BaseModel):
     accepted: bool
     reason: str
     url: str
+    storageRedacted: bool = False
+    redactionCount: int = 0
     title: str | None = None
     text: str | None = None
     textLength: int = 0
@@ -384,6 +388,16 @@ class AlertActionResponse(BaseModel):
     reason: str
     createdTaskId: str | None = None
     reportPath: str | None = None
+
+
+class PrivacyStatus(BaseModel):
+    redactionEnabled: bool
+    safeStorageDefault: bool
+    sensitivePatternCount: int
+
+
+class PrivacyUpdateRequest(BaseModel):
+    redactionEnabled: bool
 
 
 class AutoIndexStatus(BaseModel):

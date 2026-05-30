@@ -74,6 +74,8 @@ from .schemas import (
     PerceptionSnapshot,
     PerceptionSnapshotSearchResponse,
     PerceptionUiBlock,
+    PrivacyStatus,
+    PrivacyUpdateRequest,
     PermissionGrant,
     PolicyDecision,
     SyncQueueRequest,
@@ -92,6 +94,18 @@ SUSPICIOUS_PROCESS_RULES: dict[str, tuple[str, str]] = {
     "ncat.exe": ("warning", "Network tunneling utility detected."),
     "nc.exe": ("warning", "Network tunneling utility detected."),
 }
+
+SENSITIVE_TEXT_PATTERNS: list[tuple[str, re.Pattern[str], str]] = [
+    ("email", re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"), "[REDACTED_EMAIL]"),
+    ("phone", re.compile(r"\b(?:\+?\d[\d\-\s]{7,}\d)\b"), "[REDACTED_PHONE]"),
+    ("card", re.compile(r"\b(?:\d[ -]*?){13,19}\b"), "[REDACTED_CARD]"),
+    ("secret", re.compile(r"\b(?:sk|pk|api|token)[-_]?[A-Za-z0-9]{12,}\b", re.IGNORECASE), "[REDACTED_SECRET]"),
+    (
+        "password",
+        re.compile(r"(?i)\b(password|passwd|pwd)\s*[:=]\s*\S+"),
+        "[REDACTED_PASSWORD]",
+    ),
+]
 
 
 class _ScrapeHtmlParser(HTMLParser):
@@ -197,6 +211,7 @@ class RuntimeStore:
     security_events: list[SecurityEvent] = field(default_factory=list)
     security_last_scan: str | None = None
     security_last_error: str | None = None
+    privacy_redaction_enabled: bool = True
 
     def __post_init__(self) -> None:
         # Safe default for local file organization sandbox.
@@ -429,6 +444,36 @@ class RuntimeStore:
             cameraDecision=camera_decision,
         )
 
+    def privacy_status(self) -> PrivacyStatus:
+        return PrivacyStatus(
+            redactionEnabled=self.privacy_redaction_enabled,
+            safeStorageDefault=True,
+            sensitivePatternCount=len(SENSITIVE_TEXT_PATTERNS),
+        )
+
+    def update_privacy(self, request: PrivacyUpdateRequest) -> PrivacyStatus:
+        self.privacy_redaction_enabled = bool(request.redactionEnabled)
+        self.logs.insert(
+            0,
+            ActionLogItem(
+                id=str(uuid4()),
+                intent="privacy_update",
+                tier=ActionTier.reversible,
+                result="allowed",
+                reason=f"redaction:{self.privacy_redaction_enabled}",
+                createdAt=now_iso(),
+            ),
+        )
+        return self.privacy_status()
+
+    def _redact_sensitive_text(self, text: str) -> tuple[str, int]:
+        current = text
+        total = 0
+        for _, pattern, replacement in SENSITIVE_TEXT_PATTERNS:
+            current, count = pattern.subn(replacement, current)
+            total += count
+        return current, total
+
     def list_allowed_apps(self) -> list[str]:
         app_grants = [grant for grant in self.permission_grants if grant.scope == "app"]
         denied = {grant.subject.lower() for grant in app_grants if grant.decision == "deny"}
@@ -609,12 +654,18 @@ class RuntimeStore:
             )
 
         stored_note_id: str | None = None
+        storage_redacted = False
+        redaction_count = 0
+        storage_text = text_content
+        if self.privacy_redaction_enabled and text_content:
+            storage_text, redaction_count = self._redact_sensitive_text(text_content)
+            storage_redacted = redaction_count > 0
         if request.storeAsNote and text_content:
             note_title = (title or parsed.netloc or raw_url)[:140]
             note = self.add_memory_note(
                 CreateMemoryNoteRequest(
                     title=f"Web scrape: {note_title}",
-                    content=text_content,
+                    content=storage_text,
                     tags=["web", "ops", "scrape"],
                 )
             )
@@ -636,6 +687,8 @@ class RuntimeStore:
             accepted=True,
             reason="ok",
             url=raw_url,
+            storageRedacted=storage_redacted,
+            redactionCount=redaction_count,
             title=title,
             text=text_content,
             textLength=len(text_content),
@@ -1529,6 +1582,13 @@ class RuntimeStore:
         if request.includeOcr and ocr_error is not None:
             reason = "ocr_unavailable_blocks_extracted"
 
+        storage_redacted = False
+        redaction_count = 0
+        storage_text = text
+        if self.privacy_redaction_enabled and text:
+            storage_text, redaction_count = self._redact_sensitive_text(text)
+            storage_redacted = redaction_count > 0
+
         self.logs.insert(
             0,
             ActionLogItem(
@@ -1545,7 +1605,7 @@ class RuntimeStore:
             source_path=str(source),
             reason=reason,
             ocr_mode=ocr_mode,
-            text=text,
+            text=storage_text,
             block_count=len(blocks),
             image_width=width,
             image_height=height,
@@ -1555,6 +1615,8 @@ class RuntimeStore:
             accepted=True,
             reason=reason,
             snapshotId=snapshot.id,
+            storageRedacted=storage_redacted,
+            redactionCount=redaction_count,
             path=str(source),
             imageWidth=width,
             imageHeight=height,
