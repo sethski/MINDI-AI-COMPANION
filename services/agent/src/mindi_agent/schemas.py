@@ -243,5 +243,17 @@ class TaskTimeParseResponse(BaseModel):
     dueAt: str | None = None
 
 
+class CalendarExportRequest(BaseModel):
+    fileName: str | None = None
+    includeCompleted: bool = False
+
+
+class CalendarExportResponse(BaseModel):
+    accepted: bool
+    reason: str
+    filePath: str | None = None
+    eventCount: int
+
+
 def now_iso() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")

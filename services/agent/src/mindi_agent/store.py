@@ -18,6 +18,8 @@ from .schemas import (
     TaskNextRunResponse,
     TaskTimeParseRequest,
     TaskTimeParseResponse,
+    CalendarExportRequest,
+    CalendarExportResponse,
     AppControlRequest,
     AppControlResponse,
     ActionLogItem,
@@ -724,6 +726,93 @@ class RuntimeStore:
             )
 
         return TaskTimeParseResponse(accepted=False, reason="unsupported_time_phrase")
+
+    @staticmethod
+    def _ics_escape(value: str) -> str:
+        return (
+            value.replace("\\", "\\\\")
+            .replace(";", "\\;")
+            .replace(",", "\\,")
+            .replace("\n", "\\n")
+        )
+
+    @staticmethod
+    def _ics_dt(value: datetime) -> str:
+        return value.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+    def export_calendar(self, request: CalendarExportRequest) -> CalendarExportResponse:
+        export_dir = Path("data/runtime/exports").resolve()
+        export_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        file_name = (request.fileName or f"mindi-calendar-{timestamp}.ics").strip()
+        if not file_name.lower().endswith(".ics"):
+            file_name = f"{file_name}.ics"
+        safe_name = Path(file_name).name
+        target = export_dir / safe_name
+
+        lines = [
+            "BEGIN:VCALENDAR",
+            "VERSION:2.0",
+            "PRODID:-//MINDI//Task Calendar//EN",
+            "CALSCALE:GREGORIAN",
+            "METHOD:PUBLISH",
+        ]
+
+        event_count = 0
+        now_utc = datetime.now(timezone.utc)
+        for task in self.tasks:
+            if task.status == "done" and not request.includeCompleted:
+                continue
+            due = self._parse_due_at(task.dueAt)
+            if due is None:
+                continue
+
+            uid = f"{task.id}@mindi.local"
+            summary = self._ics_escape(task.title)
+            dtstamp = self._ics_dt(now_utc)
+            dtstart = self._ics_dt(due)
+            dtend = self._ics_dt(due + timedelta(minutes=30))
+            status = "COMPLETED" if task.status == "done" else "CONFIRMED"
+
+            lines.extend(
+                [
+                    "BEGIN:VEVENT",
+                    f"UID:{uid}",
+                    f"DTSTAMP:{dtstamp}",
+                    f"DTSTART:{dtstart}",
+                    f"DTEND:{dtend}",
+                    f"SUMMARY:{summary}",
+                    f"STATUS:{status}",
+                ]
+            )
+            if task.recurrence == "daily":
+                lines.append("RRULE:FREQ=DAILY")
+            elif task.recurrence == "weekly":
+                lines.append("RRULE:FREQ=WEEKLY")
+            lines.append("END:VEVENT")
+            event_count += 1
+
+        lines.append("END:VCALENDAR")
+        target.write_text("\r\n".join(lines) + "\r\n", encoding="utf-8")
+
+        self.logs.insert(
+            0,
+            ActionLogItem(
+                id=str(uuid4()),
+                intent="calendar_export",
+                tier=ActionTier.reversible,
+                result="allowed",
+                reason=f"events:{event_count}",
+                createdAt=now_iso(),
+            ),
+        )
+
+        return CalendarExportResponse(
+            accepted=True,
+            reason="exported",
+            filePath=str(target),
+            eventCount=event_count,
+        )
 
     def scheduler_scan_once(self) -> SchedulerStatus:
         now_utc = datetime.now(timezone.utc)

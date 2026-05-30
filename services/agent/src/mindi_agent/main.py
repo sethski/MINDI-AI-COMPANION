@@ -13,6 +13,7 @@ from .schemas import (
     SyncQueueRequest,
     TaskNextRunRequest,
     TaskTimeParseRequest,
+    CalendarExportRequest,
 )
 from .store import RuntimeStore
 
@@ -149,3 +150,8 @@ def ops_scheduler_next_run(payload: TaskNextRunRequest):
 @app.post("/ops/scheduler/parse-time")
 def ops_scheduler_parse_time(payload: TaskTimeParseRequest):
     return store.parse_task_time(payload)
+
+
+@app.post("/calendar/export")
+def calendar_export(payload: CalendarExportRequest):
+    return store.export_calendar(payload)
