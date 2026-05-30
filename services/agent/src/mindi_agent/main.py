@@ -18,6 +18,7 @@ from .schemas import (
     TaskTimeParseRequest,
     CalendarExportRequest,
     CalendarImportRequest,
+    SecurityRecoveryRequest,
     WebScrapeRequest,
 )
 from .store import RuntimeStore
@@ -207,6 +208,24 @@ def ops_scheduler_parse_time(payload: TaskTimeParseRequest):
 @app.post("/ops/web/scrape")
 def ops_web_scrape(payload: WebScrapeRequest):
     return store.scrape_web(payload)
+
+
+@app.get("/ops/security/events")
+def ops_security_events(
+    status: str = Query(default="open"),
+    limit: int = Query(default=25, ge=1, le=200),
+):
+    return store.list_security_events(status=status, limit=limit)
+
+
+@app.post("/ops/security/scan")
+def ops_security_scan():
+    return store.scan_security()
+
+
+@app.post("/ops/security/recover")
+def ops_security_recover(payload: SecurityRecoveryRequest):
+    return store.recover_security_event(payload)
 
 
 @app.post("/calendar/export")

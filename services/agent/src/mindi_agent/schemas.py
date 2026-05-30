@@ -291,6 +291,41 @@ class WebScrapeResponse(BaseModel):
     storedNoteId: str | None = None
 
 
+class SecurityEvent(BaseModel):
+    id: str
+    severity: Literal["info", "warning", "critical"]
+    title: str
+    detail: str
+    source: Literal["process_scan", "defender_service", "manual"]
+    status: Literal["open", "resolved"] = "open"
+    processName: str | None = None
+    pid: int | None = None
+    recoveryActions: list[str] = Field(default_factory=list)
+    createdAt: str
+    resolvedAt: str | None = None
+
+
+class SecurityScanResponse(BaseModel):
+    accepted: bool
+    reason: str
+    scannedProcessCount: int = 0
+    newAlerts: int = 0
+    events: list[SecurityEvent] = Field(default_factory=list)
+
+
+class SecurityRecoveryRequest(BaseModel):
+    eventId: str
+    action: Literal["dismiss", "deny_app", "kill_process"]
+    target: str | None = None
+    confirm: bool = False
+
+
+class SecurityRecoveryResponse(BaseModel):
+    accepted: bool
+    reason: str
+    event: SecurityEvent | None = None
+
+
 class AutoIndexStatus(BaseModel):
     running: bool
     watchedPaths: list[str]
