@@ -18,7 +18,9 @@ import {
   appControlAction,
   createMemoryNote,
   createTask,
+  deleteTask,
   updateTaskStatus,
+  updateTask,
   fetchAllowedApps,
   getAutoIndexStatus,
   fetchHubSnapshot,
@@ -257,7 +259,7 @@ export default function App() {
     }
   }
 
-  async function runTaskStatusChange(taskId: string, status: "todo" | "done") {
+  async function runTaskStatusChange(taskId: string, status: "todo" | "in_progress" | "done") {
     try {
       const updated = await updateTaskStatus(taskId, { status });
       setSnapshot((current) => ({
@@ -268,6 +270,116 @@ export default function App() {
       enqueueSyncItem({
         type: "action",
         payload: { action: "update_task_status", taskId, status },
+      });
+      setSyncDepth(loadSyncQueue().length);
+    }
+  }
+
+  async function runTaskEdit(taskId: string) {
+    const current = snapshot.tasks.find((task) => task.id === taskId);
+    if (!current) {
+      return;
+    }
+    const titleInput = prompt("Task title", current.title);
+    if (titleInput === null) {
+      return;
+    }
+    const title = titleInput.trim();
+    if (!title) {
+      return;
+    }
+
+    const dueInput = prompt(
+      "Due time (optional): ISO or natural text. Leave empty to clear.",
+      current.dueAt ?? "",
+    );
+    if (dueInput === null) {
+      return;
+    }
+    let dueAt: string | null | undefined;
+    const dueText = dueInput.trim();
+    if (!dueText) {
+      dueAt = null;
+    } else {
+      try {
+        const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+        const parsed = await parseTaskTime({ text: dueText, timezone });
+        if (!parsed.accepted || !parsed.dueAt) {
+          setAssistant({
+            reply: `Could not parse due time: ${parsed.reason}.`,
+            decision: {
+              allowed: false,
+              tier: "read_only",
+              reason: "invalid_due_time",
+              requiresUnlock: false,
+            },
+            suggestedActions: ["Use ISO time", "Try 'tomorrow 9am'"],
+            status: "blocked",
+          });
+          return;
+        }
+        dueAt = parsed.dueAt;
+      } catch {
+        setAssistant({
+          reply: "Due-time parser unavailable while offline.",
+          decision: {
+            allowed: false,
+            tier: "read_only",
+            reason: "parse_service_unavailable",
+            requiresUnlock: false,
+          },
+          suggestedActions: ["Run local agent", "Use ISO time"],
+          status: "blocked",
+        });
+        return;
+      }
+    }
+
+    const recurrenceInput = prompt(
+      "Recurrence: none | daily | weekly",
+      current.recurrence ?? "none",
+    );
+    if (recurrenceInput === null) {
+      return;
+    }
+    const recurrenceText = recurrenceInput.trim().toLowerCase();
+    let recurrence: "daily" | "weekly" | null = null;
+    if (recurrenceText === "daily" || recurrenceText === "weekly") {
+      recurrence = recurrenceText;
+    } else if (recurrenceText !== "none" && recurrenceText !== "") {
+      return;
+    }
+
+    try {
+      const updated = await updateTask(taskId, { title, dueAt, recurrence });
+      setSnapshot((currentSnapshot) => ({
+        ...currentSnapshot,
+        tasks: currentSnapshot.tasks.map((task) => (task.id === updated.id ? updated : task)),
+      }));
+    } catch {
+      enqueueSyncItem({
+        type: "action",
+        payload: { action: "update_task", taskId, title, dueAt, recurrence },
+      });
+      setSyncDepth(loadSyncQueue().length);
+    }
+  }
+
+  async function runTaskDelete(taskId: string) {
+    const allowed = confirm("Delete this task?");
+    if (!allowed) {
+      return;
+    }
+    try {
+      await deleteTask(taskId);
+      setSnapshot((current) => ({
+        ...current,
+        tasks: current.tasks.filter((task) => task.id !== taskId),
+      }));
+    } catch {
+      enqueueSyncItem({
+        type: "action",
+        payload: { action: "delete_task", taskId },
       });
       setSyncDepth(loadSyncQueue().length);
     }
@@ -809,11 +921,34 @@ export default function App() {
                   {" "}
                   <button
                     type="button"
-                    onClick={() =>
-                      void runTaskStatusChange(task.id, task.status === "done" ? "todo" : "done")
-                    }
+                    onClick={() => void runTaskStatusChange(task.id, "in_progress")}
+                    disabled={task.status === "in_progress"}
                   >
-                    {task.status === "done" ? "Reopen" : "Done"}
+                    Start
+                  </button>
+                  {" "}
+                  <button
+                    type="button"
+                    onClick={() => void runTaskStatusChange(task.id, "done")}
+                    disabled={task.status === "done"}
+                  >
+                    Done
+                  </button>
+                  {" "}
+                  <button
+                    type="button"
+                    onClick={() => void runTaskStatusChange(task.id, "todo")}
+                    disabled={task.status === "todo"}
+                  >
+                    Reopen
+                  </button>
+                  {" "}
+                  <button type="button" onClick={() => void runTaskEdit(task.id)}>
+                    Edit
+                  </button>
+                  {" "}
+                  <button type="button" onClick={() => void runTaskDelete(task.id)}>
+                    Delete
                   </button>
                 </li>
               ))}
