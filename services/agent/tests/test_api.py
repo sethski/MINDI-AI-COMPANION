@@ -8,7 +8,7 @@ from unittest.mock import patch
 from uuid import uuid4
 from PIL import Image, ImageDraw
 
-from mindi_agent.main import app
+from mindi_agent.main import app, store
 
 client = TestClient(app)
 
@@ -28,6 +28,35 @@ class _MockUrlResponse:
         if size < 0:
             return self._body
         return self._body[:size]
+
+
+def _reset_intelligence_state_for_adaptation_tests() -> None:
+    store.intelligence_language_mode = "english"
+    store.intelligence_slang_enabled = False
+    store.intelligence_slang_terms = []
+    store.intelligence_tuning_preset = "safe"
+    store.intelligence_tuning_verbosity = "balanced"
+    store.intelligence_tuning_custom_risky_terms = []
+    store.intelligence_tuning_pending_preset = None
+    store.intelligence_tuning_pending_verbosity = None
+    store.intelligence_tuning_pending_custom_risky_terms = []
+    store.intelligence_tuning_pending_version = None
+    store.intelligence_tuning_last_active_eval_score = None
+    store.intelligence_tuning_last_pending_eval_score = None
+    store.intelligence_tuning_last_pending_eval_version = None
+    store.intelligence_eval_history = []
+    store.intelligence_learning_sources = {}
+    store.intelligence_learning_candidates = []
+    store.intelligence_learning_candidate_version = None
+    store.intelligence_learning_last_run_at = None
+    store.intelligence_learning_last_eval_score = None
+    store.intelligence_learning_last_eval_version = None
+    store.intelligence_learning_last_eval_signature = None
+    store.intelligence_learning_last_applied_at = None
+    if hasattr(store, "intelligence_adaptation_last_export_at"):
+        store.intelligence_adaptation_last_export_at = None
+    if hasattr(store, "intelligence_adaptation_last_export_path"):
+        store.intelligence_adaptation_last_export_path = None
 
 
 def test_health() -> None:
@@ -1414,6 +1443,130 @@ def test_intelligence_learning_filters_candidates_and_requires_eval_gate() -> No
     assert applied_body["reason"] == "applied"
     assert applied_body["appliedTerms"] == ["astig"]
     assert "astig" in applied_body["style"]["slangTerms"]
+
+
+def test_intelligence_adaptation_status_requires_justified_evidence() -> None:
+    _reset_intelligence_state_for_adaptation_tests()
+
+    status = client.get("/ops/intelligence/adaptation/status")
+    assert status.status_code == 200
+    status_body = status.json()
+    assert status_body["justified"] is False
+    assert status_body["recommendedMethod"] == "none"
+    assert status_body["exportReady"] is False
+    assert status_body["reason"] == "insufficient_eval_evidence"
+
+    export_attempt = client.post("/ops/intelligence/adaptation/export")
+    assert export_attempt.status_code == 200
+    export_body = export_attempt.json()
+    assert export_body["accepted"] is False
+    assert export_body["reason"] == "adaptation_not_justified"
+    assert export_body["status"]["exportReady"] is False
+
+
+def test_intelligence_adaptation_status_prefers_prompt_controls_without_style_signal() -> None:
+    _reset_intelligence_state_for_adaptation_tests()
+
+    active_eval = client.post("/ops/intelligence/eval/run", json={"scope": "active"})
+    assert active_eval.status_code == 200
+    assert active_eval.json()["gatePassed"] is False
+
+    staged = client.post(
+        "/ops/intelligence/tuning/stage",
+        json={"preset": "balanced", "responseVerbosity": "brief"},
+    )
+    assert staged.status_code == 200
+    pending_eval = client.post("/ops/intelligence/eval/run", json={"scope": "pending"})
+    assert pending_eval.status_code == 200
+    assert pending_eval.json()["gatePassed"] is True
+    applied = client.post("/ops/intelligence/tuning/apply")
+    assert applied.status_code == 200
+    assert applied.json()["accepted"] is True
+
+    status = client.get("/ops/intelligence/adaptation/status")
+    assert status.status_code == 200
+    status_body = status.json()
+    assert status_body["justified"] is False
+    assert status_body["recommendedMethod"] == "prompt_only"
+    assert status_body["exportReady"] is False
+    assert status_body["reason"] == "prompt_controls_sufficient"
+
+
+def test_intelligence_adaptation_export_creates_lora_pack_when_style_signal_is_stable() -> None:
+    _reset_intelligence_state_for_adaptation_tests()
+
+    note = client.post(
+        "/memory/notes",
+        json={
+            "title": "LoRA style note",
+            "content": "slang: astig\nterm: lodi\nsolid - taglish",
+            "tags": ["style", "taglish"],
+        },
+    )
+    assert note.status_code == 200
+    note_id = note.json()["id"]
+
+    approved = client.post("/ops/intelligence/learning/source", json={"noteId": note_id, "approved": True})
+    assert approved.status_code == 200
+    assert approved.json()["accepted"] is True
+
+    learning_run = client.post("/ops/intelligence/learning/run")
+    assert learning_run.status_code == 200
+    assert learning_run.json()["accepted"] is True
+
+    learning_eval = client.post(
+        "/ops/intelligence/eval/run",
+        json={"scope": "learning", "terms": ["astig"]},
+    )
+    assert learning_eval.status_code == 200
+    assert learning_eval.json()["gatePassed"] is True
+
+    learning_apply = client.post(
+        "/ops/intelligence/learning/apply",
+        json={"terms": ["astig"], "enableSlang": True},
+    )
+    assert learning_apply.status_code == 200
+    assert learning_apply.json()["accepted"] is True
+
+    active_eval = client.post("/ops/intelligence/eval/run", json={"scope": "active"})
+    assert active_eval.status_code == 200
+    staged = client.post(
+        "/ops/intelligence/tuning/stage",
+        json={"preset": "companion", "responseVerbosity": "balanced"},
+    )
+    assert staged.status_code == 200
+    pending_eval = client.post("/ops/intelligence/eval/run", json={"scope": "pending"})
+    assert pending_eval.status_code == 200
+    assert pending_eval.json()["gatePassed"] is True
+    tuning_apply = client.post("/ops/intelligence/tuning/apply")
+    assert tuning_apply.status_code == 200
+    assert tuning_apply.json()["accepted"] is True
+
+    status = client.get("/ops/intelligence/adaptation/status")
+    assert status.status_code == 200
+    status_body = status.json()
+    assert status_body["justified"] is True
+    assert status_body["recommendedMethod"] == "lora"
+    assert status_body["exportReady"] is True
+    assert status_body["appliedSlangCount"] == 1
+    assert status_body["passedLearningRuns"] >= 1
+    assert status_body["passedPendingRuns"] >= 1
+
+    export_response = client.post("/ops/intelligence/adaptation/export")
+    assert export_response.status_code == 200
+    export_body = export_response.json()
+    assert export_body["accepted"] is True
+    assert export_body["reason"] == "exported"
+    assert export_body["method"] == "lora"
+    assert export_body["exampleCount"] >= 3
+    assert export_body["exportPath"]
+
+    export_path = Path(export_body["exportPath"])
+    assert export_path.exists() is True
+    payload = export_path.read_text(encoding="utf-8")
+    assert '"recommendedMethod": "lora"' in payload
+    assert '"appliedSlangTerms": [' in payload
+    assert '"astig"' in payload
 
 def test_perception_permissions_status_defaults_unset() -> None:
     response = client.get("/perception/permissions")
