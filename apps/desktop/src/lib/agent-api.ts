@@ -9,6 +9,7 @@ import type {
   DocumentSearchResponse,
   CreateTaskRequest,
   TaskStatusUpdateRequest,
+  TaskUpdateRequest,
   FileOrganizeRequest,
   FileOrganizeResponse,
   HubSnapshot,
@@ -74,6 +75,25 @@ export async function updateTaskStatus(
     method: "PATCH",
     body: JSON.stringify(payload),
   });
+}
+
+export async function updateTask(
+  taskId: string,
+  payload: TaskUpdateRequest,
+): Promise<TaskItem> {
+  return agentFetch<TaskItem>(`/tasks/${encodeURIComponent(taskId)}`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function deleteTask(taskId: string): Promise<{ accepted: boolean; deletedId: string }> {
+  return agentFetch<{ accepted: boolean; deletedId: string }>(
+    `/tasks/${encodeURIComponent(taskId)}`,
+    {
+      method: "DELETE",
+    },
+  );
 }
 
 export async function listPermissionGrants(): Promise<PermissionGrant[]> {
