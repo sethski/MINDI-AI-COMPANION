@@ -151,6 +151,20 @@ class MemoryDB:
             ).fetchall()
         return [self._row_to_note(row) for row in rows]
 
+    def get_note(self, note_id: str) -> MemoryNote | None:
+        with self._lock, self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT id, title, content, tags, created_at, updated_at
+                FROM memory_notes
+                WHERE id = ?;
+                """,
+                (note_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return self._row_to_note(row)
+
     def search_notes(self, query: str, limit: int = 50) -> list[MemoryNote]:
         q = query.strip()
         if not q:

@@ -77,6 +77,14 @@ from .schemas import (
     IntelligenceEvalCaseResult,
     IntelligenceEvalRunRequest,
     IntelligenceEvalRunResponse,
+    IntelligenceLearningApplyRequest,
+    IntelligenceLearningApplyResponse,
+    IntelligenceLearningCandidate,
+    IntelligenceLearningRunResponse,
+    IntelligenceLearningSourceRequest,
+    IntelligenceLearningSourceResponse,
+    IntelligenceLearningSourceSummary,
+    IntelligenceLearningStatus,
     IntelligenceTuningApplyResponse,
     IntelligenceTuningConfig,
     IntelligenceTuningStageRequest,
@@ -114,6 +122,11 @@ SENSITIVE_TEXT_PATTERNS: list[tuple[str, re.Pattern[str], str]] = [
         re.compile(r"(?i)\b(password|passwd|pwd)\s*[:=]\s*\S+"),
         "[REDACTED_PASSWORD]",
     ),
+]
+
+SLANG_EXPLICIT_PATTERNS: list[re.Pattern[str]] = [
+    re.compile(r"(?im)\b(?:slang|term|phrase)\s*[:=-]\s*([A-Za-z][A-Za-z0-9'-]{1,19})\b"),
+    re.compile(r"(?im)\b([A-Za-z][A-Za-z0-9'-]{1,19})\b\s*[-:]\s*(?:slang|taglish|tagalog)\b"),
 ]
 
 
@@ -235,6 +248,10 @@ class RuntimeStore:
     intelligence_tuning_last_pending_eval_score: float | None = None
     intelligence_tuning_last_pending_eval_version: str | None = None
     intelligence_eval_history: list[IntelligenceEvalRunResponse] = field(default_factory=list)
+    intelligence_learning_sources: dict[str, IntelligenceLearningSourceSummary] = field(default_factory=dict)
+    intelligence_learning_candidates: list[IntelligenceLearningCandidate] = field(default_factory=list)
+    intelligence_learning_last_run_at: str | None = None
+    intelligence_learning_last_applied_at: str | None = None
 
     def __post_init__(self) -> None:
         # Safe default for local file organization sandbox.
@@ -580,6 +597,19 @@ class RuntimeStore:
             canApplyPending=can_apply_pending,
         )
 
+    def intelligence_learning_status(self) -> IntelligenceLearningStatus:
+        approved_sources = sorted(
+            self.intelligence_learning_sources.values(),
+            key=lambda item: item.approvedAt,
+            reverse=True,
+        )
+        return IntelligenceLearningStatus(
+            approvedSources=approved_sources,
+            candidates=self.intelligence_learning_candidates[:50],
+            lastRunAt=self.intelligence_learning_last_run_at,
+            lastAppliedAt=self.intelligence_learning_last_applied_at,
+        )
+
     def update_intelligence_style(self, request: IntelligenceStyleUpdateRequest) -> IntelligenceStyleStatus:
         if request.languageMode is not None:
             self.intelligence_language_mode = request.languageMode
@@ -748,6 +778,173 @@ class RuntimeStore:
 
     def list_intelligence_eval_history(self, limit: int = 20) -> list[IntelligenceEvalRunResponse]:
         return self.intelligence_eval_history[: max(1, min(limit, 200))]
+
+    def update_intelligence_learning_source(
+        self,
+        request: IntelligenceLearningSourceRequest,
+    ) -> IntelligenceLearningSourceResponse:
+        note = self.memory_db.get_note(request.noteId)
+        if note is None:
+            return IntelligenceLearningSourceResponse(
+                accepted=False,
+                reason="note_not_found",
+                status=self.intelligence_learning_status(),
+            )
+        if request.approved:
+            self.intelligence_learning_sources[note.id] = IntelligenceLearningSourceSummary(
+                noteId=note.id,
+                title=note.title,
+                tags=note.tags,
+                approvedAt=now_iso(),
+            )
+            reason = "source_approved"
+        else:
+            self.intelligence_learning_sources.pop(note.id, None)
+            self.intelligence_learning_candidates = [
+                item for item in self.intelligence_learning_candidates if item.sourceNoteId != note.id
+            ]
+            reason = "source_removed"
+        self.logs.insert(
+            0,
+            ActionLogItem(
+                id=str(uuid4()),
+                intent="intelligence_learning_source_update",
+                tier=ActionTier.reversible,
+                result="allowed",
+                reason=f"{reason}:{note.id}",
+                createdAt=now_iso(),
+            ),
+        )
+        return IntelligenceLearningSourceResponse(
+            accepted=True,
+            reason=reason,
+            status=self.intelligence_learning_status(),
+        )
+
+    @staticmethod
+    def _extract_slang_candidates_from_text(text: str) -> list[tuple[str, str]]:
+        candidates: list[tuple[str, str]] = []
+        seen: set[str] = set()
+        for raw_line in text.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            for pattern in SLANG_EXPLICIT_PATTERNS:
+                for match in pattern.finditer(line):
+                    term = (match.group(1) or "").strip().lower()
+                    if len(term) < 2 or term in seen:
+                        continue
+                    seen.add(term)
+                    candidates.append((term, line[:180]))
+        return candidates
+
+    def run_intelligence_learning(self) -> IntelligenceLearningRunResponse:
+        approved_sources = list(self.intelligence_learning_sources.values())
+        if not approved_sources:
+            return IntelligenceLearningRunResponse(
+                accepted=False,
+                reason="no_approved_sources",
+                scannedSources=0,
+                candidateCount=0,
+                candidates=[],
+                status=self.intelligence_learning_status(),
+            )
+
+        existing_terms = {term.lower() for term in self.intelligence_slang_terms}
+        results: list[IntelligenceLearningCandidate] = []
+        seen_pairs: set[tuple[str, str]] = set()
+        for source in approved_sources:
+            note = self.memory_db.get_note(source.noteId)
+            if note is None:
+                continue
+            for term, evidence in self._extract_slang_candidates_from_text(note.content):
+                if term in existing_terms:
+                    continue
+                key = (source.noteId, term)
+                if key in seen_pairs:
+                    continue
+                seen_pairs.add(key)
+                results.append(
+                    IntelligenceLearningCandidate(
+                        term=term,
+                        sourceNoteId=source.noteId,
+                        sourceTitle=note.title,
+                        evidence=evidence,
+                    )
+                )
+
+        self.intelligence_learning_candidates = results[:50]
+        self.intelligence_learning_last_run_at = now_iso()
+        self.logs.insert(
+            0,
+            ActionLogItem(
+                id=str(uuid4()),
+                intent="intelligence_learning_run",
+                tier=ActionTier.read_only,
+                result="allowed",
+                reason=f"sources:{len(approved_sources)},candidates:{len(self.intelligence_learning_candidates)}",
+                createdAt=self.intelligence_learning_last_run_at,
+            ),
+        )
+        return IntelligenceLearningRunResponse(
+            accepted=True,
+            reason="ok",
+            scannedSources=len(approved_sources),
+            candidateCount=len(self.intelligence_learning_candidates),
+            candidates=self.intelligence_learning_candidates[:50],
+            status=self.intelligence_learning_status(),
+        )
+
+    def apply_intelligence_learning(
+        self,
+        request: IntelligenceLearningApplyRequest,
+    ) -> IntelligenceLearningApplyResponse:
+        selected_terms = {term.strip().lower() for term in request.terms if term.strip()}
+        if not selected_terms:
+            selected_terms = {item.term.lower() for item in self.intelligence_learning_candidates}
+        if not selected_terms:
+            return IntelligenceLearningApplyResponse(
+                accepted=False,
+                reason="no_candidates_selected",
+                appliedTerms=[],
+                style=self.intelligence_style_status(),
+                status=self.intelligence_learning_status(),
+            )
+
+        applied_terms: list[str] = []
+        remaining: list[IntelligenceLearningCandidate] = []
+        existing_terms = {term.lower() for term in self.intelligence_slang_terms}
+        for item in self.intelligence_learning_candidates:
+            if item.term.lower() not in selected_terms:
+                remaining.append(item)
+                continue
+            if item.term.lower() not in existing_terms:
+                self.intelligence_slang_terms.append(item.term)
+                existing_terms.add(item.term.lower())
+                applied_terms.append(item.term)
+        self.intelligence_slang_terms = self.intelligence_slang_terms[:50]
+        self.intelligence_learning_candidates = remaining[:50]
+        if applied_terms and request.enableSlang:
+            self.intelligence_slang_enabled = True
+        self.intelligence_learning_last_applied_at = now_iso()
+        self.logs.insert(
+            0,
+            ActionLogItem(
+                id=str(uuid4()),
+                intent="intelligence_learning_apply",
+                tier=ActionTier.reversible,
+                result="allowed",
+                reason=f"applied:{len(applied_terms)}",
+                createdAt=self.intelligence_learning_last_applied_at,
+            ),
+        )
+        return IntelligenceLearningApplyResponse(
+            accepted=bool(applied_terms),
+            reason="applied" if applied_terms else "terms_already_known",
+            appliedTerms=applied_terms,
+            style=self.intelligence_style_status(),
+            status=self.intelligence_learning_status(),
+        )
 
     def apply_intelligence_tuning(self) -> IntelligenceTuningApplyResponse:
         status = self.intelligence_tuning_status()

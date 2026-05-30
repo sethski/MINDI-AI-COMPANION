@@ -7,7 +7,9 @@ from .schemas import (
     AlertActionRequest,
     AutomationChainRequest,
     AssistantRequest,
+    IntelligenceLearningApplyRequest,
     IntelligenceEvalRunRequest,
+    IntelligenceLearningSourceRequest,
     IntelligenceTuningStageRequest,
     IntelligenceStyleUpdateRequest,
     CreateMemoryNoteRequest,
@@ -292,6 +294,26 @@ def ops_intelligence_eval_run(payload: IntelligenceEvalRunRequest | None = None)
 @app.post("/ops/intelligence/tuning/apply")
 def ops_intelligence_tuning_apply():
     return store.apply_intelligence_tuning()
+
+
+@app.get("/ops/intelligence/learning/status")
+def ops_intelligence_learning_status():
+    return store.intelligence_learning_status()
+
+
+@app.post("/ops/intelligence/learning/source")
+def ops_intelligence_learning_source(payload: IntelligenceLearningSourceRequest):
+    return store.update_intelligence_learning_source(payload)
+
+
+@app.post("/ops/intelligence/learning/run")
+def ops_intelligence_learning_run():
+    return store.run_intelligence_learning()
+
+
+@app.post("/ops/intelligence/learning/apply")
+def ops_intelligence_learning_apply(payload: IntelligenceLearningApplyRequest):
+    return store.apply_intelligence_learning(payload)
 
 
 @app.get("/ops/intelligence/eval/history")

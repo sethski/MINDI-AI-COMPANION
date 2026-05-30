@@ -468,6 +468,60 @@ class IntelligenceTuningApplyResponse(BaseModel):
     status: IntelligenceTuningStatus
 
 
+class IntelligenceLearningSourceRequest(BaseModel):
+    noteId: str
+    approved: bool = True
+
+
+class IntelligenceLearningSourceSummary(BaseModel):
+    noteId: str
+    title: str
+    tags: list[str] = Field(default_factory=list)
+    approvedAt: str
+
+
+class IntelligenceLearningCandidate(BaseModel):
+    term: str
+    sourceNoteId: str
+    sourceTitle: str
+    evidence: str
+
+
+class IntelligenceLearningStatus(BaseModel):
+    approvedSources: list[IntelligenceLearningSourceSummary] = Field(default_factory=list)
+    candidates: list[IntelligenceLearningCandidate] = Field(default_factory=list)
+    lastRunAt: str | None = None
+    lastAppliedAt: str | None = None
+
+
+class IntelligenceLearningSourceResponse(BaseModel):
+    accepted: bool
+    reason: str
+    status: IntelligenceLearningStatus
+
+
+class IntelligenceLearningRunResponse(BaseModel):
+    accepted: bool
+    reason: str
+    scannedSources: int
+    candidateCount: int
+    candidates: list[IntelligenceLearningCandidate] = Field(default_factory=list)
+    status: IntelligenceLearningStatus
+
+
+class IntelligenceLearningApplyRequest(BaseModel):
+    terms: list[str] = Field(default_factory=list)
+    enableSlang: bool = True
+
+
+class IntelligenceLearningApplyResponse(BaseModel):
+    accepted: bool
+    reason: str
+    appliedTerms: list[str] = Field(default_factory=list)
+    style: IntelligenceStyleStatus
+    status: IntelligenceLearningStatus
+
+
 class AutoIndexStatus(BaseModel):
     running: bool
     watchedPaths: list[str]
