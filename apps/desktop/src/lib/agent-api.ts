@@ -24,6 +24,12 @@ import type {
   PerceptionAnalyzeRequest,
   PerceptionAnalyzeResponse,
   PerceptionPermissionStatus,
+  IntelligenceLearningApplyRequest,
+  IntelligenceLearningApplyResponse,
+  IntelligenceLearningRunResponse,
+  IntelligenceLearningSourceRequest,
+  IntelligenceLearningSourceResponse,
+  IntelligenceLearningStatus,
   IntelligenceEvalRunRequest,
   IntelligenceEvalRunResponse,
   IntelligenceTuningApplyResponse,
@@ -383,6 +389,35 @@ export async function applyIntelligenceTuning(): Promise<IntelligenceTuningApply
   return agentFetch<IntelligenceTuningApplyResponse>("/ops/intelligence/tuning/apply", {
     method: "POST",
     body: JSON.stringify({}),
+  });
+}
+
+export async function getIntelligenceLearningStatus(): Promise<IntelligenceLearningStatus> {
+  return agentFetch<IntelligenceLearningStatus>("/ops/intelligence/learning/status");
+}
+
+export async function updateIntelligenceLearningSource(
+  payload: IntelligenceLearningSourceRequest,
+): Promise<IntelligenceLearningSourceResponse> {
+  return agentFetch<IntelligenceLearningSourceResponse>("/ops/intelligence/learning/source", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function runIntelligenceLearning(): Promise<IntelligenceLearningRunResponse> {
+  return agentFetch<IntelligenceLearningRunResponse>("/ops/intelligence/learning/run", {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+}
+
+export async function applyIntelligenceLearning(
+  payload: IntelligenceLearningApplyRequest,
+): Promise<IntelligenceLearningApplyResponse> {
+  return agentFetch<IntelligenceLearningApplyResponse>("/ops/intelligence/learning/apply", {
+    method: "POST",
+    body: JSON.stringify(payload),
   });
 }
 
