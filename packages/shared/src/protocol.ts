@@ -113,6 +113,18 @@ export interface TaskTimeParseResponse {
   dueAt?: string;
 }
 
+export interface CalendarExportRequest {
+  fileName?: string;
+  includeCompleted?: boolean;
+}
+
+export interface CalendarExportResponse {
+  accepted: boolean;
+  reason: string;
+  filePath?: string;
+  eventCount: number;
+}
+
 export interface SyncQueueItem {
   id: string;
   type: "chat" | "action" | "note" | "scrape" | "ocr";
