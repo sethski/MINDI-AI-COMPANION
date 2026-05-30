@@ -268,6 +268,56 @@ def test_scheduler_next_run_endpoint() -> None:
     assert body["nextRunAt"] is not None
 
 
+def test_update_task_status_roundtrip() -> None:
+    created = client.post("/tasks", json={"title": "status-roundtrip-4512"})
+    assert created.status_code == 200
+    task = created.json()
+
+    done = client.patch(f"/tasks/{task['id']}/status", json={"status": "done"})
+    assert done.status_code == 200
+    assert done.json()["status"] == "done"
+
+    reopened = client.patch(f"/tasks/{task['id']}/status", json={"status": "todo"})
+    assert reopened.status_code == 200
+    assert reopened.json()["status"] == "todo"
+
+
+def test_scheduler_skips_done_task_and_realerts_when_reopened() -> None:
+    title = "scheduler-status-gate-9143"
+    due_at = (datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat().replace("+00:00", "Z")
+    created = client.post("/tasks", json={"title": title, "dueAt": due_at})
+    assert created.status_code == 200
+    task_id = created.json()["id"]
+
+    done = client.patch(f"/tasks/{task_id}/status", json={"status": "done"})
+    assert done.status_code == 200
+
+    status_before_done_scan = client.get("/ops/scheduler/status")
+    assert status_before_done_scan.status_code == 200
+    alerts_before_done_scan = status_before_done_scan.json()["alertsTotal"]
+
+    done_scan = client.post("/ops/scheduler/scan")
+    assert done_scan.status_code == 200
+
+    status_after_done_scan = client.get("/ops/scheduler/status")
+    assert status_after_done_scan.status_code == 200
+    assert status_after_done_scan.json()["alertsTotal"] == alerts_before_done_scan
+
+    reopened = client.patch(f"/tasks/{task_id}/status", json={"status": "todo"})
+    assert reopened.status_code == 200
+
+    status_before_reopen_scan = client.get("/ops/scheduler/status")
+    assert status_before_reopen_scan.status_code == 200
+    alerts_before_reopen_scan = status_before_reopen_scan.json()["alertsTotal"]
+
+    reopen_scan = client.post("/ops/scheduler/scan")
+    assert reopen_scan.status_code == 200
+
+    status_after_reopen_scan = client.get("/ops/scheduler/status")
+    assert status_after_reopen_scan.status_code == 200
+    assert status_after_reopen_scan.json()["alertsTotal"] == alerts_before_reopen_scan + 1
+
+
 def test_recurring_task_rolls_to_next_due() -> None:
     due_at = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat().replace("+00:00", "Z")
     title = "recurring-rollover-9122"
