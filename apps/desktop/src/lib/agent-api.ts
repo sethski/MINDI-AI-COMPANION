@@ -18,6 +18,8 @@ import type {
   MemoryNote,
   MemorySearchResponse,
   OcrImportResponse,
+  PerceptionAnalyzeRequest,
+  PerceptionAnalyzeResponse,
   PermissionGrant,
   TaskItem,
   TaskNextRunRequest,
@@ -170,6 +172,15 @@ export async function importOcrDocument(path: string): Promise<OcrImportResponse
   return agentFetch<OcrImportResponse>("/memory/ocr/import", {
     method: "POST",
     body: JSON.stringify({ path }),
+  });
+}
+
+export async function analyzeScreenPerception(
+  payload: PerceptionAnalyzeRequest,
+): Promise<PerceptionAnalyzeResponse> {
+  return agentFetch<PerceptionAnalyzeResponse>("/perception/screen/analyze", {
+    method: "POST",
+    body: JSON.stringify(payload),
   });
 }
 
