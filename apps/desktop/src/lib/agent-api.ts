@@ -11,6 +11,7 @@ import type {
   FileOrganizeRequest,
   FileOrganizeResponse,
   HubSnapshot,
+  AutoIndexStatus,
   MemoryNote,
   MemorySearchResponse,
   OcrImportResponse,
@@ -129,5 +130,16 @@ export async function importOcrDocument(path: string): Promise<OcrImportResponse
   return agentFetch<OcrImportResponse>("/memory/ocr/import", {
     method: "POST",
     body: JSON.stringify({ path }),
+  });
+}
+
+export async function getAutoIndexStatus(): Promise<AutoIndexStatus> {
+  return agentFetch<AutoIndexStatus>("/memory/auto-index/status");
+}
+
+export async function scanAutoIndexNow(): Promise<AutoIndexStatus> {
+  return agentFetch<AutoIndexStatus>("/memory/auto-index/scan", {
+    method: "POST",
+    body: JSON.stringify({}),
   });
 }
