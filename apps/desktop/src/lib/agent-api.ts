@@ -30,6 +30,8 @@ import type {
   IntelligenceLearningSourceRequest,
   IntelligenceLearningSourceResponse,
   IntelligenceLearningStatus,
+  IntelligenceAdaptationExportResponse,
+  IntelligenceAdaptationStatus,
   IntelligenceEvalRunRequest,
   IntelligenceEvalRunResponse,
   IntelligenceTuningApplyResponse,
@@ -383,6 +385,17 @@ export async function listIntelligenceEvalHistory(limit = 20): Promise<Intellige
   return agentFetch<IntelligenceEvalRunResponse[]>(
     `/ops/intelligence/eval/history?limit=${limit}`,
   );
+}
+
+export async function getIntelligenceAdaptationStatus(): Promise<IntelligenceAdaptationStatus> {
+  return agentFetch<IntelligenceAdaptationStatus>("/ops/intelligence/adaptation/status");
+}
+
+export async function exportIntelligenceAdaptation(): Promise<IntelligenceAdaptationExportResponse> {
+  return agentFetch<IntelligenceAdaptationExportResponse>("/ops/intelligence/adaptation/export", {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
 }
 
 export async function applyIntelligenceTuning(): Promise<IntelligenceTuningApplyResponse> {
