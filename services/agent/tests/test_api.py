@@ -1,4 +1,5 @@
 from fastapi.testclient import TestClient
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import subprocess
 from unittest.mock import patch
@@ -227,3 +228,29 @@ def test_auto_index_scan_and_status(tmp_path: Path) -> None:
     assert searched.status_code == 200
     items = searched.json()["items"]
     assert any(item["sourcePath"] == str(doc.resolve()) for item in items)
+
+
+def test_scheduler_generates_due_alerts() -> None:
+    title = "scheduler-alert-task-5581"
+    due_at = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat().replace("+00:00", "Z")
+
+    status_before = client.get("/ops/scheduler/status")
+    assert status_before.status_code == 200
+    alerts_before = status_before.json()["alertsTotal"]
+
+    create_task = client.post("/tasks", json={"title": title, "dueAt": due_at})
+    assert create_task.status_code == 200
+
+    scan = client.post("/ops/scheduler/scan")
+    assert scan.status_code == 200
+    scan_body = scan.json()
+    assert scan_body["trackedTasks"] >= 1
+
+    status_after = client.get("/ops/scheduler/status")
+    assert status_after.status_code == 200
+    assert status_after.json()["alertsTotal"] >= alerts_before
+
+    hub = client.get("/hub/snapshot")
+    assert hub.status_code == 200
+    alert_titles = [item["title"] for item in hub.json()["alerts"]]
+    assert any(title in alert for alert in alert_titles)
