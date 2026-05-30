@@ -956,6 +956,75 @@ def test_ops_automation_chain_failure_reports_recovery() -> None:
     assert body["steps"][0]["recoveryHint"] is not None
 
 
+def test_ops_alert_feed_and_actions() -> None:
+    def fake_run(args, **kwargs):
+        cmd = [str(part).lower() for part in args]
+        if cmd[:1] == ["tasklist"]:
+            stdout = "\n".join(
+                [
+                    '"ncat.exe","5544","Console","1","8,000 K"',
+                    '"mimikatz.exe","7788","Console","1","11,000 K"',
+                ]
+            )
+            return subprocess.CompletedProcess(args=args, returncode=0, stdout=stdout, stderr="")
+        if cmd[:2] == ["sc", "query"]:
+            return subprocess.CompletedProcess(
+                args=args,
+                returncode=0,
+                stdout="SERVICE_NAME: WinDefend\nSTATE              : 4  RUNNING\n",
+                stderr="",
+            )
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+
+    with patch("mindi_agent.store.subprocess.run", side_effect=fake_run):
+        scan = client.post("/ops/security/scan")
+    assert scan.status_code == 200
+    assert scan.json()["accepted"] is True
+
+    feed = client.get("/ops/alerts/feed?limit=20")
+    assert feed.status_code == 200
+    feed_body = feed.json()
+    assert feed_body["accepted"] is True
+    assert feed_body["total"] >= 2
+    assert feed_body["critical"] >= 1
+    assert feed_body["warning"] >= 1
+    items = feed_body["items"]
+    assert items
+    assert items[0]["severity"] == "critical"
+
+    target_id = items[0]["id"]
+    create_task = client.post(
+        "/ops/alerts/action",
+        json={"alertId": target_id, "action": "create_recovery_task"},
+    )
+    assert create_task.status_code == 200
+    task_body = create_task.json()
+    assert task_body["accepted"] is True
+    assert task_body["createdTaskId"] is not None
+
+    export = client.post(
+        "/ops/alerts/action",
+        json={"alertId": target_id, "action": "export_report"},
+    )
+    assert export.status_code == 200
+    export_body = export.json()
+    assert export_body["accepted"] is True
+    assert export_body["reportPath"] is not None
+    assert Path(export_body["reportPath"]).exists()
+
+    dismiss = client.post(
+        "/ops/alerts/action",
+        json={"alertId": target_id, "action": "dismiss"},
+    )
+    assert dismiss.status_code == 200
+    dismiss_body = dismiss.json()
+    assert dismiss_body["accepted"] is True
+
+    feed_after = client.get("/ops/alerts/feed?limit=20")
+    assert feed_after.status_code == 200
+    assert not any(item["id"] == target_id for item in feed_after.json()["items"])
+
+
 def test_perception_permissions_status_defaults_unset() -> None:
     response = client.get("/perception/permissions")
     assert response.status_code == 200
