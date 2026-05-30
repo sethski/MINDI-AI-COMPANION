@@ -15,6 +15,8 @@ import {
   type PermissionGrant,
   type QuickToggle,
   type SchedulerStatus,
+  type SecurityEvent,
+  type SecurityScanResponse,
   type SyncQueueItem,
   type WebScrapeResponse,
 } from "@mindi/shared";
@@ -41,6 +43,9 @@ import {
   getSchedulerStatus,
   getSchedulerNextRun,
   parseTaskTime,
+  listSecurityEvents,
+  runSecurityRecovery,
+  runSecurityScan,
   runSchedulerScanNow,
   scrapeWeb,
   exportCalendar,
@@ -120,6 +125,9 @@ export default function App() {
   const [ocrImportPath, setOcrImportPath] = useState("data/inbox");
   const [autoIndexStatus, setAutoIndexStatus] = useState<AutoIndexStatus | null>(null);
   const [schedulerStatus, setSchedulerStatus] = useState<SchedulerStatus | null>(null);
+  const [securityEvents, setSecurityEvents] = useState<SecurityEvent[]>([]);
+  const [securityScanResult, setSecurityScanResult] = useState<SecurityScanResponse | null>(null);
+  const [securityStatus, setSecurityStatus] = useState("No security scan yet.");
   const [opsScrapeUrl, setOpsScrapeUrl] = useState("https://example.com");
   const [opsScrapeStoreAsNote, setOpsScrapeStoreAsNote] = useState(true);
   const [opsScrapeResult, setOpsScrapeResult] = useState<WebScrapeResponse | null>(null);
@@ -165,6 +173,7 @@ export default function App() {
       getSchedulerStatus(),
       getPerceptionPermissionStatus(),
       listPerceptionSnapshots(12),
+      listSecurityEvents("open", 12),
     ])
       .then(
         ([
@@ -176,6 +185,7 @@ export default function App() {
           scheduleStatus,
           perceptionPermissionStatus,
           snapshotItems,
+          securityItems,
         ]) => {
         if (!active) {
           return;
@@ -188,6 +198,8 @@ export default function App() {
         setSchedulerStatus(scheduleStatus);
         setPerceptionPermission(perceptionPermissionStatus);
         setPerceptionSnapshots(snapshotItems);
+        setSecurityEvents(securityItems);
+        setSecurityStatus(`Loaded ${securityItems.length} open security events.`);
         if (snapshotItems.length > 0) {
           setPerceptionSelectedSnapshotId(snapshotItems[0].id);
           setPerceptionSnapshotStatus(`Loaded ${snapshotItems.length} recent snapshots.`);
@@ -366,6 +378,29 @@ export default function App() {
           url,
           maxChars: typeof payload.maxChars === "number" ? payload.maxChars : 3500,
           storeAsNote: Boolean(payload.storeAsNote),
+        });
+        return true;
+      }
+      if (action === "security_scan") {
+        await runSecurityScan();
+        return true;
+      }
+      if (action === "security_recover") {
+        const eventId = typeof payload.eventId === "string" ? payload.eventId : "";
+        const recoveryAction = payload.recoveryAction;
+        if (
+          !eventId ||
+          (recoveryAction !== "dismiss" &&
+            recoveryAction !== "deny_app" &&
+            recoveryAction !== "kill_process")
+        ) {
+          return false;
+        }
+        await runSecurityRecovery({
+          eventId,
+          action: recoveryAction,
+          target: typeof payload.target === "string" ? payload.target : undefined,
+          confirm: Boolean(payload.confirm),
         });
         return true;
       }
@@ -1189,6 +1224,73 @@ export default function App() {
     }
   }
 
+  async function refreshSecurityEvents() {
+    try {
+      const items = await listSecurityEvents("open", 12);
+      setSecurityEvents(items);
+      setSecurityStatus(`Loaded ${items.length} open security events.`);
+    } catch {
+      setSecurityStatus("Security events unavailable while offline.");
+    }
+  }
+
+  async function runOpsSecurityScan() {
+    try {
+      const result = await runSecurityScan();
+      setSecurityScanResult(result);
+      await refreshSecurityEvents();
+      setSecurityStatus(
+        `Scan complete: processes=${result.scannedProcessCount}, newAlerts=${result.newAlerts}.`,
+      );
+    } catch {
+      enqueueSyncItem({
+        type: "action",
+        payload: { action: "security_scan" },
+      });
+      setSyncDepth(loadSyncQueue().length);
+      setSecurityStatus("Security scan queued for sync.");
+    }
+  }
+
+  async function runOpsSecurityRecoveryAction(
+    eventId: string,
+    action: "dismiss" | "deny_app" | "kill_process",
+    target?: string,
+  ) {
+    const confirm = action === "kill_process";
+    if (confirm) {
+      const allowed = window.confirm(`Kill process "${target || "unknown"}"?`);
+      if (!allowed) {
+        return;
+      }
+    }
+    try {
+      const result = await runSecurityRecovery({
+        eventId,
+        action,
+        target,
+        confirm,
+      });
+      if (result.accepted) {
+        setSecurityStatus(`Recovery action applied: ${action}.`);
+      } else {
+        setSecurityStatus(`Recovery action failed: ${result.reason}`);
+      }
+      await refreshSecurityEvents();
+      if (action === "deny_app") {
+        const updatedPermissions = await listPermissionGrants();
+        setPermissions(updatedPermissions);
+      }
+    } catch {
+      enqueueSyncItem({
+        type: "action",
+        payload: { action: "security_recover", eventId, recoveryAction: action, target, confirm },
+      });
+      setSyncDepth(loadSyncQueue().length);
+      setSecurityStatus("Recovery action queued for sync.");
+    }
+  }
+
   const perceptionAverageConfidence = useMemo(() => {
     if (!perceptionResult || perceptionResult.blocks.length === 0) {
       return 0;
@@ -1631,6 +1733,58 @@ export default function App() {
                 <li key={link}>{link}</li>
               ))}
               {opsScrapeResult && opsScrapeResult.links.length === 0 ? <li>No links extracted.</li> : null}
+            </ul>
+          </div>
+
+          <div className="card">
+            <h3>Security Monitoring</h3>
+            <div className="stack">
+              <button type="button" onClick={() => void runOpsSecurityScan()}>
+                Run Security Scan
+              </button>
+              <button type="button" onClick={() => void refreshSecurityEvents()}>
+                Refresh Events
+              </button>
+            </div>
+            <p className="assistant-reply">{securityStatus}</p>
+            {securityScanResult ? (
+              <p>
+                last scan: processes={securityScanResult.scannedProcessCount}, newAlerts=
+                {securityScanResult.newAlerts}
+              </p>
+            ) : null}
+            <ul>
+              {securityEvents.slice(0, 8).map((event) => (
+                <li key={event.id}>
+                  [{event.severity}] {event.title}
+                  {event.processName ? ` (${event.processName})` : ""}
+                  <div className="row left">
+                    <button
+                      type="button"
+                      onClick={() => void runOpsSecurityRecoveryAction(event.id, "dismiss")}
+                    >
+                      Dismiss
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        void runOpsSecurityRecoveryAction(event.id, "deny_app", event.processName)
+                      }
+                    >
+                      Deny App
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        void runOpsSecurityRecoveryAction(event.id, "kill_process", event.processName)
+                      }
+                    >
+                      Kill Process
+                    </button>
+                  </div>
+                </li>
+              ))}
+              {securityEvents.length === 0 ? <li>No open security events.</li> : null}
             </ul>
           </div>
 
