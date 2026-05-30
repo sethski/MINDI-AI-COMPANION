@@ -348,6 +348,23 @@ export interface SchedulerStatus {
   lastError?: string;
 }
 
+export interface WebScrapeRequest {
+  url: string;
+  maxChars?: number;
+  storeAsNote?: boolean;
+}
+
+export interface WebScrapeResponse {
+  accepted: boolean;
+  reason: string;
+  url: string;
+  title?: string;
+  text?: string;
+  textLength: number;
+  links: string[];
+  storedNoteId?: string;
+}
+
 export const TAB_ORDER: MindiTabId[] = [
   "home",
   "control",
