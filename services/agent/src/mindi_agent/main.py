@@ -9,6 +9,7 @@ from .schemas import (
     CreateTaskRequest,
     DocumentImportRequest,
     FileOrganizeRequest,
+    OcrImportRequest,
     SyncQueueRequest,
 )
 from .store import RuntimeStore
@@ -111,3 +112,8 @@ def memory_document_search(
     limit: int = Query(default=20, ge=1, le=200),
 ):
     return store.search_documents(query=q, limit=limit)
+
+
+@app.post("/memory/ocr/import")
+def memory_ocr_import(payload: OcrImportRequest):
+    return store.import_ocr_document(payload)

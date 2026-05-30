@@ -6,6 +6,7 @@ from time import time
 from uuid import uuid4
 
 from .memory_db import MemoryDB
+from .ocr_service import extract_text_for_ocr
 from .schemas import (
     AppControlRequest,
     AppControlResponse,
@@ -29,6 +30,8 @@ from .schemas import (
     MemoryDocumentChunk,
     MemoryNote,
     MemorySearchResponse,
+    OcrImportRequest,
+    OcrImportResponse,
     PermissionGrant,
     PolicyDecision,
     SyncQueueRequest,
@@ -395,3 +398,33 @@ class RuntimeStore:
     def search_documents(self, query: str, limit: int = 20) -> DocumentSearchResponse:
         items = self.memory_db.search_documents(query=query, limit=limit)
         return DocumentSearchResponse(query=query, items=items)
+
+    def import_ocr_document(self, request: OcrImportRequest) -> OcrImportResponse:
+        source = Path(request.path).resolve()
+        if not source.exists() or not source.is_file():
+            return OcrImportResponse(accepted=False, reason="document_not_found")
+        if not self._is_path_allowed(source):
+            return OcrImportResponse(accepted=False, reason="folder_not_allowed")
+
+        try:
+            extracted_text, extraction_mode = extract_text_for_ocr(source)
+            document = self.memory_db.import_extracted_document(
+                source_path=source,
+                text=extracted_text,
+                title=source.name,
+            )
+        except ValueError as exc:
+            return OcrImportResponse(accepted=False, reason=str(exc))
+
+        self.logs.insert(
+            0,
+            ActionLogItem(
+                id=str(uuid4()),
+                intent=f"ocr_import:{source.name}",
+                tier=ActionTier.reversible,
+                result="allowed",
+                reason=extraction_mode,
+                createdAt=now_iso(),
+            ),
+        )
+        return OcrImportResponse(accepted=True, reason=extraction_mode, document=document)

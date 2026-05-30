@@ -148,14 +148,18 @@ class MemoryDB:
 
     def import_document(self, source_path: Path) -> MemoryDocument:
         text = self._read_text_file(source_path)
+        return self.import_extracted_document(source_path=source_path, text=text, title=source_path.name)
+
+    def import_extracted_document(self, source_path: Path, text: str, title: str | None = None) -> MemoryDocument:
         chunks = chunk_text(text)
+        resolved = source_path.resolve()
         imported_at = now_iso()
-        title = source_path.name
+        document_title = (title or source_path.name).strip() or source_path.name
 
         with self._lock, self._connect() as conn:
             existing = conn.execute(
                 "SELECT id FROM memory_documents WHERE source_path = ?;",
-                (str(source_path),),
+                (str(resolved),),
             ).fetchone()
             if existing:
                 document_id = existing["id"]
@@ -165,7 +169,7 @@ class MemoryDB:
                     SET title = ?, imported_at = ?, chunk_count = ?
                     WHERE id = ?;
                     """,
-                    (title, imported_at, len(chunks), document_id),
+                    (document_title, imported_at, len(chunks), document_id),
                 )
                 conn.execute(
                     "DELETE FROM memory_document_chunks WHERE document_id = ?;",
@@ -178,7 +182,7 @@ class MemoryDB:
                     INSERT INTO memory_documents (id, source_path, title, imported_at, chunk_count)
                     VALUES (?, ?, ?, ?, ?);
                     """,
-                    (document_id, str(source_path), title, imported_at, len(chunks)),
+                    (document_id, str(resolved), document_title, imported_at, len(chunks)),
                 )
 
             for index, chunk in enumerate(chunks):
@@ -193,8 +197,8 @@ class MemoryDB:
 
         return MemoryDocument(
             id=document_id,
-            sourcePath=str(source_path),
-            title=title,
+            sourcePath=str(resolved),
+            title=document_title,
             importedAt=imported_at,
             chunkCount=len(chunks),
         )

@@ -190,5 +190,15 @@ class DocumentSearchResponse(BaseModel):
     items: list[MemoryDocumentChunk]
 
 
+class OcrImportRequest(BaseModel):
+    path: str
+
+
+class OcrImportResponse(BaseModel):
+    accepted: bool
+    reason: str
+    document: MemoryDocument | None = None
+
+
 def now_iso() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
