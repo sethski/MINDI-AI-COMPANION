@@ -81,6 +81,18 @@ Windows-first local assistant. Current repo layout:
   - Sends the frame to local perception analysis and renders block + OCR summary.
   - Includes richer live diagnostics: confidence/coverage metrics, OCR metadata, and local snapshot-history search/details.
 
+## Current Implementation (Phase 5 Ops Slice)
+
+- Web scraping API:
+  - `POST /ops/web/scrape`
+  - Safe HTTP/HTTPS fetch with HTML/text extraction, title + links capture.
+  - Optional `storeAsNote` path persists scraped content to local memory notes.
+  - Domain permission gate enforces allow/deny policy using `scope=domain` grants.
+- Ops tab UI:
+  - Run scrape jobs from URL input.
+  - View scrape output, extracted links, and note-storage result.
+  - Manage domain allowlist entries directly from Ops/Control flows.
+
 ## Run Desktop
 
 ```bash
