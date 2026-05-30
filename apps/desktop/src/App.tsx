@@ -1466,7 +1466,11 @@ export default function App() {
       const response = await updateIntelligenceLearningSource({ noteId, approved });
       setIntelligenceLearning(response.status);
       setIntelligenceStatus(
-        approved ? "Learning source approved." : "Learning source removed.",
+        response.accepted
+          ? approved
+            ? "Learning source approved."
+            : "Learning source removed."
+          : `Learning source blocked: ${response.reason}.`,
       );
     } catch {
       setIntelligenceStatus("Learning source update failed.");
@@ -1484,6 +1488,27 @@ export default function App() {
       );
     } catch {
       setIntelligenceStatus("Learning run failed.");
+    }
+  }
+
+  async function runIntelligenceLearningEvalNow() {
+    try {
+      const terms = intelligenceLearning?.candidates.map((item) => item.term) ?? [];
+      const result = await runIntelligenceEval({ scope: "learning", terms });
+      setIntelligenceEvalResult(result);
+      const [learning, history] = await Promise.all([
+        getIntelligenceLearningStatus(),
+        listIntelligenceEvalHistory(8),
+      ]);
+      setIntelligenceLearning(learning);
+      setIntelligenceEvalHistory(history);
+      setIntelligenceStatus(
+        result.accepted
+          ? `Learning eval: score=${result.score.toFixed(2)} gate=${String(result.gatePassed)}.`
+          : `Learning eval blocked: ${result.reason}.`,
+      );
+    } catch {
+      setIntelligenceStatus("Learning eval failed.");
     }
   }
 
@@ -2394,8 +2419,19 @@ export default function App() {
                 </button>
                 <button
                   type="button"
-                  onClick={() => void runIntelligenceLearningApplyNow()}
+                  onClick={() => void runIntelligenceLearningEvalNow()}
                   disabled={!intelligenceLearning || intelligenceLearning.candidates.length === 0}
+                >
+                  Eval Learned Slang
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void runIntelligenceLearningApplyNow()}
+                  disabled={
+                    !intelligenceLearning ||
+                    intelligenceLearning.candidates.length === 0 ||
+                    !intelligenceLearning.canApplyCandidates
+                  }
                 >
                   Apply Learned Slang
                 </button>
@@ -2403,6 +2439,12 @@ export default function App() {
               <p>
                 learning sources: {intelligenceLearning ? intelligenceLearning.approvedSources.length : 0} | candidates:{" "}
                 {intelligenceLearning ? intelligenceLearning.candidates.length : 0}
+              </p>
+              <p>
+                learning gate:{" "}
+                {intelligenceLearning
+                  ? `${String(intelligenceLearning.canApplyCandidates)} (min=${intelligenceLearning.minApplyScore.toFixed(2)})`
+                  : "unknown"}
               </p>
               <ul>
                 {(intelligenceLearning?.approvedSources ?? []).slice(0, 4).map((item) => (
@@ -2421,7 +2463,7 @@ export default function App() {
                   </li>
                 ))}
                 {intelligenceLearning && intelligenceLearning.candidates.length === 0 ? (
-                  <li>No learning candidates. Use explicit markers like `slang: astig` in approved notes.</li>
+                  <li>No learning candidates. Use approved style notes with explicit markers like `slang: astig`.</li>
                 ) : null}
               </ul>
               <label>
