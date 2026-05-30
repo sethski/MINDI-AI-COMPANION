@@ -326,6 +326,44 @@ class SecurityRecoveryResponse(BaseModel):
     event: SecurityEvent | None = None
 
 
+class AutomationChainStep(BaseModel):
+    kind: Literal["web_scrape", "create_task", "create_note", "security_scan"]
+    title: str | None = None
+    url: str | None = None
+    text: str | None = None
+    dueAt: str | None = None
+    recurrence: Literal["daily", "weekly"] | None = None
+    storeAsNote: bool | None = None
+
+
+class AutomationChainRequest(BaseModel):
+    name: str
+    continueOnFailure: bool = False
+    steps: list[AutomationChainStep] = Field(default_factory=list)
+
+
+class AutomationChainStepResult(BaseModel):
+    index: int
+    kind: str
+    accepted: bool
+    reason: str
+    startedAt: str
+    finishedAt: str
+    recoveryHint: str | None = None
+    detail: str | None = None
+
+
+class AutomationChainResponse(BaseModel):
+    accepted: bool
+    reason: str
+    name: str
+    totalSteps: int
+    completedSteps: int
+    failedStepIndex: int | None = None
+    steps: list[AutomationChainStepResult] = Field(default_factory=list)
+    recoverySummary: str | None = None
+
+
 class AutoIndexStatus(BaseModel):
     running: bool
     watchedPaths: list[str]

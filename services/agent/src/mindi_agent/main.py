@@ -4,6 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from .schemas import (
     AppControlRequest,
     AddPermissionGrantRequest,
+    AutomationChainRequest,
     AssistantRequest,
     CreateMemoryNoteRequest,
     CreateTaskRequest,
@@ -226,6 +227,11 @@ def ops_security_scan():
 @app.post("/ops/security/recover")
 def ops_security_recover(payload: SecurityRecoveryRequest):
     return store.recover_security_event(payload)
+
+
+@app.post("/ops/automation/run")
+def ops_automation_run(payload: AutomationChainRequest):
+    return store.run_automation_chain(payload)
 
 
 @app.post("/calendar/export")

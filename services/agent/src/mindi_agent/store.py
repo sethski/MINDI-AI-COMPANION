@@ -24,6 +24,9 @@ from .schemas import (
     AutoIndexStatus,
     SchedulerStatus,
     SecurityEvent,
+    AutomationChainRequest,
+    AutomationChainResponse,
+    AutomationChainStepResult,
     SecurityRecoveryRequest,
     SecurityRecoveryResponse,
     SecurityScanResponse,
@@ -634,6 +637,141 @@ class RuntimeStore:
             textLength=len(text_content),
             links=links,
             storedNoteId=stored_note_id,
+        )
+
+    def run_automation_chain(self, request: AutomationChainRequest) -> AutomationChainResponse:
+        chain_name = (request.name or "").strip() or "ops_chain"
+        if not request.steps:
+            return AutomationChainResponse(
+                accepted=False,
+                reason="empty_steps",
+                name=chain_name,
+                totalSteps=0,
+                completedSteps=0,
+                steps=[],
+            )
+
+        results: list[AutomationChainStepResult] = []
+        completed_steps = 0
+        failed_step_index: int | None = None
+        recovery_summary: str | None = None
+
+        for index, step in enumerate(request.steps):
+            started_at = now_iso()
+            accepted = False
+            reason = "unsupported_step"
+            recovery_hint: str | None = "Use one of: web_scrape, create_task, create_note, security_scan."
+            detail: str | None = None
+
+            if step.kind == "web_scrape":
+                if not (step.url or "").strip():
+                    reason = "url_required"
+                    recovery_hint = "Provide a valid HTTP/HTTPS URL."
+                else:
+                    scrape = self.scrape_web(
+                        WebScrapeRequest(
+                            url=(step.url or "").strip(),
+                            maxChars=3500,
+                            storeAsNote=bool(step.storeAsNote),
+                        )
+                    )
+                    accepted = scrape.accepted
+                    reason = scrape.reason
+                    detail = f"textLength={scrape.textLength}, links={len(scrape.links)}"
+                    recovery_hint = (
+                        "Allow the domain then retry."
+                        if scrape.reason == "domain_not_allowed"
+                        else "Check URL accessibility and content type."
+                    )
+            elif step.kind == "create_task":
+                title = (step.title or "").strip()
+                if not title:
+                    reason = "title_required"
+                    recovery_hint = "Provide a task title."
+                else:
+                    task = self.add_task(
+                        CreateTaskRequest(
+                            title=title,
+                            dueAt=(step.dueAt or None),
+                            recurrence=step.recurrence,
+                        )
+                    )
+                    accepted = True
+                    reason = "ok"
+                    detail = f"taskId={task.id}"
+                    recovery_hint = None
+            elif step.kind == "create_note":
+                title = (step.title or "").strip()
+                text = (step.text or "").strip()
+                if not title or not text:
+                    reason = "title_and_text_required"
+                    recovery_hint = "Provide note title and text."
+                else:
+                    note = self.add_memory_note(
+                        CreateMemoryNoteRequest(
+                            title=title,
+                            content=text,
+                            tags=["automation", "ops"],
+                        )
+                    )
+                    accepted = True
+                    reason = "ok"
+                    detail = f"noteId={note.id}"
+                    recovery_hint = None
+            elif step.kind == "security_scan":
+                scan = self.scan_security()
+                accepted = scan.accepted
+                reason = scan.reason
+                detail = f"newAlerts={scan.newAlerts}, scanned={scan.scannedProcessCount}"
+                recovery_hint = "Review open security events and apply recovery actions."
+
+            finished_at = now_iso()
+            results.append(
+                AutomationChainStepResult(
+                    index=index,
+                    kind=step.kind,
+                    accepted=accepted,
+                    reason=reason,
+                    startedAt=started_at,
+                    finishedAt=finished_at,
+                    recoveryHint=recovery_hint,
+                    detail=detail,
+                )
+            )
+
+            if accepted:
+                completed_steps += 1
+                continue
+
+            failed_step_index = index
+            recovery_summary = f"Step {index + 1} failed ({step.kind}): {reason}."
+            if not request.continueOnFailure:
+                break
+
+        accepted_chain = failed_step_index is None
+        chain_reason = "ok" if accepted_chain else "partial_failure"
+
+        self.logs.insert(
+            0,
+            ActionLogItem(
+                id=str(uuid4()),
+                intent=f"automation_chain:{chain_name}",
+                tier=ActionTier.reversible,
+                result="allowed" if accepted_chain else "blocked",
+                reason=f"{chain_reason}:completed={completed_steps}/{len(request.steps)}",
+                createdAt=now_iso(),
+            ),
+        )
+
+        return AutomationChainResponse(
+            accepted=accepted_chain,
+            reason=chain_reason,
+            name=chain_name,
+            totalSteps=len(request.steps),
+            completedSteps=completed_steps,
+            failedStepIndex=failed_step_index,
+            steps=results,
+            recoverySummary=recovery_summary,
         )
 
     @staticmethod
