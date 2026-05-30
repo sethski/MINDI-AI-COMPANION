@@ -5,6 +5,7 @@ import {
   type AlertFeedResponse,
   type AutoIndexStatus,
   type AutomationChainResponse,
+  type IntelligenceAdaptationStatus,
   type IntelligenceEvalRunResponse,
   type IntelligenceLearningStatus,
   type IntelligenceTuningStatus,
@@ -70,7 +71,9 @@ import {
   applyIntelligenceTuning,
   applyIntelligenceLearning,
   stageIntelligenceTuning,
+  exportIntelligenceAdaptation,
   updatePrivacyStatus,
+  getIntelligenceAdaptationStatus,
   updateIntelligenceStyleStatus,
   exportCalendar,
   importCalendar,
@@ -172,6 +175,7 @@ export default function App() {
   const [intelligenceRiskyTerm, setIntelligenceRiskyTerm] = useState("notepad");
   const [intelligenceEvalResult, setIntelligenceEvalResult] = useState<IntelligenceEvalRunResponse | null>(null);
   const [intelligenceEvalHistory, setIntelligenceEvalHistory] = useState<IntelligenceEvalRunResponse[]>([]);
+  const [intelligenceAdaptation, setIntelligenceAdaptation] = useState<IntelligenceAdaptationStatus | null>(null);
   const [intelligenceStatus, setIntelligenceStatus] = useState("No intelligence run yet.");
   const [opsScrapeUrl, setOpsScrapeUrl] = useState("https://example.com");
   const [opsScrapeStoreAsNote, setOpsScrapeStoreAsNote] = useState(true);
@@ -229,6 +233,7 @@ export default function App() {
       getIntelligenceLearningStatus(),
       getIntelligenceTuningStatus(),
       listIntelligenceEvalHistory(8),
+      getIntelligenceAdaptationStatus(),
     ])
       .then(
         ([
@@ -247,6 +252,7 @@ export default function App() {
           intelligenceLearningInitial,
           intelligenceTuningInitial,
           intelligenceEvalHistoryInitial,
+          intelligenceAdaptationInitial,
         ]) => {
         if (!active) {
           return;
@@ -276,7 +282,10 @@ export default function App() {
           (intelligenceTuningInitial.pending ?? intelligenceTuningInitial.active).responseVerbosity,
         );
         setIntelligenceEvalHistory(intelligenceEvalHistoryInitial);
-        setIntelligenceStatus(`Loaded ${intelligenceEvalHistoryInitial.length} eval history items.`);
+        setIntelligenceAdaptation(intelligenceAdaptationInitial);
+        setIntelligenceStatus(
+          `Loaded ${intelligenceEvalHistoryInitial.length} eval history items. Adaptation=${intelligenceAdaptationInitial.recommendedMethod}.`,
+        );
         if (snapshotItems.length > 0) {
           setPerceptionSelectedSnapshotId(snapshotItems[0].id);
           setPerceptionSnapshotStatus(`Loaded ${snapshotItems.length} recent snapshots.`);
@@ -1409,11 +1418,12 @@ export default function App() {
 
   async function refreshIntelligenceState() {
     try {
-      const [style, learning, tuning, history] = await Promise.all([
+      const [style, learning, tuning, history, adaptation] = await Promise.all([
         getIntelligenceStyleStatus(),
         getIntelligenceLearningStatus(),
         getIntelligenceTuningStatus(),
         listIntelligenceEvalHistory(8),
+        getIntelligenceAdaptationStatus(),
       ]);
       setIntelligenceStyle(style);
       setIntelligenceLanguageMode(style.languageMode);
@@ -1423,7 +1433,8 @@ export default function App() {
       setIntelligencePreset((tuning.pending ?? tuning.active).preset);
       setIntelligenceVerbosity((tuning.pending ?? tuning.active).responseVerbosity);
       setIntelligenceEvalHistory(history);
-      setIntelligenceStatus(`Intelligence loaded: ${history.length} eval runs.`);
+      setIntelligenceAdaptation(adaptation);
+      setIntelligenceStatus(`Intelligence loaded: ${history.length} eval runs, adaptation=${adaptation.recommendedMethod}.`);
     } catch {
       setIntelligenceStatus("Intelligence status unavailable while offline.");
     }
@@ -1496,12 +1507,14 @@ export default function App() {
       const terms = intelligenceLearning?.candidates.map((item) => item.term) ?? [];
       const result = await runIntelligenceEval({ scope: "learning", terms });
       setIntelligenceEvalResult(result);
-      const [learning, history] = await Promise.all([
+      const [learning, history, adaptation] = await Promise.all([
         getIntelligenceLearningStatus(),
         listIntelligenceEvalHistory(8),
+        getIntelligenceAdaptationStatus(),
       ]);
       setIntelligenceLearning(learning);
       setIntelligenceEvalHistory(history);
+      setIntelligenceAdaptation(adaptation);
       setIntelligenceStatus(
         result.accepted
           ? `Learning eval: score=${result.score.toFixed(2)} gate=${String(result.gatePassed)}.`
@@ -1516,10 +1529,12 @@ export default function App() {
     try {
       const terms = intelligenceLearning?.candidates.map((item) => item.term) ?? [];
       const response = await applyIntelligenceLearning({ terms, enableSlang: true });
+      const adaptation = await getIntelligenceAdaptationStatus();
       setIntelligenceLearning(response.status);
       setIntelligenceStyle(response.style);
       setIntelligenceLanguageMode(response.style.languageMode);
       setIntelligenceSlangEnabled(response.style.slangEnabled);
+      setIntelligenceAdaptation(adaptation);
       setIntelligenceStatus(
         response.accepted
           ? `Learned slang applied: ${response.appliedTerms.join(", ")}.`
@@ -1534,8 +1549,12 @@ export default function App() {
     try {
       const result = await runIntelligenceEval({ scope: "active" });
       setIntelligenceEvalResult(result);
-      const history = await listIntelligenceEvalHistory(8);
+      const [history, adaptation] = await Promise.all([
+        listIntelligenceEvalHistory(8),
+        getIntelligenceAdaptationStatus(),
+      ]);
       setIntelligenceEvalHistory(history);
+      setIntelligenceAdaptation(adaptation);
       setIntelligenceStatus(
         `Eval complete: score=${result.score.toFixed(2)} (${result.passedCases}/${result.totalCases}).`,
       );
@@ -1565,14 +1584,16 @@ export default function App() {
     try {
       const result = await runIntelligenceEval({ scope: "pending" });
       setIntelligenceEvalResult(result);
-      const [tuning, history] = await Promise.all([
+      const [tuning, history, adaptation] = await Promise.all([
         getIntelligenceTuningStatus(),
         listIntelligenceEvalHistory(8),
+        getIntelligenceAdaptationStatus(),
       ]);
       setIntelligenceTuning(tuning);
       setIntelligencePreset((tuning.pending ?? tuning.active).preset);
       setIntelligenceVerbosity((tuning.pending ?? tuning.active).responseVerbosity);
       setIntelligenceEvalHistory(history);
+      setIntelligenceAdaptation(adaptation);
       setIntelligenceStatus(
         result.accepted
           ? `Pending eval: score=${result.score.toFixed(2)} gate=${String(result.gatePassed)}.`
@@ -1586,9 +1607,11 @@ export default function App() {
   async function runIntelligenceTuningApplyNow() {
     try {
       const response = await applyIntelligenceTuning();
+      const adaptation = await getIntelligenceAdaptationStatus();
       setIntelligenceTuning(response.status);
       setIntelligencePreset((response.status.pending ?? response.status.active).preset);
       setIntelligenceVerbosity((response.status.pending ?? response.status.active).responseVerbosity);
+      setIntelligenceAdaptation(adaptation);
       setIntelligenceStatus(
         response.accepted ? "Pending tuning applied." : `Apply blocked: ${response.reason}.`,
       );
@@ -1600,12 +1623,28 @@ export default function App() {
   async function runIntelligenceTuningDiscardNow() {
     try {
       const tuning = await discardIntelligenceTuning();
+      const adaptation = await getIntelligenceAdaptationStatus();
       setIntelligenceTuning(tuning);
       setIntelligencePreset((tuning.pending ?? tuning.active).preset);
       setIntelligenceVerbosity((tuning.pending ?? tuning.active).responseVerbosity);
+      setIntelligenceAdaptation(adaptation);
       setIntelligenceStatus("Pending tuning discarded.");
     } catch {
       setIntelligenceStatus("Discard pending tuning failed.");
+    }
+  }
+
+  async function runIntelligenceAdaptationExportNow() {
+    try {
+      const response = await exportIntelligenceAdaptation();
+      setIntelligenceAdaptation(response.status);
+      setIntelligenceStatus(
+        response.accepted
+          ? `LoRA pack exported: ${response.exampleCount} examples -> ${response.exportPath ?? "unknown path"}.`
+          : `Adaptation export blocked: ${response.reason}.`,
+      );
+    } catch {
+      setIntelligenceStatus("Adaptation export failed.");
     }
   }
 
@@ -2534,6 +2573,35 @@ export default function App() {
                 ? `${String(intelligenceTuning.canApplyPending)} (min=${intelligenceTuning.minApplyScore.toFixed(2)})`
                 : "unknown"}
             </p>
+            <p>
+              adaptation:{" "}
+              {intelligenceAdaptation
+                ? `${intelligenceAdaptation.recommendedMethod} | justified=${String(intelligenceAdaptation.justified)} | export=${String(intelligenceAdaptation.exportReady)}`
+                : "unknown"}
+            </p>
+            <p>
+              adaptation evidence:{" "}
+              {intelligenceAdaptation
+                ? `evals=${intelligenceAdaptation.totalEvalRuns}, active=${intelligenceAdaptation.passedActiveRuns}, pending=${intelligenceAdaptation.passedPendingRuns}, learning=${intelligenceAdaptation.passedLearningRuns}, slang=${intelligenceAdaptation.appliedSlangCount}`
+                : "unknown"}
+            </p>
+            <p>
+              adaptation reason: {intelligenceAdaptation ? intelligenceAdaptation.reason : "unknown"}
+            </p>
+            <div className="row left">
+              <button
+                type="button"
+                onClick={() => void runIntelligenceAdaptationExportNow()}
+                disabled={!intelligenceAdaptation?.exportReady}
+              >
+                Export LoRA Pack
+              </button>
+            </div>
+            {intelligenceAdaptation?.lastExportPath ? (
+              <p>
+                last export: {formatIsoTime(intelligenceAdaptation.lastExportAt)} | {intelligenceAdaptation.lastExportPath}
+              </p>
+            ) : null}
             {intelligenceEvalResult ? (
               <p>
                 latest {intelligenceEvalResult.scope} score={intelligenceEvalResult.score.toFixed(2)} gate=
