@@ -67,6 +67,11 @@ Windows-first local assistant. Current repo layout:
   - Accepts either `path` or inline `imageDataUrl` capture payloads.
   - Extracts OCR text (when available) and lightweight UI text-region blocks from screenshots.
   - Handles OCR failures gracefully by returning detected blocks with an OCR error reason.
+- Perception memory bridge:
+  - Every successful screen-analysis run is persisted into local SQLite as a perception snapshot.
+  - `GET /memory/perception`
+  - `GET /memory/perception/search?query=...`
+  - Assistant context can answer screen-oriented prompts using the latest stored snapshot.
 - Vision tab capture hook:
   - Captures a live screen frame via browser display-capture API.
   - Sends the frame to local perception analysis and renders block + OCR summary.
