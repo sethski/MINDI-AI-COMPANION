@@ -122,3 +122,23 @@ def test_app_control_open_and_close_success() -> None:
         )
         assert close_response.status_code == 200
         assert close_response.json()["accepted"] is True
+
+
+def test_memory_note_create_and_search() -> None:
+    create = client.post(
+        "/memory/notes",
+        json={"title": "Sprint Plan", "content": "Ship memory API", "tags": ["planning"]},
+    )
+    assert create.status_code == 200
+    created = create.json()
+    assert created["title"] == "Sprint Plan"
+
+    listed = client.get("/memory/notes?limit=20")
+    assert listed.status_code == 200
+    assert any(item["id"] == created["id"] for item in listed.json())
+
+    searched = client.get("/memory/search?query=memory")
+    assert searched.status_code == 200
+    body = searched.json()
+    assert body["query"] == "memory"
+    assert any(item["id"] == created["id"] for item in body["items"])
