@@ -1894,6 +1894,8 @@ def test_ai_runtime_config_update_roundtrip() -> None:
             "ocrModelPath": "C:/models/glm-ocr",
             "llmContextSize": 8192,
             "llmMaxTokens": 384,
+            "asrLanguageHint": "Filipino",
+            "asrReturnTimestamps": True,
         },
     )
     assert response.status_code == 200
@@ -1902,6 +1904,8 @@ def test_ai_runtime_config_update_roundtrip() -> None:
     assert body["config"]["llmModelPath"] == "C:/models/qwen2.5-7b-instruct.gguf"
     assert body["config"]["llmContextSize"] == 8192
     assert body["config"]["llmMaxTokens"] == 384
+    assert body["config"]["asrLanguageHint"] == "Filipino"
+    assert body["config"]["asrReturnTimestamps"] is True
 
 
 def test_dataset_prepare_missing_path() -> None:
