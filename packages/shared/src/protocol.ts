@@ -542,6 +542,60 @@ export interface IntelligenceTuningApplyResponse {
   status: IntelligenceTuningStatus;
 }
 
+export interface IntelligenceLearningSourceRequest {
+  noteId: string;
+  approved?: boolean;
+}
+
+export interface IntelligenceLearningSourceSummary {
+  noteId: string;
+  title: string;
+  tags: string[];
+  approvedAt: string;
+}
+
+export interface IntelligenceLearningCandidate {
+  term: string;
+  sourceNoteId: string;
+  sourceTitle: string;
+  evidence: string;
+}
+
+export interface IntelligenceLearningStatus {
+  approvedSources: IntelligenceLearningSourceSummary[];
+  candidates: IntelligenceLearningCandidate[];
+  lastRunAt?: string;
+  lastAppliedAt?: string;
+}
+
+export interface IntelligenceLearningSourceResponse {
+  accepted: boolean;
+  reason: string;
+  status: IntelligenceLearningStatus;
+}
+
+export interface IntelligenceLearningRunResponse {
+  accepted: boolean;
+  reason: string;
+  scannedSources: number;
+  candidateCount: number;
+  candidates: IntelligenceLearningCandidate[];
+  status: IntelligenceLearningStatus;
+}
+
+export interface IntelligenceLearningApplyRequest {
+  terms?: string[];
+  enableSlang?: boolean;
+}
+
+export interface IntelligenceLearningApplyResponse {
+  accepted: boolean;
+  reason: string;
+  appliedTerms: string[];
+  style: IntelligenceStyleStatus;
+  status: IntelligenceLearningStatus;
+}
+
 export const TAB_ORDER: MindiTabId[] = [
   "home",
   "control",
