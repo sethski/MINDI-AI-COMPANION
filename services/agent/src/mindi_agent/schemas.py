@@ -63,6 +63,7 @@ class TaskItem(BaseModel):
     status: Literal["todo", "in_progress", "done"] = "todo"
     dueAt: str | None = None
     recurrence: Literal["daily", "weekly"] | None = None
+    reminderMinutesBefore: int | None = None
     nextRunAt: str | None = None
     source: Literal["manual", "assistant"] = "manual"
 

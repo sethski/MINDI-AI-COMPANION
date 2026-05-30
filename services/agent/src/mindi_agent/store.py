@@ -192,6 +192,7 @@ class RuntimeStore:
             title=request.title,
             dueAt=request.dueAt,
             recurrence=request.recurrence,
+            reminderMinutesBefore=None,
             nextRunAt=request.dueAt,
             status="todo",
             source="manual",
@@ -650,6 +651,47 @@ class RuntimeStore:
         return (9, 0)
 
     @staticmethod
+    def _resolve_timezone(name: str | None) -> tuple[timezone | ZoneInfo, bool]:
+        if not name:
+            return timezone.utc, False
+        tz_name = name.strip()
+        if not tz_name:
+            return timezone.utc, False
+        try:
+            return ZoneInfo(tz_name), False
+        except Exception:
+            pass
+
+        normalized = tz_name.upper()
+        fallback_minutes = {
+            "UTC": 0,
+            "ETC/UTC": 0,
+            "GMT": 0,
+            "ASIA/MANILA": 8 * 60,
+            "ASIA/SINGAPORE": 8 * 60,
+            "ASIA/HONG_KONG": 8 * 60,
+            "ASIA/TOKYO": 9 * 60,
+            "ASIA/SEOUL": 9 * 60,
+            "AMERICA/NEW_YORK": -5 * 60,
+            "AMERICA/CHICAGO": -6 * 60,
+            "AMERICA/DENVER": -7 * 60,
+            "AMERICA/LOS_ANGELES": -8 * 60,
+            "EUROPE/LONDON": 0,
+            "EUROPE/PARIS": 60,
+        }.get(normalized)
+        if fallback_minutes is not None:
+            return timezone(timedelta(minutes=fallback_minutes)), True
+
+        offset_match = re.fullmatch(r"(?:UTC|GMT)\s*([+-])\s*(\d{1,2})(?::?(\d{2}))?", normalized)
+        if offset_match:
+            sign = 1 if offset_match.group(1) == "+" else -1
+            hours = int(offset_match.group(2))
+            minutes = int(offset_match.group(3) or "0")
+            total_minutes = sign * (hours * 60 + minutes)
+            return timezone(timedelta(minutes=total_minutes)), True
+        return timezone.utc, True
+
+    @staticmethod
     def _format_utc(value: datetime) -> str:
         return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
@@ -677,13 +719,8 @@ class RuntimeStore:
         if not text:
             return TaskTimeParseResponse(accepted=False, reason="empty_text")
 
-        tz_name = request.timezone or "UTC"
-        timezone_fallback = False
-        try:
-            tz = ZoneInfo(tz_name)
-        except Exception:
-            tz = timezone.utc
-            timezone_fallback = True
+        tz_name = request.timezone
+        tz, timezone_fallback = self._resolve_timezone(tz_name or "UTC")
 
         now_local = datetime.now(tz)
         lowered = text.lower()
@@ -832,6 +869,16 @@ class RuntimeStore:
                 lines.append("RRULE:FREQ=DAILY")
             elif task.recurrence == "weekly":
                 lines.append("RRULE:FREQ=WEEKLY")
+            if task.reminderMinutesBefore is not None and task.reminderMinutesBefore > 0:
+                lines.extend(
+                    [
+                        "BEGIN:VALARM",
+                        f"TRIGGER:-PT{task.reminderMinutesBefore}M",
+                        "ACTION:DISPLAY",
+                        "DESCRIPTION:Task reminder",
+                        "END:VALARM",
+                    ]
+                )
             lines.append("END:VEVENT")
             event_count += 1
 
@@ -866,21 +913,67 @@ class RuntimeStore:
             .replace("\\\\", "\\")
         )
 
-    def _parse_ics_datetime(self, raw: str) -> datetime | None:
+    @staticmethod
+    def _unfold_ics_lines(raw_text: str) -> list[str]:
+        unfolded: list[str] = []
+        for line in raw_text.splitlines():
+            if (line.startswith(" ") or line.startswith("\t")) and unfolded:
+                unfolded[-1] = unfolded[-1] + line[1:]
+                continue
+            unfolded.append(line)
+        return unfolded
+
+    @staticmethod
+    def _parse_ics_property(line: str) -> tuple[str, dict[str, str], str] | None:
+        if ":" not in line:
+            return None
+        head, value = line.split(":", 1)
+        parts = head.split(";")
+        key = parts[0].upper().strip()
+        params: dict[str, str] = {}
+        for part in parts[1:]:
+            if "=" not in part:
+                continue
+            name, raw_value = part.split("=", 1)
+            params[name.upper().strip()] = raw_value.strip()
+        return key, params, value.strip()
+
+    def _parse_ics_datetime(self, raw: str, tzid: str | None = None) -> datetime | None:
         value = raw.strip()
         if not value:
             return None
+        tz, _ = self._resolve_timezone(tzid or "UTC")
         try:
             if value.endswith("Z"):
                 dt = datetime.strptime(value, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
                 return dt.astimezone(timezone.utc)
             if "T" in value:
-                dt = datetime.strptime(value, "%Y%m%dT%H%M%S").replace(tzinfo=timezone.utc)
-                return dt.astimezone(timezone.utc)
-            dt = datetime.strptime(value, "%Y%m%d").replace(tzinfo=timezone.utc)
-            return dt.astimezone(timezone.utc)
+                dt_local = datetime.strptime(value, "%Y%m%dT%H%M%S").replace(tzinfo=tz)
+                return dt_local.astimezone(timezone.utc)
+            dt_local = datetime.strptime(value, "%Y%m%d").replace(tzinfo=tz)
+            return dt_local.astimezone(timezone.utc)
         except ValueError:
             return None
+
+    @staticmethod
+    def _parse_ics_trigger_minutes(raw: str) -> int | None:
+        text = raw.strip().upper()
+        if not text.startswith("-P"):
+            return None
+        match = re.fullmatch(
+            r"-P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?",
+            text,
+        )
+        if not match:
+            return None
+        days = int(match.group(1) or "0")
+        hours = int(match.group(2) or "0")
+        minutes = int(match.group(3) or "0")
+        seconds = int(match.group(4) or "0")
+        total_minutes = days * 24 * 60 + hours * 60 + minutes + (1 if seconds > 0 else 0)
+        if total_minutes <= 0:
+            return None
+        return total_minutes
 
     def _find_task_conflict(self, title: str, due_at: str, external_id: str | None) -> TaskItem | None:
         if external_id:
@@ -926,26 +1019,37 @@ class RuntimeStore:
             )
 
         raw_text = source.read_text(encoding="utf-8", errors="ignore")
-        lines = raw_text.splitlines()
+        lines = self._unfold_ics_lines(raw_text)
         created_count = 0
         updated_count = 0
         skipped_count = 0
         current: dict[str, str] = {}
+        current_dtstart_tzid: str | None = None
+        current_exdates: list[tuple[str, str | None]] = []
+        current_reminder_minutes: int | None = None
         in_event = False
+        in_alarm = False
 
         def flush_event() -> None:
-            nonlocal created_count, updated_count, skipped_count, current
+            nonlocal created_count, updated_count, skipped_count
+            nonlocal current, current_dtstart_tzid, current_exdates, current_reminder_minutes
             title_raw = current.get("SUMMARY", "").strip()
             uid_raw = current.get("UID", "").strip()
             dtstart_raw = current.get("DTSTART", "").strip()
             if not title_raw or not dtstart_raw:
                 skipped_count += 1
                 current = {}
+                current_dtstart_tzid = None
+                current_exdates = []
+                current_reminder_minutes = None
                 return
-            due = self._parse_ics_datetime(dtstart_raw)
+            due = self._parse_ics_datetime(dtstart_raw, tzid=current_dtstart_tzid)
             if due is None:
                 skipped_count += 1
                 current = {}
+                current_dtstart_tzid = None
+                current_exdates = []
+                current_reminder_minutes = None
                 return
             recurrence: str | None = None
             rrule = current.get("RRULE", "").upper()
@@ -953,6 +1057,23 @@ class RuntimeStore:
                 recurrence = "daily"
             elif "FREQ=WEEKLY" in rrule:
                 recurrence = "weekly"
+
+            excluded = False
+            for exdate_value, exdate_tzid in current_exdates:
+                for token in [part.strip() for part in exdate_value.split(",") if part.strip()]:
+                    exdate = self._parse_ics_datetime(token, tzid=exdate_tzid)
+                    if exdate is not None and exdate == due:
+                        excluded = True
+                        break
+                if excluded:
+                    break
+            if excluded:
+                skipped_count += 1
+                current = {}
+                current_dtstart_tzid = None
+                current_exdates = []
+                current_reminder_minutes = None
+                return
 
             title = self._ics_unescape(title_raw)
             external_id = self._ics_unescape(uid_raw) if uid_raw else None
@@ -968,6 +1089,7 @@ class RuntimeStore:
                 conflict.dueAt = due_at
                 conflict.nextRunAt = due_at
                 conflict.recurrence = recurrence
+                conflict.reminderMinutesBefore = current_reminder_minutes
                 conflict.source = "assistant"
                 updated_count += 1
             else:
@@ -977,6 +1099,7 @@ class RuntimeStore:
                     title=title,
                     dueAt=due_at,
                     recurrence=recurrence,
+                    reminderMinutesBefore=current_reminder_minutes,
                     nextRunAt=due_at,
                     status="todo",
                     source="assistant",
@@ -984,25 +1107,56 @@ class RuntimeStore:
                 self.tasks.insert(0, task)
                 created_count += 1
             current = {}
+            current_dtstart_tzid = None
+            current_exdates = []
+            current_reminder_minutes = None
 
         for raw_line in lines:
             line = raw_line.strip()
             if line == "BEGIN:VEVENT":
                 in_event = True
+                in_alarm = False
                 current = {}
+                current_dtstart_tzid = None
+                current_exdates = []
+                current_reminder_minutes = None
                 continue
             if line == "END:VEVENT":
                 if in_event:
                     flush_event()
                 in_event = False
+                in_alarm = False
+                current = {}
+                current_dtstart_tzid = None
+                current_exdates = []
+                current_reminder_minutes = None
+                continue
+            if line == "BEGIN:VALARM":
+                in_alarm = True
+                continue
+            if line == "END:VALARM":
+                in_alarm = False
                 continue
             if not in_event:
                 continue
-            if ":" not in line:
+
+            parsed = self._parse_ics_property(line)
+            if parsed is None:
                 continue
-            key, value = line.split(":", 1)
-            key = key.split(";", 1)[0].upper().strip()
-            current[key] = value.strip()
+            key, params, value = parsed
+
+            if in_alarm:
+                if key == "TRIGGER":
+                    minutes_before = self._parse_ics_trigger_minutes(value)
+                    if minutes_before is not None:
+                        current_reminder_minutes = minutes_before
+                continue
+
+            current[key] = value
+            if key == "DTSTART":
+                current_dtstart_tzid = params.get("TZID")
+            elif key == "EXDATE":
+                current_exdates.append((value, params.get("TZID")))
 
         imported_count = created_count + updated_count
         if imported_count > 0:
