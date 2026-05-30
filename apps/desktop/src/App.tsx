@@ -3,11 +3,20 @@ import {
   QUICK_TOGGLES,
   TAB_ORDER,
   type AssistantResponse,
+  type FileOrganizeResponse,
   type HubSnapshot,
   type MindiTabId,
+  type PermissionGrant,
   type QuickToggle,
 } from "@mindi/shared";
-import { createTask, fetchHubSnapshot, sendAssistantRequest } from "./lib/agent-api";
+import {
+  addPermissionGrant,
+  createTask,
+  fetchHubSnapshot,
+  fileOrganize,
+  listPermissionGrants,
+  sendAssistantRequest,
+} from "./lib/agent-api";
 import { enqueueSyncItem, loadSyncQueue, loadToggleState, saveToggleState } from "./lib/local-state";
 
 const EMPTY_SNAPSHOT: HubSnapshot = {
@@ -30,6 +39,7 @@ function formatTab(tab: MindiTabId): string {
 export default function App() {
   const [tab, setTab] = useState<MindiTabId>("home");
   const [snapshot, setSnapshot] = useState<HubSnapshot>(EMPTY_SNAPSHOT);
+  const [permissions, setPermissions] = useState<PermissionGrant[]>([]);
   const [toggles, setToggles] = useState<QuickToggle[]>(() =>
     loadToggleState(QUICK_TOGGLES),
   );
@@ -37,6 +47,10 @@ export default function App() {
   const [assistant, setAssistant] = useState<AssistantResponse | null>(null);
   const [syncDepth, setSyncDepth] = useState(loadSyncQueue().length);
   const [networkOnline, setNetworkOnline] = useState<boolean>(navigator.onLine);
+  const [sourceDir, setSourceDir] = useState("data/inbox");
+  const [targetDir, setTargetDir] = useState("data/sorted");
+  const [organizeResult, setOrganizeResult] = useState<FileOrganizeResponse | null>(null);
+  const [newAllowFolder, setNewAllowFolder] = useState("data");
 
   useEffect(() => {
     saveToggleState(toggles);
@@ -55,11 +69,13 @@ export default function App() {
 
   useEffect(() => {
     let active = true;
-    fetchHubSnapshot()
-      .then((data) => {
-        if (active) {
-          setSnapshot(data);
+    Promise.all([fetchHubSnapshot(), listPermissionGrants()])
+      .then(([hub, grantList]) => {
+        if (!active) {
+          return;
         }
+        setSnapshot(hub);
+        setPermissions(grantList);
       })
       .catch(() => {
         if (active) {
@@ -72,7 +88,6 @@ export default function App() {
           }));
         }
       });
-
     return () => {
       active = false;
     };
@@ -133,6 +148,40 @@ export default function App() {
     }
   }
 
+  async function addFolderAllowGrant() {
+    const subject = newAllowFolder.trim();
+    if (!subject) {
+      return;
+    }
+    try {
+      const created = await addPermissionGrant({
+        scope: "folder",
+        subject,
+        decision: "allow",
+      });
+      setPermissions((current) => [created, ...current]);
+    } catch {
+      enqueueSyncItem({
+        type: "action",
+        payload: { action: "add_permission", scope: "folder", subject },
+      });
+      setSyncDepth(loadSyncQueue().length);
+    }
+  }
+
+  async function runOrganize(mode: "preview" | "apply") {
+    try {
+      const result = await fileOrganize({ sourceDir, targetDir, mode });
+      setOrganizeResult(result);
+    } catch {
+      enqueueSyncItem({
+        type: "action",
+        payload: { action: "file_organize", mode, sourceDir, targetDir },
+      });
+      setSyncDepth(loadSyncQueue().length);
+    }
+  }
+
   return (
     <div className="frame">
       <header className="topbar">
@@ -156,80 +205,146 @@ export default function App() {
         ))}
       </nav>
 
-      <section className="hub">
-        <div className="card">
-          <h3>Urgent Tasks & Alerts</h3>
-          <div className="row">
-            <button type="button" onClick={addTask}>
-              + Task
-            </button>
-          </div>
-          <ul>
-            {snapshot.tasks.slice(0, 4).map((task) => (
-              <li key={task.id}>
-                [{task.status}] {task.title}
-              </li>
-            ))}
-            {snapshot.tasks.length === 0 && <li>No tasks yet.</li>}
-          </ul>
-          <ul>
-            {snapshot.alerts.slice(0, 3).map((alert) => (
-              <li key={alert.id}>
-                [{alert.severity}] {alert.title}
-              </li>
-            ))}
-            {snapshot.alerts.length === 0 && <li>No active alerts.</li>}
-          </ul>
-        </div>
-
-        <div className="card">
-          <h3>Conversation</h3>
-          <div className="chatbox">
-            <input
-              value={message}
-              onChange={(event) => setMessage(event.target.value)}
-              placeholder="Ask MINDI..."
-              onKeyDown={(event) => {
-                if (event.key === "Enter") {
-                  void handleSend();
-                }
-              }}
-            />
-            <button type="button" onClick={() => void handleSend()}>
-              Send
-            </button>
-          </div>
-          <p className="assistant-reply">
-            {assistant?.reply ?? "No assistant response yet. Send a prompt to start."}
-          </p>
-        </div>
-
-        <div className="card">
-          <h3>Status & Quick Controls</h3>
-          <p>Agent: {snapshot.status.agentVersion}</p>
-          <p>Listening: {snapshot.status.listening ? "on" : "off"}</p>
-          <div className="toggles">
-            {toggles.map((toggle) => (
-              <label key={toggle.id}>
-                <input
-                  type="checkbox"
-                  checked={toggle.enabled}
-                  onChange={(event) =>
-                    setToggles((current) =>
-                      current.map((item) =>
-                        item.id === toggle.id
-                          ? { ...item, enabled: event.target.checked }
-                          : item,
-                      ),
-                    )
-                  }
-                />
-                {toggle.label}
+      {tab === "control" ? (
+        <section className="hub">
+          <div className="card">
+            <h3>File Organize</h3>
+            <div className="stack">
+              <label>
+                Source folder
+                <input value={sourceDir} onChange={(e) => setSourceDir(e.target.value)} />
               </label>
-            ))}
+              <label>
+                Target folder
+                <input value={targetDir} onChange={(e) => setTargetDir(e.target.value)} />
+              </label>
+              <div className="row left">
+                <button type="button" onClick={() => void runOrganize("preview")}>
+                  Preview
+                </button>
+                <button type="button" onClick={() => void runOrganize("apply")}>
+                  Apply
+                </button>
+              </div>
+            </div>
+            <p className="assistant-reply">
+              {organizeResult
+                ? `${organizeResult.reason} | accepted=${String(organizeResult.accepted)} | moved=${organizeResult.movedCount}`
+                : "No organize run yet."}
+            </p>
+            <ul>
+              {organizeResult?.items.slice(0, 6).map((item) => (
+                <li key={`${item.sourcePath}-${item.targetPath}`}>
+                  {item.fileName} {"->"} {item.category}
+                </li>
+              ))}
+            </ul>
           </div>
-        </div>
-      </section>
+
+          <div className="card">
+            <h3>Folder Allowlist</h3>
+            <div className="stack">
+              <input
+                value={newAllowFolder}
+                onChange={(e) => setNewAllowFolder(e.target.value)}
+                placeholder="Path to allow"
+              />
+              <button type="button" onClick={() => void addFolderAllowGrant()}>
+                Add allow
+              </button>
+            </div>
+            <ul>
+              {permissions.slice(0, 8).map((grant) => (
+                <li key={grant.id}>
+                  [{grant.decision}] {grant.scope}: {grant.subject}
+                </li>
+              ))}
+            </ul>
+          </div>
+
+          <div className="card">
+            <h3>Safety Notes</h3>
+            <p>Only allowlisted folders can be organized.</p>
+            <p>Risky actions remain blocked by policy gate.</p>
+            <p>All control runs append audit logs.</p>
+          </div>
+        </section>
+      ) : (
+        <section className="hub">
+          <div className="card">
+            <h3>Urgent Tasks & Alerts</h3>
+            <div className="row">
+              <button type="button" onClick={addTask}>
+                + Task
+              </button>
+            </div>
+            <ul>
+              {snapshot.tasks.slice(0, 4).map((task) => (
+                <li key={task.id}>
+                  [{task.status}] {task.title}
+                </li>
+              ))}
+              {snapshot.tasks.length === 0 && <li>No tasks yet.</li>}
+            </ul>
+            <ul>
+              {snapshot.alerts.slice(0, 3).map((alert) => (
+                <li key={alert.id}>
+                  [{alert.severity}] {alert.title}
+                </li>
+              ))}
+              {snapshot.alerts.length === 0 && <li>No active alerts.</li>}
+            </ul>
+          </div>
+
+          <div className="card">
+            <h3>Conversation</h3>
+            <div className="chatbox">
+              <input
+                value={message}
+                onChange={(event) => setMessage(event.target.value)}
+                placeholder="Ask MINDI..."
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    void handleSend();
+                  }
+                }}
+              />
+              <button type="button" onClick={() => void handleSend()}>
+                Send
+              </button>
+            </div>
+            <p className="assistant-reply">
+              {assistant?.reply ?? "No assistant response yet. Send a prompt to start."}
+            </p>
+          </div>
+
+          <div className="card">
+            <h3>Status & Quick Controls</h3>
+            <p>Agent: {snapshot.status.agentVersion}</p>
+            <p>Listening: {snapshot.status.listening ? "on" : "off"}</p>
+            <div className="toggles">
+              {toggles.map((toggle) => (
+                <label key={toggle.id}>
+                  <input
+                    type="checkbox"
+                    checked={toggle.enabled}
+                    onChange={(event) =>
+                      setToggles((current) =>
+                        current.map((item) =>
+                          item.id === toggle.id
+                            ? { ...item, enabled: event.target.checked }
+                            : item,
+                        ),
+                      )
+                    }
+                  />
+                  {toggle.label}
+                </label>
+              ))}
+            </div>
+          </div>
+        </section>
+      )}
     </div>
   );
 }
