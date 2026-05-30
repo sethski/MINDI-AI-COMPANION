@@ -14,6 +14,7 @@ import {
   type PerceptionPermissionStatus,
   type PerceptionAnalyzeResponse,
   type PerceptionSnapshot,
+  type PrivacyStatus,
   type PermissionGrant,
   type QuickToggle,
   type SchedulerStatus,
@@ -53,6 +54,8 @@ import {
   runSecurityScan,
   runSchedulerScanNow,
   scrapeWeb,
+  getPrivacyStatus,
+  updatePrivacyStatus,
   exportCalendar,
   importCalendar,
   analyzeScreenPerception,
@@ -135,6 +138,8 @@ export default function App() {
   const [securityStatus, setSecurityStatus] = useState("No security scan yet.");
   const [alertFeed, setAlertFeed] = useState<AlertFeedResponse | null>(null);
   const [alertStatus, setAlertStatus] = useState("No alert action yet.");
+  const [privacyStatus, setPrivacyStatus] = useState<PrivacyStatus | null>(null);
+  const [privacyUiEnabled, setPrivacyUiEnabled] = useState(true);
   const [opsScrapeUrl, setOpsScrapeUrl] = useState("https://example.com");
   const [opsScrapeStoreAsNote, setOpsScrapeStoreAsNote] = useState(true);
   const [opsScrapeResult, setOpsScrapeResult] = useState<WebScrapeResponse | null>(null);
@@ -186,6 +191,7 @@ export default function App() {
       listPerceptionSnapshots(12),
       listSecurityEvents("open", 12),
       getAlertFeed(12),
+      getPrivacyStatus(),
     ])
       .then(
         ([
@@ -199,6 +205,7 @@ export default function App() {
           snapshotItems,
           securityItems,
           alertFeedInitial,
+          privacyInitial,
         ]) => {
         if (!active) {
           return;
@@ -215,6 +222,8 @@ export default function App() {
         setSecurityStatus(`Loaded ${securityItems.length} open security events.`);
         setAlertFeed(alertFeedInitial);
         setAlertStatus(`Loaded ${alertFeedInitial.items.length} prioritized alerts.`);
+        setPrivacyStatus(privacyInitial);
+        setPrivacyUiEnabled(privacyInitial.redactionEnabled);
         if (snapshotItems.length > 0) {
           setPerceptionSelectedSnapshotId(snapshotItems[0].id);
           setPerceptionSnapshotStatus(`Loaded ${snapshotItems.length} recent snapshots.`);
@@ -454,6 +463,11 @@ export default function App() {
           alertId,
           action: alertAction,
         });
+        return true;
+      }
+      if (action === "privacy_update") {
+        const enabled = Boolean(payload.redactionEnabled);
+        await updatePrivacyStatus({ redactionEnabled: enabled });
         return true;
       }
     }
@@ -1225,7 +1239,7 @@ export default function App() {
       setPerceptionResult(response);
       if (response.accepted) {
         setPerceptionStatus(
-          `Perception ok: ${response.blocks.length} blocks, textLength=${response.textLength}, snapshot=${response.snapshotId ?? "n/a"}.`,
+          `Perception ok: ${response.blocks.length} blocks, textLength=${response.textLength}, snapshot=${response.snapshotId ?? "n/a"}, redacted=${String(response.storageRedacted)} (${response.redactionCount}).`,
         );
         await refreshPerceptionSnapshots();
         if (response.snapshotId) {
@@ -1259,7 +1273,7 @@ export default function App() {
       setOpsScrapeResult(response);
       if (response.accepted) {
         setOpsStatus(
-          `Scrape ok: textLength=${response.textLength}, links=${response.links.length}, storedNote=${response.storedNoteId ?? "none"}.`,
+          `Scrape ok: textLength=${response.textLength}, links=${response.links.length}, storedNote=${response.storedNoteId ?? "none"}, redacted=${String(response.storageRedacted)} (${response.redactionCount}).`,
         );
       } else if (response.reason === "domain_not_allowed") {
         setOpsStatus("Scrape blocked by domain policy. Add domain allow in Control or Ops.");
@@ -1295,6 +1309,32 @@ export default function App() {
       );
     } catch {
       setAlertStatus("Alert feed unavailable while offline.");
+    }
+  }
+
+  async function refreshPrivacyStatus() {
+    try {
+      const status = await getPrivacyStatus();
+      setPrivacyStatus(status);
+      setPrivacyUiEnabled(status.redactionEnabled);
+    } catch {
+      setOpsStatus("Privacy status unavailable while offline.");
+    }
+  }
+
+  async function runPrivacyUpdate(redactionEnabled: boolean) {
+    try {
+      const status = await updatePrivacyStatus({ redactionEnabled });
+      setPrivacyStatus(status);
+      setPrivacyUiEnabled(status.redactionEnabled);
+      setOpsStatus(`Privacy updated: redaction=${String(status.redactionEnabled)}.`);
+    } catch {
+      enqueueSyncItem({
+        type: "action",
+        payload: { action: "privacy_update", redactionEnabled },
+      });
+      setSyncDepth(loadSyncQueue().length);
+      setOpsStatus("Privacy update queued for sync.");
     }
   }
 
@@ -2008,6 +2048,33 @@ export default function App() {
               ))}
               {alertFeed && alertFeed.items.length === 0 ? <li>No alerts in feed.</li> : null}
             </ul>
+          </div>
+
+          <div className="card">
+            <h3>Offline Privacy</h3>
+            <p>
+              redaction:{" "}
+              {privacyStatus
+                ? `${String(privacyStatus.redactionEnabled)} (patterns=${privacyStatus.sensitivePatternCount})`
+                : "unknown"}
+            </p>
+            <p>safe storage default: {privacyStatus ? String(privacyStatus.safeStorageDefault) : "unknown"}</p>
+            <label>
+              <input
+                type="checkbox"
+                checked={privacyUiEnabled}
+                onChange={(event) => setPrivacyUiEnabled(event.target.checked)}
+              />
+              Enable sensitive-text redaction for stored perception/scrape artifacts
+            </label>
+            <div className="row left">
+              <button type="button" onClick={() => void runPrivacyUpdate(privacyUiEnabled)}>
+                Apply Privacy Setting
+              </button>
+              <button type="button" onClick={() => void refreshPrivacyStatus()}>
+                Refresh Privacy Status
+              </button>
+            </div>
           </div>
 
           <div className="card">
