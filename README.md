@@ -51,6 +51,7 @@ Windows-first local assistant. Current repo layout:
   - `POST /ops/scheduler/parse-time`
 - Calendar export:
   - `POST /calendar/export` (`.ics`)
+  - `POST /calendar/import` (`.ics` -> tasks)
 - Memory tab UI for note creation and retrieval.
 
 ## Run Desktop
