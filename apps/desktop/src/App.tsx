@@ -2358,24 +2358,32 @@ export default function App() {
           <div className="card">
             <h3>Model Readiness</h3>
             {aiRuntimeStatus ? (
-              <ul>
-                <li>
-                  runtime: reachable={String(aiRuntimeStatus.runtime.reachable)} offlineMode=
-                  {String(aiRuntimeStatus.runtime.offlineMode)}
-                </li>
-                <li>
-                  llm: ready={String(aiRuntimeStatus.features.llm.ready)} provider=
-                  {aiRuntimeStatus.features.llm.provider} model={aiRuntimeStatus.features.llm.model}
-                </li>
-                <li>
-                  asr: ready={String(aiRuntimeStatus.features.asr.ready)} provider=
-                  {aiRuntimeStatus.features.asr.provider} model={aiRuntimeStatus.features.asr.model}
-                </li>
-                <li>
-                  ocr: ready={String(aiRuntimeStatus.features.ocr.ready)} provider=
-                  {aiRuntimeStatus.features.ocr.provider} model={aiRuntimeStatus.features.ocr.model}
-                </li>
-              </ul>
+              <>
+                {(aiRuntimeStatus.features.asr.experimental || aiRuntimeStatus.features.ocr.experimental) && (
+                  <p className="assistant-reply">
+                    Experimental features active: {aiRuntimeStatus.features.asr.experimental ? "ASR " : ""}
+                    {aiRuntimeStatus.features.ocr.experimental ? "OCR" : ""}
+                  </p>
+                )}
+                <ul>
+                  <li>
+                    runtime: reachable={String(aiRuntimeStatus.runtime.reachable)} offlineMode=
+                    {String(aiRuntimeStatus.runtime.offlineMode)}
+                  </li>
+                  <li>
+                    llm: ready={String(aiRuntimeStatus.features.llm.ready)} provider=
+                    {aiRuntimeStatus.features.llm.provider} model={aiRuntimeStatus.features.llm.model}
+                  </li>
+                  <li>
+                    asr: ready={String(aiRuntimeStatus.features.asr.ready)} provider=
+                    {aiRuntimeStatus.features.asr.provider} model={aiRuntimeStatus.features.asr.model}
+                  </li>
+                  <li>
+                    ocr: ready={String(aiRuntimeStatus.features.ocr.ready)} provider=
+                    {aiRuntimeStatus.features.ocr.provider} model={aiRuntimeStatus.features.ocr.model}
+                  </li>
+                </ul>
+              </>
             ) : (
               <p>No runtime status yet.</p>
             )}
@@ -2396,9 +2404,26 @@ export default function App() {
                 <li>url: {aiRuntimeStatus.runtime.url}</li>
                 <li>reachable: {String(aiRuntimeStatus.runtime.reachable)}</li>
                 <li>lastError: {aiRuntimeStatus.runtime.lastError ?? "none"}</li>
-                <li>llm pathConfigured: {String(aiRuntimeStatus.features.llm.pathConfigured)}</li>
-                <li>asr pathConfigured: {String(aiRuntimeStatus.features.asr.pathConfigured)}</li>
-                <li>ocr pathConfigured: {String(aiRuntimeStatus.features.ocr.pathConfigured)}</li>
+                <li>
+                  llm: pathConfigured={String(aiRuntimeStatus.features.llm.pathConfigured)} lastError=
+                  {aiRuntimeStatus.features.llm.lastError ?? "none"} lastFailure=
+                  {aiRuntimeStatus.features.llm.lastFailureReason ?? "none"} lastLatencyMs=
+                  {aiRuntimeStatus.features.llm.lastLatencyMs ?? "n/a"}
+                </li>
+                <li>
+                  asr: pathConfigured={String(aiRuntimeStatus.features.asr.pathConfigured)} lastError=
+                  {aiRuntimeStatus.features.asr.lastError ?? "none"} lastFailure=
+                  {aiRuntimeStatus.features.asr.lastFailureReason ?? "none"} lastLatencyMs=
+                  {aiRuntimeStatus.features.asr.lastLatencyMs ?? "n/a"} experimental=
+                  {String(aiRuntimeStatus.features.asr.experimental)}
+                </li>
+                <li>
+                  ocr: pathConfigured={String(aiRuntimeStatus.features.ocr.pathConfigured)} lastError=
+                  {aiRuntimeStatus.features.ocr.lastError ?? "none"} lastFailure=
+                  {aiRuntimeStatus.features.ocr.lastFailureReason ?? "none"} lastLatencyMs=
+                  {aiRuntimeStatus.features.ocr.lastLatencyMs ?? "n/a"} experimental=
+                  {String(aiRuntimeStatus.features.ocr.experimental)}
+                </li>
               </ul>
             ) : (
               <p>No runtime status yet.</p>
