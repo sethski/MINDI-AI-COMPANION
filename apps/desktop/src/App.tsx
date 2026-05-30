@@ -2,9 +2,12 @@ import { useEffect, useMemo, useState } from "react";
 import {
   QUICK_TOGGLES,
   TAB_ORDER,
+  type AiRuntimeStatusResponse,
   type AlertFeedResponse,
+  type AsrTranscribeResponse,
   type AutoIndexStatus,
   type AutomationChainResponse,
+  type DatasetPrepareResponse,
   type IntelligenceAdaptationStatus,
   type IntelligenceEvalRunResponse,
   type IntelligenceLearningStatus,
@@ -29,6 +32,10 @@ import {
   type WebScrapeResponse,
 } from "@mindi/shared";
 import {
+  getAiRuntimeStatus,
+  updateAiRuntimeConfig,
+  transcribeAsr,
+  prepareDataset,
   addPermissionGrant,
   appControlAction,
   createMemoryNote,
@@ -184,6 +191,17 @@ export default function App() {
   const [opsChainTaskTitle, setOpsChainTaskTitle] = useState("Review latest security findings");
   const [opsChainNoteTitle, setOpsChainNoteTitle] = useState("Ops brief note");
   const [opsChainResult, setOpsChainResult] = useState<AutomationChainResponse | null>(null);
+  const [aiRuntimeStatus, setAiRuntimeStatus] = useState<AiRuntimeStatusResponse | null>(null);
+  const [aiStatusMessage, setAiStatusMessage] = useState("No AI runtime check yet.");
+  const [llmModelPath, setLlmModelPath] = useState("");
+  const [asrModelPath, setAsrModelPath] = useState("");
+  const [ocrModelPath, setOcrModelPath] = useState("");
+  const [asrSourceType, setAsrSourceType] = useState<"file" | "mic">("file");
+  const [asrSourceValue, setAsrSourceValue] = useState("data/inbox/sample.wav");
+  const [asrResult, setAsrResult] = useState<AsrTranscribeResponse | null>(null);
+  const [datasetPath, setDatasetPath] = useState("data/datasets/ph-pretrain");
+  const [datasetOutputDir, setDatasetOutputDir] = useState("data/runtime/intelligence");
+  const [datasetPrepResult, setDatasetPrepResult] = useState<DatasetPrepareResponse | null>(null);
   const [opsStatus, setOpsStatus] = useState("No ops run yet.");
   const [memoryStatus, setMemoryStatus] = useState("No memory action yet.");
   const [perceptionStatus, setPerceptionStatus] = useState("No perception run yet.");
@@ -234,6 +252,7 @@ export default function App() {
       getIntelligenceTuningStatus(),
       listIntelligenceEvalHistory(8),
       getIntelligenceAdaptationStatus(),
+      getAiRuntimeStatus(),
     ])
       .then(
         ([
@@ -253,6 +272,7 @@ export default function App() {
           intelligenceTuningInitial,
           intelligenceEvalHistoryInitial,
           intelligenceAdaptationInitial,
+          aiRuntimeInitial,
         ]) => {
         if (!active) {
           return;
@@ -286,6 +306,17 @@ export default function App() {
         setIntelligenceStatus(
           `Loaded ${intelligenceEvalHistoryInitial.length} eval history items. Adaptation=${intelligenceAdaptationInitial.recommendedMethod}.`,
         );
+        setAiRuntimeStatus(aiRuntimeInitial);
+        setAiStatusMessage(
+          `Runtime reachable=${String(aiRuntimeInitial.runtime.reachable)} llmReady=${String(
+            aiRuntimeInitial.features.llm.ready,
+          )} asrReady=${String(aiRuntimeInitial.features.asr.ready)} ocrReady=${String(
+            aiRuntimeInitial.features.ocr.ready,
+          )}`,
+        );
+        setLlmModelPath(aiRuntimeInitial.config.llmModelPath);
+        setAsrModelPath(aiRuntimeInitial.config.asrModelPath);
+        setOcrModelPath(aiRuntimeInitial.config.ocrModelPath);
         if (snapshotItems.length > 0) {
           setPerceptionSelectedSnapshotId(snapshotItems[0].id);
           setPerceptionSnapshotStatus(`Loaded ${snapshotItems.length} recent snapshots.`);
@@ -1784,6 +1815,71 @@ export default function App() {
     }
   }
 
+  async function refreshAiRuntimeState() {
+    try {
+      const status = await getAiRuntimeStatus();
+      setAiRuntimeStatus(status);
+      setAiStatusMessage(
+        `Runtime reachable=${String(status.runtime.reachable)} llmReady=${String(
+          status.features.llm.ready,
+        )} asrReady=${String(status.features.asr.ready)} ocrReady=${String(status.features.ocr.ready)}`,
+      );
+      setLlmModelPath(status.config.llmModelPath);
+      setAsrModelPath(status.config.asrModelPath);
+      setOcrModelPath(status.config.ocrModelPath);
+    } catch {
+      setAiStatusMessage("AI runtime status refresh failed.");
+    }
+  }
+
+  async function applyAiRuntimeConfigFromSettings() {
+    try {
+      const status = await updateAiRuntimeConfig({
+        llmModelPath,
+        asrModelPath,
+        ocrModelPath,
+      });
+      setAiRuntimeStatus(status);
+      setAiStatusMessage("AI runtime config updated.");
+    } catch {
+      setAiStatusMessage("AI runtime config update failed.");
+    }
+  }
+
+  async function runAsrTranscription() {
+    try {
+      const result = await transcribeAsr({
+        sourceType: asrSourceType,
+        sourceValue: asrSourceValue,
+      });
+      setAsrResult(result);
+      if (result.accepted) {
+        setOpsStatus(`ASR complete: ${result.segments.length} segments.`);
+      } else {
+        setOpsStatus(`ASR failed: ${result.reason}`);
+      }
+    } catch {
+      setOpsStatus("ASR request failed.");
+    }
+  }
+
+  async function runDatasetPreparation() {
+    try {
+      const result = await prepareDataset({
+        datasetPath,
+        outputDir: datasetOutputDir,
+      });
+      setDatasetPrepResult(result);
+      if (result.accepted) {
+        setOpsStatus(`Dataset prepared: train=${result.trainSamples}, val=${result.valSamples}.`);
+      } else {
+        setOpsStatus(`Dataset preparation failed: ${result.reason}`);
+      }
+    } catch {
+      setOpsStatus("Dataset preparation request failed.");
+    }
+  }
+
   const perceptionAverageConfidence = useMemo(() => {
     if (!perceptionResult || perceptionResult.blocks.length === 0) {
       return 0;
@@ -2185,8 +2281,154 @@ export default function App() {
             ) : null}
           </div>
         </section>
+      ) : tab === "settings" ? (
+        <section className="hub">
+          <div className="card">
+            <h3>AI Runtime Config</h3>
+            <p className="assistant-reply">{aiStatusMessage}</p>
+            <div className="stack">
+              <label>
+                LLM model path (GGUF)
+                <input
+                  value={llmModelPath}
+                  onChange={(event) => setLlmModelPath(event.target.value)}
+                  placeholder="C:\\models\\qwen2.5-7b-instruct.gguf"
+                />
+              </label>
+              <label>
+                ASR model path
+                <input
+                  value={asrModelPath}
+                  onChange={(event) => setAsrModelPath(event.target.value)}
+                  placeholder="C:\\models\\qwen3-asr-1.7b"
+                />
+              </label>
+              <label>
+                OCR model path
+                <input
+                  value={ocrModelPath}
+                  onChange={(event) => setOcrModelPath(event.target.value)}
+                  placeholder="C:\\models\\glm-ocr"
+                />
+              </label>
+              <div className="row left">
+                <button type="button" onClick={() => void applyAiRuntimeConfigFromSettings()}>
+                  Save Runtime Config
+                </button>
+                <button type="button" onClick={() => void refreshAiRuntimeState()}>
+                  Refresh Runtime Status
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div className="card">
+            <h3>Model Readiness</h3>
+            {aiRuntimeStatus ? (
+              <ul>
+                <li>
+                  runtime: reachable={String(aiRuntimeStatus.runtime.reachable)} offlineMode=
+                  {String(aiRuntimeStatus.runtime.offlineMode)}
+                </li>
+                <li>
+                  llm: ready={String(aiRuntimeStatus.features.llm.ready)} provider=
+                  {aiRuntimeStatus.features.llm.provider} model={aiRuntimeStatus.features.llm.model}
+                </li>
+                <li>
+                  asr: ready={String(aiRuntimeStatus.features.asr.ready)} provider=
+                  {aiRuntimeStatus.features.asr.provider} model={aiRuntimeStatus.features.asr.model}
+                </li>
+                <li>
+                  ocr: ready={String(aiRuntimeStatus.features.ocr.ready)} provider=
+                  {aiRuntimeStatus.features.ocr.provider} model={aiRuntimeStatus.features.ocr.model}
+                </li>
+              </ul>
+            ) : (
+              <p>No runtime status yet.</p>
+            )}
+          </div>
+        </section>
       ) : tab === "ops" ? (
         <section className="hub">
+          <div className="card">
+            <h3>AI Runtime Observability</h3>
+            <p className="assistant-reply">{aiStatusMessage}</p>
+            <div className="row left">
+              <button type="button" onClick={() => void refreshAiRuntimeState()}>
+                Refresh AI Runtime Status
+              </button>
+            </div>
+            {aiRuntimeStatus ? (
+              <ul>
+                <li>url: {aiRuntimeStatus.runtime.url}</li>
+                <li>reachable: {String(aiRuntimeStatus.runtime.reachable)}</li>
+                <li>lastError: {aiRuntimeStatus.runtime.lastError ?? "none"}</li>
+                <li>llm pathConfigured: {String(aiRuntimeStatus.features.llm.pathConfigured)}</li>
+                <li>asr pathConfigured: {String(aiRuntimeStatus.features.asr.pathConfigured)}</li>
+                <li>ocr pathConfigured: {String(aiRuntimeStatus.features.ocr.pathConfigured)}</li>
+              </ul>
+            ) : (
+              <p>No runtime status yet.</p>
+            )}
+          </div>
+
+          <div className="card">
+            <h3>ASR Transcription</h3>
+            <div className="stack">
+              <label>
+                Source
+                <select
+                  value={asrSourceType}
+                  onChange={(event) => setAsrSourceType(event.target.value as "file" | "mic")}
+                >
+                  <option value="file">File</option>
+                  <option value="mic">Live Mic</option>
+                </select>
+              </label>
+              <input
+                value={asrSourceValue}
+                onChange={(event) => setAsrSourceValue(event.target.value)}
+                placeholder={asrSourceType === "file" ? "Audio file path" : "Mic capture token"}
+              />
+              <button type="button" onClick={() => void runAsrTranscription()}>
+                Run ASR
+              </button>
+            </div>
+            <p>
+              {asrResult
+                ? `accepted=${String(asrResult.accepted)} reason=${asrResult.reason} segments=${asrResult.segments.length}`
+                : "No ASR run yet."}
+            </p>
+            {asrResult?.text ? <p className="assistant-reply">{asrResult.text}</p> : null}
+          </div>
+
+          <div className="card">
+            <h3>PH Dataset Prep</h3>
+            <div className="stack">
+              <input
+                value={datasetPath}
+                onChange={(event) => setDatasetPath(event.target.value)}
+                placeholder="Path to ph-pretrain dataset mirror"
+              />
+              <input
+                value={datasetOutputDir}
+                onChange={(event) => setDatasetOutputDir(event.target.value)}
+                placeholder="Output artifacts directory"
+              />
+              <button type="button" onClick={() => void runDatasetPreparation()}>
+                Prepare Dataset Artifacts
+              </button>
+            </div>
+            <p>
+              {datasetPrepResult
+                ? `accepted=${String(datasetPrepResult.accepted)} reason=${datasetPrepResult.reason} train=${datasetPrepResult.trainSamples} val=${datasetPrepResult.valSamples}`
+                : "No dataset prep run yet."}
+            </p>
+            {datasetPrepResult?.manifestPath ? (
+              <p className="assistant-reply">manifest: {datasetPrepResult.manifestPath}</p>
+            ) : null}
+          </div>
+
           <div className="card">
             <h3>Web Scrape Job</h3>
             <div className="stack">
