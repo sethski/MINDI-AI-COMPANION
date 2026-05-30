@@ -47,6 +47,7 @@ Windows-first local assistant. Current repo layout:
 - Task due scheduler:
   - `GET /ops/scheduler/status`
   - `POST /ops/scheduler/scan`
+  - `POST /ops/scheduler/next-run`
 - Memory tab UI for note creation and retrieval.
 
 ## Run Desktop
