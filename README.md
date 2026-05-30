@@ -160,6 +160,13 @@ python -m pip install -e services/agent[dev]
 pnpm dev:agent
 ```
 
+## Run AI Runtime
+
+```bash
+python -m pip install -e services/ai_runtime
+pnpm dev:ai-runtime
+```
+
 ## Test Agent
 
 ```bash
