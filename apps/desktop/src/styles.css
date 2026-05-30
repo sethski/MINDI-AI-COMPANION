@@ -124,6 +124,21 @@ body {
   justify-content: flex-end;
 }
 
+.row.left {
+  justify-content: flex-start;
+  gap: 8px;
+}
+
+.stack {
+  display: grid;
+  gap: 8px;
+}
+
+.stack label {
+  display: grid;
+  gap: 6px;
+}
+
 button,
 input {
   border: 1px solid var(--line);
