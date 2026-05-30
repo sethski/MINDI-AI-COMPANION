@@ -123,6 +123,20 @@ export async function transcribeAsr(
   });
 }
 
+export async function transcribeMicBlob(sourceValue: string): Promise<AsrTranscribeResponse> {
+  return transcribeAsr({
+    sourceType: "mic",
+    sourceValue,
+  });
+}
+
+export async function setOrbListeningState(listening: boolean): Promise<void> {
+  await agentFetch<{ accepted: boolean }>("/ops/orb/listening", {
+    method: "POST",
+    body: JSON.stringify({ listening }),
+  });
+}
+
 export async function runAiSmoke(
   payload: AiRuntimeSmokeRequest,
 ): Promise<AiRuntimeSmokeResponse> {
