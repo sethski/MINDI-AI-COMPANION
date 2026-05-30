@@ -1,5 +1,7 @@
 import type {
   AddPermissionGrantRequest,
+  AppControlRequest,
+  AppControlResponse,
   AssistantRequest,
   AssistantResponse,
   CreateTaskRequest,
@@ -64,6 +66,19 @@ export async function fileOrganize(
   payload: FileOrganizeRequest,
 ): Promise<FileOrganizeResponse> {
   return agentFetch<FileOrganizeResponse>("/control/file-organize", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function fetchAllowedApps(): Promise<{ apps: string[] }> {
+  return agentFetch<{ apps: string[] }>("/control/apps/allowlist");
+}
+
+export async function appControlAction(
+  payload: AppControlRequest,
+): Promise<AppControlResponse> {
+  return agentFetch<AppControlResponse>("/control/apps/action", {
     method: "POST",
     body: JSON.stringify(payload),
   });
