@@ -25,6 +25,7 @@ Windows-first local assistant. Current repo layout:
 - Control APIs for allow/deny permission grants.
 - Safe file organize pipeline with `preview` and `apply` modes.
 - Allowlist enforcement before file operations.
+- App control APIs for allowlisted `open`, `focus`, and confirmation-gated `close`.
 - Audit log entries for file organize runs.
 - Control tab UI for folder allowlist management and file-organize actions.
 
