@@ -1,6 +1,7 @@
 node_modules/
 dist/
 build/
+*.tsbuildinfo
 target/
 .venv/
 __pycache__/
@@ -11,4 +12,5 @@ __pycache__/
 *.log
 apps/desktop/src-tauri/target/
 data/runtime/
+*.egg-info/
 
