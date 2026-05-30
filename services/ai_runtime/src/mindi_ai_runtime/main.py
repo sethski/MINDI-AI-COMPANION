@@ -54,6 +54,9 @@ runtime_config = RuntimeConfig()
 asr_runtime_error: str | None = None
 asr_model_ref: str | None = None
 asr_model: Any | None = None
+ocr_runtime_error: str | None = None
+ocr_model_ref: str | None = None
+ocr_pipe: Any | None = None
 
 
 def _resolve_model_path(raw_path: str) -> Path | None:
@@ -67,6 +70,13 @@ def _resolve_asr_model_ref() -> str:
     if model_path:
         return str(Path(model_path).expanduser())
     return runtime_config.asrModel
+
+
+def _resolve_ocr_model_ref() -> str:
+    model_path = runtime_config.ocrModelPath.strip()
+    if model_path:
+        return str(Path(model_path).expanduser())
+    return runtime_config.ocrModel
 
 
 def _llm_runtime_error(model_path: Path | None) -> str | None:
@@ -91,6 +101,19 @@ def _asr_runtime_error(asr_path: Path | None) -> str | None:
         return "model_path_missing"
     if asr_runtime_error is not None:
         return asr_runtime_error
+    return None
+
+
+def _ocr_runtime_error(ocr_path: Path | None) -> str | None:
+    global ocr_runtime_error
+    if ocr_path is None:
+        return "model_path_missing"
+    if not ocr_path.exists():
+        return "model_path_missing"
+    if not ocr_path.is_dir() and not ocr_path.is_file():
+        return "model_path_missing"
+    if ocr_runtime_error is not None:
+        return ocr_runtime_error
     return None
 
 
@@ -226,12 +249,87 @@ def _asr_segments_from_result(text: str, stamp_payload: Any) -> list[dict]:
     return [{"startMs": 0, "endMs": max(1200, len(text) * 30), "text": text}]
 
 
+def _extract_generated_text(payload: Any) -> str:
+    if payload is None:
+        return ""
+    if isinstance(payload, str):
+        return payload.strip()
+    if isinstance(payload, dict):
+        role = str(payload.get("role", "")).strip().lower()
+        if role == "assistant":
+            return _extract_generated_text(payload.get("content"))
+        if "generated_text" in payload:
+            return _extract_generated_text(payload.get("generated_text"))
+        if "content" in payload:
+            return _extract_generated_text(payload.get("content"))
+        if "text" in payload:
+            return _extract_generated_text(payload.get("text"))
+        return ""
+    if isinstance(payload, list):
+        assistant_items = [
+            item
+            for item in payload
+            if isinstance(item, dict) and str(item.get("role", "")).strip().lower() == "assistant"
+        ]
+        if assistant_items:
+            return _extract_generated_text(assistant_items[-1])
+        chunks = [_extract_generated_text(item) for item in payload]
+        filtered = [chunk for chunk in chunks if chunk]
+        return "\n".join(filtered).strip()
+    return str(payload).strip()
+
+
+def _normalize_ocr_text(text: str) -> str:
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        lines = cleaned.splitlines()
+        if len(lines) >= 2:
+            lines = lines[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            cleaned = "\n".join(lines).strip()
+    return cleaned
+
+
+def _load_glm_ocr_pipeline() -> tuple[bool, dict]:
+    global ocr_runtime_error, ocr_model_ref, ocr_pipe
+
+    model_ref = _resolve_ocr_model_ref()
+    if ocr_pipe is not None and ocr_model_ref == model_ref and ocr_runtime_error is None:
+        return True, {"reason": "ok"}
+
+    try:
+        from transformers import pipeline
+    except Exception:
+        ocr_runtime_error = "glm_ocr_dependencies_missing"
+        ocr_pipe = None
+        ocr_model_ref = None
+        return False, {"reason": ocr_runtime_error}
+
+    try:
+        ocr_pipe = pipeline(
+            "image-text-to-text",
+            model=model_ref,
+            trust_remote_code=True,
+        )
+    except Exception:
+        ocr_runtime_error = "ocr_model_load_failed"
+        ocr_pipe = None
+        ocr_model_ref = None
+        return False, {"reason": ocr_runtime_error}
+
+    ocr_model_ref = model_ref
+    ocr_runtime_error = None
+    return True, {"reason": "ok"}
+
+
 def _feature_status() -> dict:
     llm_path = _resolve_model_path(runtime_config.llmModelPath)
     asr_path = _resolve_model_path(runtime_config.asrModelPath)
     ocr_path = _resolve_model_path(runtime_config.ocrModelPath)
     llm_runtime_error = _llm_runtime_error(llm_path)
     asr_ready_error = _asr_runtime_error(asr_path)
+    ocr_ready_error = _ocr_runtime_error(ocr_path)
     return {
         "llm": {
             "enabled": True,
@@ -255,13 +353,13 @@ def _feature_status() -> dict:
         },
         "ocr": {
             "enabled": True,
-            "ready": bool(ocr_path and ocr_path.exists()),
+            "ready": ocr_ready_error is None,
             "experimental": runtime_config.experimentalOcr,
             "pathConfigured": bool(runtime_config.ocrModelPath.strip()),
             "provider": runtime_config.ocrProvider,
             "model": runtime_config.ocrModel,
             "modelPath": runtime_config.ocrModelPath,
-            "lastError": None if (ocr_path and ocr_path.exists()) else "model_path_missing",
+            "lastError": ocr_ready_error,
         },
     }
 
@@ -288,12 +386,15 @@ def runtime_status() -> dict:
 
 @app.post("/runtime/config")
 def runtime_update_config(payload: RuntimeConfig) -> dict:
-    global runtime_config, asr_runtime_error, asr_model_ref, asr_model
+    global runtime_config, asr_runtime_error, asr_model_ref, asr_model, ocr_runtime_error, ocr_model_ref, ocr_pipe
     runtime_config = payload
     # Reset ASR cache to force reload after config changes.
     asr_runtime_error = None
     asr_model_ref = None
     asr_model = None
+    ocr_runtime_error = None
+    ocr_model_ref = None
+    ocr_pipe = None
     return runtime_status()
 
 
@@ -447,7 +548,7 @@ def ocr_extract(payload: OcrExtractRequest) -> dict:
     if not features["ocr"]["ready"]:
         return {
             "accepted": False,
-            "reason": "ocr_model_not_ready",
+            "reason": features["ocr"]["lastError"] or "ocr_model_not_ready",
             "provider": runtime_config.ocrProvider,
             "model": runtime_config.ocrModel,
             "degraded": True,
@@ -456,24 +557,49 @@ def ocr_extract(payload: OcrExtractRequest) -> dict:
     if not source.exists() or not source.is_file():
         return {"accepted": False, "reason": "image_not_found"}
 
+    ok, load_result = _load_glm_ocr_pipeline()
+    if not ok:
+        return {
+            "accepted": False,
+            "reason": load_result.get("reason", "ocr_backend_unavailable"),
+            "provider": runtime_config.ocrProvider,
+            "model": runtime_config.ocrModel,
+            "degraded": True,
+        }
+    assert ocr_pipe is not None
     try:
-        import pytesseract
-        from PIL import Image
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "url": str(source)},
+                    {"type": "text", "text": "Text Recognition:"},
+                ],
+            }
+        ]
+        result = ocr_pipe(text=messages, return_full_text=False, max_new_tokens=1024)
     except Exception:
-        return {"accepted": False, "reason": "ocr_dependencies_missing"}
-    try:
-        text = pytesseract.image_to_string(Image.open(source)).strip()
-    except pytesseract.TesseractNotFoundError:
-        return {"accepted": False, "reason": "tesseract_not_installed"}
-    except Exception:
-        return {"accepted": False, "reason": "ocr_failed"}
+        return {
+            "accepted": False,
+            "reason": "ocr_inference_failed",
+            "provider": runtime_config.ocrProvider,
+            "model": runtime_config.ocrModel,
+            "degraded": True,
+        }
+    text = _normalize_ocr_text(_extract_generated_text(result))
     if not text:
-        return {"accepted": False, "reason": "ocr_no_text_detected"}
+        return {
+            "accepted": False,
+            "reason": "ocr_no_text_detected",
+            "provider": runtime_config.ocrProvider,
+            "model": runtime_config.ocrModel,
+            "degraded": True,
+        }
     return {
         "accepted": True,
         "reason": "ok",
         "text": text,
-        "ocrMode": "image_ocr",
+        "ocrMode": "glm_ocr_markdown",
         "provider": runtime_config.ocrProvider,
         "model": runtime_config.ocrModel,
         "degraded": False,
