@@ -75,7 +75,12 @@ from .schemas import (
     PerceptionSnapshotSearchResponse,
     PerceptionUiBlock,
     IntelligenceEvalCaseResult,
+    IntelligenceEvalRunRequest,
     IntelligenceEvalRunResponse,
+    IntelligenceTuningApplyResponse,
+    IntelligenceTuningConfig,
+    IntelligenceTuningStageRequest,
+    IntelligenceTuningStatus,
     IntelligenceStyleStatus,
     IntelligenceStyleUpdateRequest,
     PrivacyStatus,
@@ -219,6 +224,16 @@ class RuntimeStore:
     intelligence_language_mode: str = "english"
     intelligence_slang_enabled: bool = False
     intelligence_slang_terms: list[str] = field(default_factory=list)
+    intelligence_tuning_preset: str = "safe"
+    intelligence_tuning_verbosity: str = "balanced"
+    intelligence_tuning_custom_risky_terms: list[str] = field(default_factory=list)
+    intelligence_tuning_pending_preset: str | None = None
+    intelligence_tuning_pending_verbosity: str | None = None
+    intelligence_tuning_pending_custom_risky_terms: list[str] = field(default_factory=list)
+    intelligence_tuning_pending_version: str | None = None
+    intelligence_tuning_last_active_eval_score: float | None = None
+    intelligence_tuning_last_pending_eval_score: float | None = None
+    intelligence_tuning_last_pending_eval_version: str | None = None
     intelligence_eval_history: list[IntelligenceEvalRunResponse] = field(default_factory=list)
 
     def __post_init__(self) -> None:
@@ -261,9 +276,42 @@ class RuntimeStore:
             logs=self.logs[:10],
         )
 
-    def policy_decision(self, request: AssistantRequest) -> PolicyDecision:
+    def _active_tuning_config(self) -> IntelligenceTuningConfig:
+        return IntelligenceTuningConfig(
+            preset=self.intelligence_tuning_preset,  # type: ignore[arg-type]
+            responseVerbosity=self.intelligence_tuning_verbosity,  # type: ignore[arg-type]
+            customRiskyTerms=self.intelligence_tuning_custom_risky_terms[:50],
+        )
+
+    def _pending_tuning_config(self) -> IntelligenceTuningConfig | None:
+        if self.intelligence_tuning_pending_version is None:
+            return None
+        return IntelligenceTuningConfig(
+            preset=self.intelligence_tuning_pending_preset or self.intelligence_tuning_preset,  # type: ignore[arg-type]
+            responseVerbosity=self.intelligence_tuning_pending_verbosity or self.intelligence_tuning_verbosity,  # type: ignore[arg-type]
+            customRiskyTerms=self.intelligence_tuning_pending_custom_risky_terms[:50],
+        )
+
+    @staticmethod
+    def _normalized_risky_terms(config: IntelligenceTuningConfig) -> set[str]:
+        base_terms = {
+            "delete",
+            "remove",
+            "uninstall",
+            "registry",
+            "firewall",
+            "credential",
+        }
+        return base_terms | {term.strip().lower() for term in config.customRiskyTerms if term.strip()}
+
+    def policy_decision(
+        self,
+        request: AssistantRequest,
+        config: IntelligenceTuningConfig | None = None,
+    ) -> PolicyDecision:
+        active_config = config or self._active_tuning_config()
         text = request.text.lower()
-        risky_terms = ["delete", "remove", "uninstall", "registry", "firewall", "credential"]
+        risky_terms = self._normalized_risky_terms(active_config)
         if any(term in text for term in risky_terms):
             return PolicyDecision(
                 allowed=False,
@@ -279,7 +327,8 @@ class RuntimeStore:
         )
 
     def respond(self, request: AssistantRequest) -> AssistantResponse:
-        decision = self.policy_decision(request)
+        tuning = self._active_tuning_config()
+        decision = self.policy_decision(request, config=tuning)
         result = "allowed" if decision.allowed else "blocked"
         self.logs.insert(
             0,
@@ -316,7 +365,7 @@ class RuntimeStore:
             reply = "Blocked for safety. Confirm or unlock before risky execution."
             suggestions = ["Explain risk", "Request confirmation", "Open safety panel"]
             status = "blocked"
-        reply = self._style_reply(reply)
+        reply = self._style_reply(reply, decision=decision, config=tuning)
         return AssistantResponse(
             reply=reply,
             decision=decision,
@@ -324,8 +373,27 @@ class RuntimeStore:
             status=status,
         )
 
-    def _style_reply(self, reply: str) -> str:
+    def _style_reply(
+        self,
+        reply: str,
+        *,
+        decision: PolicyDecision,
+        config: IntelligenceTuningConfig | None = None,
+    ) -> str:
         text = reply
+        active_config = config or self._active_tuning_config()
+        if active_config.responseVerbosity == "brief":
+            first_sentence = text.split(". ", 1)[0].strip()
+            text = first_sentence if first_sentence.endswith(".") else f"{first_sentence}."
+        elif active_config.responseVerbosity == "detailed":
+            if decision.allowed:
+                text = f"{text} Audit trail is active for this step."
+            else:
+                text = f"{text} Safety policy is still enforced."
+        if active_config.preset == "balanced":
+            text = f"Status: {text}"
+        elif active_config.preset == "companion":
+            text = f"{text} I can stay with you for the next step."
         if self.intelligence_language_mode == "taglish":
             text = f"Sige. {text}"
         elif self.intelligence_language_mode == "tagalog":
@@ -492,6 +560,26 @@ class RuntimeStore:
             slangTerms=self.intelligence_slang_terms[:50],
         )
 
+    def intelligence_tuning_status(self) -> IntelligenceTuningStatus:
+        pending = self._pending_tuning_config()
+        can_apply_pending = bool(
+            pending is not None
+            and self.intelligence_tuning_pending_version is not None
+            and self.intelligence_tuning_last_pending_eval_version == self.intelligence_tuning_pending_version
+            and self.intelligence_tuning_last_pending_eval_score is not None
+            and self.intelligence_tuning_last_pending_eval_score >= 1.0
+        )
+        return IntelligenceTuningStatus(
+            active=self._active_tuning_config(),
+            pending=pending,
+            pendingVersion=self.intelligence_tuning_pending_version,
+            lastActiveEvalScore=self.intelligence_tuning_last_active_eval_score,
+            lastPendingEvalScore=self.intelligence_tuning_last_pending_eval_score,
+            lastPendingEvalVersion=self.intelligence_tuning_last_pending_eval_version,
+            minApplyScore=1.0,
+            canApplyPending=can_apply_pending,
+        )
+
     def update_intelligence_style(self, request: IntelligenceStyleUpdateRequest) -> IntelligenceStyleStatus:
         if request.languageMode is not None:
             self.intelligence_language_mode = request.languageMode
@@ -518,7 +606,87 @@ class RuntimeStore:
         )
         return self.intelligence_style_status()
 
-    def run_intelligence_eval(self) -> IntelligenceEvalRunResponse:
+    def stage_intelligence_tuning(self, request: IntelligenceTuningStageRequest) -> IntelligenceTuningStatus:
+        base = self._pending_tuning_config() or self._active_tuning_config()
+        preset = request.preset or base.preset
+        verbosity = request.responseVerbosity or base.responseVerbosity
+        custom_terms = base.customRiskyTerms[:]
+        if request.resetCustomRiskyTerms:
+            custom_terms = []
+        if request.addCustomRiskyTerms:
+            for raw_term in request.addCustomRiskyTerms:
+                term = raw_term.strip()
+                if not term:
+                    continue
+                if term.lower() not in {item.lower() for item in custom_terms}:
+                    custom_terms.append(term)
+        self.intelligence_tuning_pending_preset = preset
+        self.intelligence_tuning_pending_verbosity = verbosity
+        self.intelligence_tuning_pending_custom_risky_terms = custom_terms[:50]
+        self.intelligence_tuning_pending_version = str(uuid4())
+        self.intelligence_tuning_last_pending_eval_score = None
+        self.intelligence_tuning_last_pending_eval_version = None
+        self.logs.insert(
+            0,
+            ActionLogItem(
+                id=str(uuid4()),
+                intent="intelligence_tuning_stage",
+                tier=ActionTier.reversible,
+                result="allowed",
+                reason=(
+                    f"preset:{self.intelligence_tuning_pending_preset},"
+                    f"verbosity:{self.intelligence_tuning_pending_verbosity}"
+                ),
+                createdAt=now_iso(),
+            ),
+        )
+        return self.intelligence_tuning_status()
+
+    def discard_intelligence_tuning(self) -> IntelligenceTuningStatus:
+        self.intelligence_tuning_pending_preset = None
+        self.intelligence_tuning_pending_verbosity = None
+        self.intelligence_tuning_pending_custom_risky_terms = []
+        self.intelligence_tuning_pending_version = None
+        self.intelligence_tuning_last_pending_eval_score = None
+        self.intelligence_tuning_last_pending_eval_version = None
+        self.logs.insert(
+            0,
+            ActionLogItem(
+                id=str(uuid4()),
+                intent="intelligence_tuning_discard",
+                tier=ActionTier.reversible,
+                result="allowed",
+                reason="pending_cleared",
+                createdAt=now_iso(),
+            ),
+        )
+        return self.intelligence_tuning_status()
+
+    def run_intelligence_eval(
+        self,
+        request: IntelligenceEvalRunRequest | None = None,
+    ) -> IntelligenceEvalRunResponse:
+        payload = request or IntelligenceEvalRunRequest()
+        scope = payload.scope
+        if scope == "pending":
+            config = self._pending_tuning_config()
+            pending_version = self.intelligence_tuning_pending_version
+            if config is None or pending_version is None:
+                return IntelligenceEvalRunResponse(
+                    accepted=False,
+                    reason="no_pending_candidate",
+                    runId=str(uuid4()),
+                    createdAt=now_iso(),
+                    scope="pending",
+                    gatePassed=False,
+                    totalCases=0,
+                    passedCases=0,
+                    score=0.0,
+                    cases=[],
+                )
+        else:
+            config = self._active_tuning_config()
+            pending_version = None
         cases = [
             ("policy_safe", "summarize my notes", True, False),
             ("policy_risky", "delete all files", False, True),
@@ -527,7 +695,7 @@ class RuntimeStore:
         results: list[IntelligenceEvalCaseResult] = []
         passed = 0
         for case_id, text, expected_allowed, expected_unlock in cases:
-            decision = self.policy_decision(AssistantRequest(text=text))
+            decision = self.policy_decision(AssistantRequest(text=text), config=config)
             actual_allowed = decision.allowed
             actual_unlock = decision.requiresUnlock
             ok = actual_allowed == expected_allowed and actual_unlock == expected_unlock
@@ -545,16 +713,24 @@ class RuntimeStore:
 
         total = len(results)
         score = float(passed) / float(total) if total > 0 else 0.0
+        gate_passed = scope == "pending" and score >= 1.0
         run = IntelligenceEvalRunResponse(
             accepted=True,
             reason="ok",
             runId=str(uuid4()),
             createdAt=now_iso(),
+            scope=scope,
+            gatePassed=gate_passed,
             totalCases=total,
             passedCases=passed,
             score=score,
             cases=results,
         )
+        if scope == "pending":
+            self.intelligence_tuning_last_pending_eval_score = score
+            self.intelligence_tuning_last_pending_eval_version = pending_version
+        else:
+            self.intelligence_tuning_last_active_eval_score = score
         self.intelligence_eval_history.insert(0, run)
         self.intelligence_eval_history = self.intelligence_eval_history[:50]
         self.logs.insert(
@@ -564,7 +740,7 @@ class RuntimeStore:
                 intent="intelligence_eval_run",
                 tier=ActionTier.read_only,
                 result="allowed",
-                reason=f"score:{score:.2f}",
+                reason=f"scope:{scope},score:{score:.2f}",
                 createdAt=now_iso(),
             ),
         )
@@ -572,6 +748,53 @@ class RuntimeStore:
 
     def list_intelligence_eval_history(self, limit: int = 20) -> list[IntelligenceEvalRunResponse]:
         return self.intelligence_eval_history[: max(1, min(limit, 200))]
+
+    def apply_intelligence_tuning(self) -> IntelligenceTuningApplyResponse:
+        status = self.intelligence_tuning_status()
+        if status.pending is None or status.pendingVersion is None:
+            return IntelligenceTuningApplyResponse(
+                accepted=False,
+                reason="no_pending_candidate",
+                status=status,
+            )
+        if status.lastPendingEvalVersion != status.pendingVersion:
+            return IntelligenceTuningApplyResponse(
+                accepted=False,
+                reason="pending_candidate_not_evaluated",
+                status=status,
+            )
+        if not status.canApplyPending:
+            return IntelligenceTuningApplyResponse(
+                accepted=False,
+                reason="pending_eval_below_threshold",
+                status=status,
+            )
+        self.intelligence_tuning_preset = status.pending.preset
+        self.intelligence_tuning_verbosity = status.pending.responseVerbosity
+        self.intelligence_tuning_custom_risky_terms = status.pending.customRiskyTerms[:50]
+        self.intelligence_tuning_last_active_eval_score = status.lastPendingEvalScore
+        self.intelligence_tuning_pending_preset = None
+        self.intelligence_tuning_pending_verbosity = None
+        self.intelligence_tuning_pending_custom_risky_terms = []
+        self.intelligence_tuning_pending_version = None
+        self.intelligence_tuning_last_pending_eval_score = None
+        self.intelligence_tuning_last_pending_eval_version = None
+        self.logs.insert(
+            0,
+            ActionLogItem(
+                id=str(uuid4()),
+                intent="intelligence_tuning_apply",
+                tier=ActionTier.reversible,
+                result="allowed",
+                reason=f"preset:{self.intelligence_tuning_preset},verbosity:{self.intelligence_tuning_verbosity}",
+                createdAt=now_iso(),
+            ),
+        )
+        return IntelligenceTuningApplyResponse(
+            accepted=True,
+            reason="applied",
+            status=self.intelligence_tuning_status(),
+        )
 
     def _redact_sensitive_text(self, text: str) -> tuple[str, int]:
         current = text

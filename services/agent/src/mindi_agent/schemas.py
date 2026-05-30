@@ -413,6 +413,34 @@ class IntelligenceStyleUpdateRequest(BaseModel):
     resetSlangTerms: bool = False
 
 
+class IntelligenceTuningConfig(BaseModel):
+    preset: Literal["safe", "balanced", "companion"] = "safe"
+    responseVerbosity: Literal["brief", "balanced", "detailed"] = "balanced"
+    customRiskyTerms: list[str] = Field(default_factory=list)
+
+
+class IntelligenceTuningStatus(BaseModel):
+    active: IntelligenceTuningConfig
+    pending: IntelligenceTuningConfig | None = None
+    pendingVersion: str | None = None
+    lastActiveEvalScore: float | None = None
+    lastPendingEvalScore: float | None = None
+    lastPendingEvalVersion: str | None = None
+    minApplyScore: float = 1.0
+    canApplyPending: bool = False
+
+
+class IntelligenceTuningStageRequest(BaseModel):
+    preset: Literal["safe", "balanced", "companion"] | None = None
+    responseVerbosity: Literal["brief", "balanced", "detailed"] | None = None
+    addCustomRiskyTerms: list[str] = Field(default_factory=list)
+    resetCustomRiskyTerms: bool = False
+
+
+class IntelligenceEvalRunRequest(BaseModel):
+    scope: Literal["active", "pending"] = "active"
+
+
 class IntelligenceEvalCaseResult(BaseModel):
     id: str
     accepted: bool
@@ -426,10 +454,18 @@ class IntelligenceEvalRunResponse(BaseModel):
     reason: str
     runId: str
     createdAt: str
+    scope: Literal["active", "pending"] = "active"
+    gatePassed: bool = False
     totalCases: int
     passedCases: int
     score: float
     cases: list[IntelligenceEvalCaseResult] = Field(default_factory=list)
+
+
+class IntelligenceTuningApplyResponse(BaseModel):
+    accepted: bool
+    reason: str
+    status: IntelligenceTuningStatus
 
 
 class AutoIndexStatus(BaseModel):

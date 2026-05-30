@@ -7,6 +7,8 @@ from .schemas import (
     AlertActionRequest,
     AutomationChainRequest,
     AssistantRequest,
+    IntelligenceEvalRunRequest,
+    IntelligenceTuningStageRequest,
     IntelligenceStyleUpdateRequest,
     CreateMemoryNoteRequest,
     CreateTaskRequest,
@@ -262,14 +264,34 @@ def ops_intelligence_style():
     return store.intelligence_style_status()
 
 
+@app.get("/ops/intelligence/tuning")
+def ops_intelligence_tuning():
+    return store.intelligence_tuning_status()
+
+
 @app.post("/ops/intelligence/style")
 def ops_intelligence_style_update(payload: IntelligenceStyleUpdateRequest):
     return store.update_intelligence_style(payload)
 
 
+@app.post("/ops/intelligence/tuning/stage")
+def ops_intelligence_tuning_stage(payload: IntelligenceTuningStageRequest):
+    return store.stage_intelligence_tuning(payload)
+
+
+@app.delete("/ops/intelligence/tuning/pending")
+def ops_intelligence_tuning_discard():
+    return store.discard_intelligence_tuning()
+
+
 @app.post("/ops/intelligence/eval/run")
-def ops_intelligence_eval_run():
-    return store.run_intelligence_eval()
+def ops_intelligence_eval_run(payload: IntelligenceEvalRunRequest | None = None):
+    return store.run_intelligence_eval(payload)
+
+
+@app.post("/ops/intelligence/tuning/apply")
+def ops_intelligence_tuning_apply():
+    return store.apply_intelligence_tuning()
 
 
 @app.get("/ops/intelligence/eval/history")
