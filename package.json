@@ -7,7 +7,11 @@
     "dev:desktop": "pnpm --dir apps/desktop dev",
     "build:desktop": "pnpm --dir apps/desktop build",
     "dev:agent": "python -m uvicorn mindi_agent.main:app --reload --host 127.0.0.1 --port 8765 --app-dir services/agent/src",
-    "test:agent": "python -m pytest services/agent/tests"
+    "test:agent": "python -m pytest services/agent/tests",
+    "test:e2e": "playwright test",
+    "test:e2e:headed": "playwright test --headed"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.60.0"
   }
 }
-
