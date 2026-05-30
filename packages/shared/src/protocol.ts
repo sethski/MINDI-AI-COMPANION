@@ -102,6 +102,17 @@ export interface TaskNextRunResponse {
   nextRunAt?: string;
 }
 
+export interface TaskTimeParseRequest {
+  text: string;
+  timezone?: string;
+}
+
+export interface TaskTimeParseResponse {
+  accepted: boolean;
+  reason: string;
+  dueAt?: string;
+}
+
 export interface SyncQueueItem {
   id: string;
   type: "chat" | "action" | "note" | "scrape" | "ocr";
