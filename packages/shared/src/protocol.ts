@@ -604,6 +604,34 @@ export interface IntelligenceLearningApplyResponse {
   status: IntelligenceLearningStatus;
 }
 
+export interface IntelligenceAdaptationStatus {
+  justified: boolean;
+  recommendedMethod: "none" | "prompt_only" | "lora";
+  reason: string;
+  totalEvalRuns: number;
+  passedActiveRuns: number;
+  passedPendingRuns: number;
+  passedLearningRuns: number;
+  latestActiveScore?: number;
+  latestPendingScore?: number;
+  latestLearningScore?: number;
+  approvedSourceCount: number;
+  appliedSlangCount: number;
+  customRiskyTermCount: number;
+  exportReady: boolean;
+  lastExportAt?: string;
+  lastExportPath?: string;
+}
+
+export interface IntelligenceAdaptationExportResponse {
+  accepted: boolean;
+  reason: string;
+  method: "none" | "prompt_only" | "lora";
+  exportPath?: string;
+  exampleCount: number;
+  status: IntelligenceAdaptationStatus;
+}
+
 export const TAB_ORDER: MindiTabId[] = [
   "home",
   "control",
