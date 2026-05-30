@@ -5,6 +5,7 @@ import {
   type AssistantResponse,
   type FileOrganizeResponse,
   type HubSnapshot,
+  type MemoryDocumentChunk,
   type MemoryNote,
   type MindiTabId,
   type PermissionGrant,
@@ -18,8 +19,10 @@ import {
   fetchAllowedApps,
   fetchHubSnapshot,
   fileOrganize,
+  importDocument,
   listPermissionGrants,
   listMemoryNotes,
+  searchDocuments,
   searchMemory,
   sendAssistantRequest,
 } from "./lib/agent-api";
@@ -66,6 +69,9 @@ export default function App() {
   const [memoryTitle, setMemoryTitle] = useState("");
   const [memoryContent, setMemoryContent] = useState("");
   const [memoryNotes, setMemoryNotes] = useState<MemoryNote[]>([]);
+  const [documentQuery, setDocumentQuery] = useState("");
+  const [documentImportPath, setDocumentImportPath] = useState("data/inbox");
+  const [documentChunks, setDocumentChunks] = useState<MemoryDocumentChunk[]>([]);
   const [memoryStatus, setMemoryStatus] = useState("No memory action yet.");
 
   useEffect(() => {
@@ -292,6 +298,40 @@ export default function App() {
     }
   }
 
+  async function runDocumentImport() {
+    const path = documentImportPath.trim();
+    if (!path) {
+      return;
+    }
+    try {
+      const response = await importDocument(path);
+      if (response.accepted) {
+        setMemoryStatus(
+          `Document indexed: ${response.document?.title} (${response.document?.chunkCount} chunks)`,
+        );
+      } else {
+        setMemoryStatus(`Document import blocked: ${response.reason}`);
+      }
+    } catch {
+      enqueueSyncItem({
+        type: "action",
+        payload: { action: "document_import", path },
+      });
+      setSyncDepth(loadSyncQueue().length);
+      setMemoryStatus("Document import queued for sync.");
+    }
+  }
+
+  async function runDocumentSearch() {
+    try {
+      const response = await searchDocuments(documentQuery);
+      setDocumentChunks(response.items);
+      setMemoryStatus(`Document hits: ${response.items.length}`);
+    } catch {
+      setMemoryStatus("Document search failed while offline.");
+    }
+  }
+
   return (
     <div className="frame">
       <header className="topbar">
@@ -361,10 +401,33 @@ export default function App() {
           </div>
 
           <div className="card">
-            <h3>Memory Policy</h3>
-            <p>Stored locally in SQLite.</p>
-            <p>Cloud sync remains optional and queued.</p>
-            <p>Use concise notes for faster retrieval.</p>
+            <h3>Document Ingestion</h3>
+            <div className="stack">
+              <input
+                value={documentImportPath}
+                onChange={(e) => setDocumentImportPath(e.target.value)}
+                placeholder="Document path to import"
+              />
+              <button type="button" onClick={() => void runDocumentImport()}>
+                Import Document
+              </button>
+              <input
+                value={documentQuery}
+                onChange={(e) => setDocumentQuery(e.target.value)}
+                placeholder="Search imported documents"
+              />
+              <button type="button" onClick={() => void runDocumentSearch()}>
+                Search Documents
+              </button>
+            </div>
+            <ul>
+              {documentChunks.slice(0, 6).map((chunk) => (
+                <li key={chunk.id}>
+                  <strong>{chunk.title}</strong> ({chunk.score.toFixed(1)}): {chunk.text.slice(0, 90)}
+                </li>
+              ))}
+              {documentChunks.length === 0 && <li>No document chunks yet.</li>}
+            </ul>
           </div>
         </section>
       ) : tab === "control" ? (
