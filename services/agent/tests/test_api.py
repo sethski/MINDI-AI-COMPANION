@@ -584,3 +584,125 @@ def test_calendar_import_uid_match_updates_even_if_due_changes(tmp_path: Path) -
     assert uid_tasks[0]["title"] == "UID Task Renamed"
     assert uid_tasks[0]["dueAt"] == "2026-07-06T09:00:00Z"
     assert uid_tasks[0]["recurrence"] == "daily"
+
+
+def test_calendar_import_tzid_and_valarm_parsed(tmp_path: Path) -> None:
+    ics = tmp_path / "tzid-valarm.ics"
+    ics.write_text(
+        "\r\n".join(
+            [
+                "BEGIN:VCALENDAR",
+                "VERSION:2.0",
+                "BEGIN:VEVENT",
+                "UID:tz-1@test",
+                "DTSTART;TZID=Asia/Manila:20260708T090000",
+                "SUMMARY:TZID Alarm Task",
+                "BEGIN:VALARM",
+                "TRIGGER:-PT30M",
+                "ACTION:DISPLAY",
+                "DESCRIPTION:Reminder",
+                "END:VALARM",
+                "END:VEVENT",
+                "END:VCALENDAR",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    client.post(
+        "/control/permissions",
+        json={"scope": "folder", "subject": str(tmp_path), "decision": "allow"},
+    )
+
+    imported = client.post("/calendar/import", json={"filePath": str(ics)})
+    assert imported.status_code == 200
+    assert imported.json()["createdCount"] == 1
+
+    tasks = client.get("/tasks")
+    assert tasks.status_code == 200
+    matched = [item for item in tasks.json() if item.get("externalId") == "tz-1@test"]
+    assert len(matched) == 1
+    assert matched[0]["dueAt"] == "2026-07-08T01:00:00Z"
+    assert matched[0]["reminderMinutesBefore"] == 30
+
+
+def test_calendar_import_exdate_skips_occurrence(tmp_path: Path) -> None:
+    ics = tmp_path / "exdate.ics"
+    ics.write_text(
+        "\r\n".join(
+            [
+                "BEGIN:VCALENDAR",
+                "VERSION:2.0",
+                "BEGIN:VEVENT",
+                "UID:ex-1@test",
+                "DTSTART;TZID=Asia/Manila:20260709T090000",
+                "SUMMARY:EXDATE Task",
+                "RRULE:FREQ=DAILY",
+                "EXDATE;TZID=Asia/Manila:20260709T090000",
+                "END:VEVENT",
+                "END:VCALENDAR",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    client.post(
+        "/control/permissions",
+        json={"scope": "folder", "subject": str(tmp_path), "decision": "allow"},
+    )
+
+    imported = client.post("/calendar/import", json={"filePath": str(ics)})
+    assert imported.status_code == 200
+    body = imported.json()
+    assert body["createdCount"] == 0
+    assert body["updatedCount"] == 0
+    assert body["skippedCount"] == 1
+
+    tasks = client.get("/tasks")
+    assert tasks.status_code == 200
+    assert not any(item.get("externalId") == "ex-1@test" for item in tasks.json())
+
+
+def test_calendar_export_writes_valarm_when_reminder_present(tmp_path: Path) -> None:
+    ics = tmp_path / "for-export-alarm.ics"
+    ics.write_text(
+        "\r\n".join(
+            [
+                "BEGIN:VCALENDAR",
+                "VERSION:2.0",
+                "BEGIN:VEVENT",
+                "UID:alarm-export@test",
+                "DTSTART:20260710T120000Z",
+                "SUMMARY:Alarm Export Task",
+                "BEGIN:VALARM",
+                "TRIGGER:-PT45M",
+                "ACTION:DISPLAY",
+                "DESCRIPTION:Reminder",
+                "END:VALARM",
+                "END:VEVENT",
+                "END:VCALENDAR",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    client.post(
+        "/control/permissions",
+        json={"scope": "folder", "subject": str(tmp_path), "decision": "allow"},
+    )
+    imported = client.post("/calendar/import", json={"filePath": str(ics)})
+    assert imported.status_code == 200
+    assert imported.json()["createdCount"] == 1
+
+    exported = client.post(
+        "/calendar/export",
+        json={"fileName": "alarm-export-test.ics", "includeCompleted": False},
+    )
+    assert exported.status_code == 200
+    body = exported.json()
+    assert body["accepted"] is True
+    export_file = Path(body["filePath"])
+    text = export_file.read_text(encoding="utf-8")
+    assert "SUMMARY:Alarm Export Task" in text
+    assert "BEGIN:VALARM" in text
+    assert "TRIGGER:-PT45M" in text
