@@ -34,6 +34,10 @@ export interface AssistantResponse {
   decision: PolicyDecision;
   suggestedActions: string[];
   status: string;
+  provider?: string;
+  model?: string;
+  degraded?: boolean;
+  fallbackReason?: string;
 }
 
 export interface AgentStatus {
@@ -270,6 +274,10 @@ export interface OcrImportResponse {
   accepted: boolean;
   reason: string;
   document?: MemoryDocument;
+  ocrBackend?: string;
+  ocrModel?: string;
+  degraded?: boolean;
+  fallbackReason?: string;
 }
 
 export interface PerceptionAnalyzeRequest {
@@ -300,9 +308,114 @@ export interface PerceptionAnalyzeResponse {
   imageHeight?: number;
   ocrMode?: string;
   ocrError?: string;
+  ocrBackend?: string;
+  ocrModel?: string;
+  degraded?: boolean;
+  fallbackReason?: string;
   text?: string;
   textLength: number;
   blocks: PerceptionUiBlock[];
+}
+
+export interface AiRuntimeFeatureStatus {
+  enabled: boolean;
+  ready: boolean;
+  experimental: boolean;
+  pathConfigured: boolean;
+  provider: string;
+  model: string;
+  lastError?: string;
+}
+
+export interface AiRuntimeServiceStatus {
+  service: string;
+  reachable: boolean;
+  url: string;
+  offlineMode: boolean;
+  lastError?: string;
+}
+
+export interface AiRuntimeConfig {
+  llmModelPath: string;
+  asrModelPath: string;
+  ocrModelPath: string;
+  llmProvider: string;
+  asrProvider: string;
+  ocrProvider: string;
+  llmModel: string;
+  asrModel: string;
+  ocrModel: string;
+  offlineMode: boolean;
+  experimentalAsr: boolean;
+  experimentalOcr: boolean;
+}
+
+export interface AiRuntimeStatusResponse {
+  accepted: boolean;
+  runtime: AiRuntimeServiceStatus;
+  features: {
+    llm: AiRuntimeFeatureStatus;
+    asr: AiRuntimeFeatureStatus;
+    ocr: AiRuntimeFeatureStatus;
+  };
+  config: AiRuntimeConfig;
+}
+
+export interface AiRuntimeConfigUpdateRequest {
+  llmModelPath?: string;
+  asrModelPath?: string;
+  ocrModelPath?: string;
+  llmProvider?: string;
+  asrProvider?: string;
+  ocrProvider?: string;
+  llmModel?: string;
+  asrModel?: string;
+  ocrModel?: string;
+  offlineMode?: boolean;
+  experimentalAsr?: boolean;
+  experimentalOcr?: boolean;
+}
+
+export interface AsrSegment {
+  startMs: number;
+  endMs: number;
+  text: string;
+}
+
+export interface AsrTranscribeRequest {
+  sourceType: "file" | "mic";
+  sourceValue: string;
+}
+
+export interface AsrTranscribeResponse {
+  accepted: boolean;
+  reason: string;
+  text?: string;
+  segments: AsrSegment[];
+  provider?: string;
+  model?: string;
+  degraded: boolean;
+  fallbackReason?: string;
+}
+
+export interface DatasetPrepareRequest {
+  datasetPath: string;
+  outputDir?: string;
+}
+
+export interface DatasetPrepareResponse {
+  accepted: boolean;
+  reason: string;
+  datasetPath: string;
+  outputDir: string;
+  rawSamples: number;
+  trainSamples: number;
+  valSamples: number;
+  languagePackPath?: string;
+  trainJsonlPath?: string;
+  valJsonlPath?: string;
+  configPath?: string;
+  manifestPath?: string;
 }
 
 export interface PerceptionSnapshot {
