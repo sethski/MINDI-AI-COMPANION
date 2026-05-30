@@ -793,6 +793,85 @@ def test_ops_web_scrape_rejects_invalid_url() -> None:
     assert body["reason"] == "invalid_url"
 
 
+def test_ops_security_scan_detects_suspicious_process_and_recover_deny_app() -> None:
+    def fake_run(args, **kwargs):
+        cmd = [str(part).lower() for part in args]
+        if cmd[:1] == ["tasklist"]:
+            stdout = '"mimikatz.exe","4321","Console","1","10,000 K"\n'
+            return subprocess.CompletedProcess(args=args, returncode=0, stdout=stdout, stderr="")
+        if cmd[:2] == ["sc", "query"]:
+            return subprocess.CompletedProcess(
+                args=args,
+                returncode=0,
+                stdout="SERVICE_NAME: WinDefend\nSTATE              : 4  RUNNING\n",
+                stderr="",
+            )
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+
+    with patch("mindi_agent.store.subprocess.run", side_effect=fake_run):
+        scan = client.post("/ops/security/scan")
+    assert scan.status_code == 200
+    scan_body = scan.json()
+    assert scan_body["accepted"] is True
+    assert scan_body["newAlerts"] >= 1
+    assert any(event["processName"] == "mimikatz.exe" for event in scan_body["events"])
+
+    events = client.get("/ops/security/events?status=open&limit=20")
+    assert events.status_code == 200
+    items = events.json()
+    target = next((item for item in items if item.get("processName") == "mimikatz.exe"), None)
+    assert target is not None
+
+    recover = client.post(
+        "/ops/security/recover",
+        json={"eventId": target["id"], "action": "deny_app", "target": "mimikatz.exe", "confirm": False},
+    )
+    assert recover.status_code == 200
+    recover_body = recover.json()
+    assert recover_body["accepted"] is True
+    assert recover_body["reason"] == "app_denied"
+
+    permissions = client.get("/control/permissions")
+    assert permissions.status_code == 200
+    assert any(
+        item["scope"] == "app" and item["subject"].lower() == "mimikatz.exe" and item["decision"] == "deny"
+        for item in permissions.json()
+    )
+
+
+def test_ops_security_recovery_kill_requires_confirmation() -> None:
+    def fake_run(args, **kwargs):
+        cmd = [str(part).lower() for part in args]
+        if cmd[:1] == ["tasklist"]:
+            stdout = '"ncat.exe","5544","Console","1","8,000 K"\n'
+            return subprocess.CompletedProcess(args=args, returncode=0, stdout=stdout, stderr="")
+        if cmd[:2] == ["sc", "query"]:
+            return subprocess.CompletedProcess(
+                args=args,
+                returncode=0,
+                stdout="SERVICE_NAME: WinDefend\nSTATE              : 4  RUNNING\n",
+                stderr="",
+            )
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+
+    with patch("mindi_agent.store.subprocess.run", side_effect=fake_run):
+        scan = client.post("/ops/security/scan")
+    assert scan.status_code == 200
+    events = client.get("/ops/security/events?status=open&limit=20")
+    assert events.status_code == 200
+    target = next((item for item in events.json() if item.get("processName") == "ncat.exe"), None)
+    assert target is not None
+
+    recover = client.post(
+        "/ops/security/recover",
+        json={"eventId": target["id"], "action": "kill_process", "target": "ncat.exe", "confirm": False},
+    )
+    assert recover.status_code == 200
+    body = recover.json()
+    assert body["accepted"] is False
+    assert body["reason"] == "confirmation_required"
+
+
 def test_perception_permissions_status_defaults_unset() -> None:
     response = client.get("/perception/permissions")
     assert response.status_code == 200
