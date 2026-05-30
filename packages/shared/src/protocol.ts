@@ -92,6 +92,10 @@ export interface CreateTaskRequest {
   recurrence?: "daily" | "weekly";
 }
 
+export interface TaskStatusUpdateRequest {
+  status: "todo" | "in_progress" | "done";
+}
+
 export interface TaskNextRunRequest {
   dueAt: string;
   recurrence: "daily" | "weekly";
