@@ -339,6 +339,7 @@ export interface AiRuntimeServiceStatus {
 
 export interface AiRuntimeConfig {
   llmModelPath: string;
+  llmLanguagePackPath: string;
   asrModelPath: string;
   ocrModelPath: string;
   llmCommand: string;
@@ -373,6 +374,7 @@ export interface AiRuntimeStatusResponse {
 
 export interface AiRuntimeConfigUpdateRequest {
   llmModelPath?: string;
+  llmLanguagePackPath?: string;
   asrModelPath?: string;
   ocrModelPath?: string;
   llmCommand?: string;
@@ -436,6 +438,10 @@ export interface DatasetPrepareResponse {
   valJsonlPath?: string;
   configPath?: string;
   manifestPath?: string;
+  validationPassed: boolean;
+  validationIssues: string[];
+  languagePackLoaded: boolean;
+  languagePackLoadReason?: string;
 }
 
 export interface PerceptionSnapshot {
