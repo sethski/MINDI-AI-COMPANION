@@ -22,6 +22,7 @@ class LocalAiRuntimeClient:
             "llmLanguagePackPath": "",
             "asrModelPath": "",
             "ocrModelPath": "",
+            "ocrPythonExecutable": "",
             "llmCommand": "llama-cli",
             "llmContextSize": 4096,
             "llmMaxTokens": 256,
@@ -149,6 +150,8 @@ class LocalAiRuntimeClient:
                 defaults[key]["pathConfigured"] = defaults[key]["pathConfigured"] or bool(
                     str(defaults[key].get("modelPath", "")).strip()
                 )
+                if not defaults[key].get("lastFailureReason") and defaults[key].get("lastError"):
+                    defaults[key]["lastFailureReason"] = defaults[key]["lastError"]
         runtime_payload = payload.get("runtime", {})
         return {
             "accepted": True,
@@ -163,6 +166,9 @@ class LocalAiRuntimeClient:
             "config": self._config,
         }
 
+    def push_config_to_runtime(self, *, timeout: float = 30.0) -> tuple[bool, dict]:
+        return self._request("POST", "/runtime/config", payload=self._config, timeout=timeout)
+
     def update_config(self, update: dict) -> dict:
         merged = dict(self._config)
         for key in (
@@ -170,6 +176,7 @@ class LocalAiRuntimeClient:
             "llmLanguagePackPath",
             "asrModelPath",
             "ocrModelPath",
+            "ocrPythonExecutable",
             "llmCommand",
             "llmContextSize",
             "llmMaxTokens",
@@ -200,7 +207,7 @@ class LocalAiRuntimeClient:
             "POST",
             "/llm/generate",
             payload={"prompt": prompt, "languageMode": language_mode},
-            timeout=12.0,
+            timeout=240.0,
         )
         latency_ms = int((time() - started) * 1000)
         if not ok or not payload.get("accepted"):
@@ -238,7 +245,7 @@ class LocalAiRuntimeClient:
             "POST",
             "/asr/transcribe",
             payload=payload,
-            timeout=20.0,
+            timeout=420.0,
         )
         if not ok:
             return {
@@ -257,7 +264,7 @@ class LocalAiRuntimeClient:
             "POST",
             "/ocr/extract",
             payload={"path": str(path)},
-            timeout=12.0,
+            timeout=420.0,
         )
         if not ok:
             return {

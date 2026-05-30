@@ -259,7 +259,7 @@ class MemoryDB:
                 FROM memory_document_chunks c
                 INNER JOIN memory_documents d ON d.id = c.document_id
                 WHERE c.text LIKE ? OR d.title LIKE ?
-                ORDER BY c.chunk_index ASC
+                ORDER BY d.imported_at DESC, c.chunk_index ASC
                 LIMIT ?;
                 """,
                 (pattern, pattern, max(1, min(limit, 200))),

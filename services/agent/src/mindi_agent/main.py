@@ -24,6 +24,7 @@ from .schemas import (
     DocumentImportRequest,
     FileOrganizeRequest,
     OcrImportRequest,
+    OrbListeningRequest,
     PerceptionAnalyzeRequest,
     PrivacyUpdateRequest,
     SyncQueueRequest,
@@ -40,12 +41,32 @@ app = FastAPI(title="MINDI Local Agent", version="0.1.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "tauri://localhost",
+        "https://tauri.localhost",
+        "http://tauri.localhost",
+    ],
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 store = RuntimeStore()
+
+
+@app.on_event("startup")
+def sync_ai_runtime_config() -> None:
+    import time
+
+    for _ in range(12):
+        ok, payload = store.ai_runtime.push_config_to_runtime(timeout=2.0)
+        if ok:
+            features = payload.get("features", {}) if isinstance(payload, dict) else {}
+            llm = features.get("llm", {}) if isinstance(features, dict) else {}
+            if llm.get("ready"):
+                return
+        time.sleep(0.5)
 
 
 @app.get("/health")
@@ -76,6 +97,11 @@ def ops_ai_config(payload: AiRuntimeConfigUpdateRequest):
 @app.post("/ops/asr/transcribe")
 def ops_asr_transcribe(payload: AsrTranscribeRequest):
     return store.transcribe_audio(payload)
+
+
+@app.post("/ops/orb/listening")
+def ops_orb_listening(payload: OrbListeningRequest):
+    return store.set_orb_listening(payload)
 
 
 @app.post("/ops/ai/smoke")

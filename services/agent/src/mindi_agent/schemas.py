@@ -286,6 +286,7 @@ class AiRuntimeConfig(BaseModel):
     llmLanguagePackPath: str = ""
     asrModelPath: str = ""
     ocrModelPath: str = ""
+    ocrPythonExecutable: str = ""
     llmCommand: str = "llama-cli"
     llmContextSize: int = 4096
     llmMaxTokens: int = 256
@@ -317,6 +318,7 @@ class AiRuntimeConfigUpdateRequest(BaseModel):
     llmLanguagePackPath: str | None = None
     asrModelPath: str | None = None
     ocrModelPath: str | None = None
+    ocrPythonExecutable: str | None = None
     llmCommand: str | None = None
     llmContextSize: int | None = None
     llmMaxTokens: int | None = None
@@ -358,6 +360,15 @@ class AsrTranscribeResponse(BaseModel):
     model: str | None = None
     degraded: bool = False
     fallbackReason: str | None = None
+
+
+class OrbListeningRequest(BaseModel):
+    listening: bool
+
+
+class OrbListeningResponse(BaseModel):
+    accepted: bool = True
+    listening: bool
 
 
 class AiSmokeProbeResult(BaseModel):

@@ -35,6 +35,8 @@ from .schemas import (
     AsrSegment,
     AsrTranscribeRequest,
     AsrTranscribeResponse,
+    OrbListeningRequest,
+    OrbListeningResponse,
     AutoIndexStatus,
     SchedulerStatus,
     SecurityEvent,
@@ -289,6 +291,7 @@ class RuntimeStore:
     intelligence_adaptation_last_export_at: str | None = None
     intelligence_adaptation_last_export_path: str | None = None
     ai_runtime: LocalAiRuntimeClient = field(default_factory=LocalAiRuntimeClient)
+    orb_listening: bool = False
 
     def __post_init__(self) -> None:
         # Safe default for local file organization sandbox.
@@ -317,10 +320,14 @@ class RuntimeStore:
         return AgentStatus(
             state="ready",
             uptimeSeconds=max(0, int(time() - self.started_at)),
-            listening=True,
+            listening=self.orb_listening,
             agentVersion="0.2.0",
             currentProfile="safe",
         )
+
+    def set_orb_listening(self, request: OrbListeningRequest) -> OrbListeningResponse:
+        self.orb_listening = bool(request.listening)
+        return OrbListeningResponse(accepted=True, listening=self.orb_listening)
 
     def snapshot(self) -> HubSnapshot:
         return HubSnapshot(
@@ -521,6 +528,16 @@ class RuntimeStore:
             if not self._is_path_allowed(source):
                 return AsrTranscribeResponse(accepted=False, reason="audio_file_not_allowed")
             source_value = str(source)
+        elif request.sourceType == "mic":
+            if source_value.startswith("data:") or source_value.startswith("base64:"):
+                persisted = self._persist_mic_payload(source_value)
+                if persisted is None:
+                    return AsrTranscribeResponse(accepted=False, reason="mic_payload_invalid")
+                source_value = persisted
+            else:
+                source = Path(source_value).resolve()
+                if source.exists() and source.is_file():
+                    source_value = str(source)
 
         payload = self.ai_runtime.transcribe(
             source_type=request.sourceType,
@@ -686,6 +703,31 @@ class RuntimeStore:
             requiresUnlock=False,
         )
 
+    def _debug_agent_log(
+        self,
+        *,
+        hypothesis_id: str,
+        location: str,
+        message: str,
+        data: dict,
+        run_id: str = "pre-fix",
+    ) -> None:
+        payload = {
+            "sessionId": "4cfb89",
+            "runId": run_id,
+            "hypothesisId": hypothesis_id,
+            "location": location,
+            "message": message,
+            "data": data,
+            "timestamp": int(time() * 1000),
+        }
+        log_path = Path(__file__).resolve().parents[4] / "debug-4cfb89.log"
+        try:
+            with log_path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(payload) + "\n")
+        except OSError:
+            pass
+
     def respond(self, request: AssistantRequest) -> AssistantResponse:
         tuning = self._active_tuning_config()
         decision = self.policy_decision(request, config=tuning)
@@ -730,17 +772,34 @@ class RuntimeStore:
                     language_mode=self.intelligence_language_mode,
                 )
                 if llm_result.get("accepted"):
-                    reply = str(llm_result.get("reply") or "").strip() or (
-                        "Acknowledged. I can proceed locally and keep this action in audit logs."
-                    )
+                    reply = str(llm_result.get("reply") or "").strip()
+                    if not reply:
+                        reply = "I heard you, but the model returned an empty response."
                     provider = str(llm_result.get("provider") or "llama.cpp")
                     model = str(llm_result.get("model") or "Qwen/Qwen2.5-7B-Instruct")
                 else:
-                    reply = "Acknowledged. I can proceed locally and keep this action in audit logs."
-                    provider = str(llm_result.get("provider") or "rule_local")
+                    reason = str(llm_result.get("reason") or "runtime_unavailable")
+                    reply = (
+                        "I could not run the local Qwen model right now. "
+                        f"Reason: {reason}. "
+                        "Confirm agent and AI runtime are running and the GGUF path is set in Settings."
+                    )
+                    provider = str(llm_result.get("provider") or "llama.cpp")
                     model = str(llm_result.get("model") or "fallback")
                     degraded = True
-                    fallback_reason = str(llm_result.get("reason") or "runtime_unavailable")
+                    fallback_reason = reason
+                self._debug_agent_log(
+                    hypothesis_id="E",
+                    location="store.py:respond",
+                    message="assistant llm path",
+                    data={
+                        "accepted": bool(llm_result.get("accepted")),
+                        "provider": provider,
+                        "model": model,
+                        "degraded": degraded,
+                        "reason": fallback_reason,
+                    },
+                )
             suggestions = ["Create note", "Add task", "Show status"]
             status = "ready"
         else:
@@ -1777,6 +1836,22 @@ class RuntimeStore:
         if has_allow:
             return decision == "allow"
         return True
+
+    def _persist_mic_payload(self, payload: str) -> str | None:
+        encoded = payload
+        if payload.startswith("data:"):
+            _, _, encoded = payload.partition(",")
+        elif payload.startswith("base64:"):
+            encoded = payload.removeprefix("base64:")
+        try:
+            raw = base64.b64decode(encoded.strip(), validate=False)
+        except (binascii.Error, ValueError):
+            return None
+        temp_dir = Path("data") / "inbox" / "orb-captures"
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        file_path = temp_dir / f"capture-{uuid4()}.webm"
+        file_path.write_bytes(raw)
+        return str(file_path.resolve())
 
     def _is_path_allowed(self, path: Path) -> bool:
         normalized = path.resolve()
