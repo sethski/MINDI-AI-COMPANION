@@ -19,6 +19,7 @@ import {
   fetchAllowedApps,
   fetchHubSnapshot,
   fileOrganize,
+  importOcrDocument,
   importDocument,
   listPermissionGrants,
   listMemoryNotes,
@@ -72,6 +73,7 @@ export default function App() {
   const [documentQuery, setDocumentQuery] = useState("");
   const [documentImportPath, setDocumentImportPath] = useState("data/inbox");
   const [documentChunks, setDocumentChunks] = useState<MemoryDocumentChunk[]>([]);
+  const [ocrImportPath, setOcrImportPath] = useState("data/inbox");
   const [memoryStatus, setMemoryStatus] = useState("No memory action yet.");
 
   useEffect(() => {
@@ -332,6 +334,30 @@ export default function App() {
     }
   }
 
+  async function runOcrImport() {
+    const path = ocrImportPath.trim();
+    if (!path) {
+      return;
+    }
+    try {
+      const response = await importOcrDocument(path);
+      if (response.accepted) {
+        setMemoryStatus(
+          `OCR indexed: ${response.document?.title} (${response.document?.chunkCount} chunks)`,
+        );
+      } else {
+        setMemoryStatus(`OCR import blocked: ${response.reason}`);
+      }
+    } catch {
+      enqueueSyncItem({
+        type: "ocr",
+        payload: { path },
+      });
+      setSyncDepth(loadSyncQueue().length);
+      setMemoryStatus("OCR import queued for sync.");
+    }
+  }
+
   return (
     <div className="frame">
       <header className="topbar">
@@ -410,6 +436,14 @@ export default function App() {
               />
               <button type="button" onClick={() => void runDocumentImport()}>
                 Import Document
+              </button>
+              <input
+                value={ocrImportPath}
+                onChange={(e) => setOcrImportPath(e.target.value)}
+                placeholder="Image/PDF path for OCR import"
+              />
+              <button type="button" onClick={() => void runOcrImport()}>
+                OCR Import
               </button>
               <input
                 value={documentQuery}
