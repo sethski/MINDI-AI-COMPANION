@@ -166,6 +166,39 @@ export interface MemorySearchResponse {
   items: MemoryNote[];
 }
 
+export interface DocumentImportRequest {
+  path: string;
+}
+
+export interface MemoryDocument {
+  id: string;
+  sourcePath: string;
+  title: string;
+  importedAt: string;
+  chunkCount: number;
+}
+
+export interface MemoryDocumentChunk {
+  id: string;
+  documentId: string;
+  sourcePath: string;
+  title: string;
+  text: string;
+  chunkIndex: number;
+  score: number;
+}
+
+export interface DocumentImportResponse {
+  accepted: boolean;
+  reason: string;
+  document?: MemoryDocument;
+}
+
+export interface DocumentSearchResponse {
+  query: string;
+  items: MemoryDocumentChunk[];
+}
+
 export const TAB_ORDER: MindiTabId[] = [
   "home",
   "control",
