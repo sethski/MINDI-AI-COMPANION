@@ -99,6 +99,11 @@ Windows-first local assistant. Current repo layout:
   - Detects suspicious process signatures and Defender-service down state.
   - Supports recovery actions: dismiss event, deny app, and confirmation-gated kill process.
   - Ops tab now shows security events and recovery controls.
+- Deeper automation chains:
+  - `POST /ops/automation/run`
+  - Executes multi-step chains across scrape/task/note/security-scan steps.
+  - Returns per-step status, failure index, and recovery hints for failed chain runs.
+  - Ops tab includes automation-chain runner with step-by-step result panel.
 
 ## Run Desktop
 
