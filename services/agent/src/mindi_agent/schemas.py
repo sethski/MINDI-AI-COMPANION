@@ -364,6 +364,28 @@ class AutomationChainResponse(BaseModel):
     recoverySummary: str | None = None
 
 
+class AlertFeedResponse(BaseModel):
+    accepted: bool
+    reason: str
+    total: int
+    critical: int = 0
+    warning: int = 0
+    info: int = 0
+    items: list[AlertItem] = Field(default_factory=list)
+
+
+class AlertActionRequest(BaseModel):
+    alertId: str
+    action: Literal["dismiss", "create_recovery_task", "export_report"]
+
+
+class AlertActionResponse(BaseModel):
+    accepted: bool
+    reason: str
+    createdTaskId: str | None = None
+    reportPath: str | None = None
+
+
 class AutoIndexStatus(BaseModel):
     running: bool
     watchedPaths: list[str]

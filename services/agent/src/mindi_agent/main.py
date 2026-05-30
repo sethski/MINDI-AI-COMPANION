@@ -4,6 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from .schemas import (
     AppControlRequest,
     AddPermissionGrantRequest,
+    AlertActionRequest,
     AutomationChainRequest,
     AssistantRequest,
     CreateMemoryNoteRequest,
@@ -232,6 +233,16 @@ def ops_security_recover(payload: SecurityRecoveryRequest):
 @app.post("/ops/automation/run")
 def ops_automation_run(payload: AutomationChainRequest):
     return store.run_automation_chain(payload)
+
+
+@app.get("/ops/alerts/feed")
+def ops_alerts_feed(limit: int = Query(default=25, ge=1, le=200)):
+    return store.alerts_feed(limit=limit)
+
+
+@app.post("/ops/alerts/action")
+def ops_alerts_action(payload: AlertActionRequest):
+    return store.alerts_action(payload)
 
 
 @app.post("/calendar/export")

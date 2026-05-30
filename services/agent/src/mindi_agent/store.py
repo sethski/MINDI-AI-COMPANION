@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from html.parser import HTMLParser
 import io
+import json
 from pathlib import Path
 import re
 from shutil import move
@@ -43,6 +44,9 @@ from .schemas import (
     ActionLogItem,
     ActionTier,
     AddPermissionGrantRequest,
+    AlertActionRequest,
+    AlertActionResponse,
+    AlertFeedResponse,
     AlertItem,
     AgentStatus,
     AssistantRequest,
@@ -773,6 +777,102 @@ class RuntimeStore:
             steps=results,
             recoverySummary=recovery_summary,
         )
+
+    def alerts_feed(self, limit: int = 25) -> AlertFeedResponse:
+        severity_weight = {"critical": 3, "warning": 2, "info": 1}
+        ranked = sorted(
+            self.alerts,
+            key=lambda item: (severity_weight.get(item.severity, 0), item.createdAt),
+            reverse=True,
+        )
+        trimmed = ranked[: max(1, min(limit, 200))]
+        critical = sum(1 for item in self.alerts if item.severity == "critical")
+        warning = sum(1 for item in self.alerts if item.severity == "warning")
+        info = sum(1 for item in self.alerts if item.severity == "info")
+        return AlertFeedResponse(
+            accepted=True,
+            reason="ok",
+            total=len(self.alerts),
+            critical=critical,
+            warning=warning,
+            info=info,
+            items=trimmed,
+        )
+
+    def alerts_action(self, request: AlertActionRequest) -> AlertActionResponse:
+        alert = next((item for item in self.alerts if item.id == request.alertId), None)
+        if alert is None:
+            return AlertActionResponse(accepted=False, reason="alert_not_found")
+
+        if request.action == "dismiss":
+            self.alerts = [item for item in self.alerts if item.id != request.alertId]
+            self.logs.insert(
+                0,
+                ActionLogItem(
+                    id=str(uuid4()),
+                    intent=f"alerts_action:dismiss:{request.alertId}",
+                    tier=ActionTier.reversible,
+                    result="allowed",
+                    reason="dismissed",
+                    createdAt=now_iso(),
+                ),
+            )
+            return AlertActionResponse(accepted=True, reason="dismissed")
+
+        if request.action == "create_recovery_task":
+            task = self.add_task(
+                CreateTaskRequest(
+                    title=f"Recovery: {alert.title}",
+                    dueAt=None,
+                    recurrence=None,
+                )
+            )
+            self.logs.insert(
+                0,
+                ActionLogItem(
+                    id=str(uuid4()),
+                    intent=f"alerts_action:create_recovery_task:{request.alertId}",
+                    tier=ActionTier.reversible,
+                    result="allowed",
+                    reason=f"task:{task.id}",
+                    createdAt=now_iso(),
+                ),
+            )
+            return AlertActionResponse(
+                accepted=True,
+                reason="recovery_task_created",
+                createdTaskId=task.id,
+            )
+
+        if request.action == "export_report":
+            export_dir = Path("data/runtime/exports").resolve()
+            export_dir.mkdir(parents=True, exist_ok=True)
+            timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            path = export_dir / f"mindi-alert-report-{timestamp}.json"
+            payload = {
+                "generatedAt": now_iso(),
+                "alert": alert.model_dump(),
+                "recentLogs": [item.model_dump() for item in self.logs[:20]],
+            }
+            path.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
+            self.logs.insert(
+                0,
+                ActionLogItem(
+                    id=str(uuid4()),
+                    intent=f"alerts_action:export_report:{request.alertId}",
+                    tier=ActionTier.reversible,
+                    result="allowed",
+                    reason=str(path),
+                    createdAt=now_iso(),
+                ),
+            )
+            return AlertActionResponse(
+                accepted=True,
+                reason="report_exported",
+                reportPath=str(path),
+            )
+
+        return AlertActionResponse(accepted=False, reason="unsupported_action")
 
     @staticmethod
     def _parse_tasklist_csv(stdout: str) -> list[tuple[str, int | None]]:
