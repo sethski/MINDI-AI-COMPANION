@@ -19,9 +19,19 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 from PIL import Image
 
+from .ai_runtime_client import LocalAiRuntimeClient
+from .dataset_pipeline import prepare_ph_dataset_artifacts
 from .memory_db import ALLOWED_DOCUMENT_SUFFIXES, MemoryDB
 from .ocr_service import OCR_IMAGE_SUFFIXES, extract_text_for_ocr
 from .schemas import (
+    AiRuntimeConfig,
+    AiRuntimeConfigUpdateRequest,
+    AiRuntimeFeatureStatus,
+    AiRuntimeServiceStatus,
+    AiRuntimeStatusResponse,
+    AsrSegment,
+    AsrTranscribeRequest,
+    AsrTranscribeResponse,
     AutoIndexStatus,
     SchedulerStatus,
     SecurityEvent,
@@ -56,6 +66,8 @@ from .schemas import (
     TaskStatusUpdateRequest,
     TaskUpdateRequest,
     DocumentImportRequest,
+    DatasetPrepareRequest,
+    DatasetPrepareResponse,
     DocumentImportResponse,
     DocumentSearchResponse,
     FileOrganizeItem,
@@ -273,6 +285,7 @@ class RuntimeStore:
     intelligence_learning_last_applied_at: str | None = None
     intelligence_adaptation_last_export_at: str | None = None
     intelligence_adaptation_last_export_path: str | None = None
+    ai_runtime: LocalAiRuntimeClient = field(default_factory=LocalAiRuntimeClient)
 
     def __post_init__(self) -> None:
         # Safe default for local file organization sandbox.
@@ -312,6 +325,153 @@ class RuntimeStore:
             alerts=self.alerts[:5],
             tasks=self.tasks[:10],
             logs=self.logs[:10],
+        )
+
+    def ai_runtime_status(self) -> AiRuntimeStatusResponse:
+        payload = self.ai_runtime.get_status()
+        runtime_payload = payload.get("runtime", {})
+        feature_payload = payload.get("features", {})
+        config_payload = payload.get("config", {})
+        return AiRuntimeStatusResponse(
+            accepted=bool(payload.get("accepted", True)),
+            runtime=AiRuntimeServiceStatus(
+                service=str(runtime_payload.get("service", "mindi-ai-runtime")),
+                reachable=bool(runtime_payload.get("reachable", False)),
+                url=str(runtime_payload.get("url", self.ai_runtime.base_url)),
+                offlineMode=bool(runtime_payload.get("offlineMode", True)),
+                lastError=runtime_payload.get("lastError"),
+            ),
+            features={
+                "llm": AiRuntimeFeatureStatus(**feature_payload.get("llm", {})),
+                "asr": AiRuntimeFeatureStatus(**feature_payload.get("asr", {})),
+                "ocr": AiRuntimeFeatureStatus(**feature_payload.get("ocr", {})),
+            },
+            config=AiRuntimeConfig(**config_payload),
+        )
+
+    def update_ai_runtime_config(self, request: AiRuntimeConfigUpdateRequest) -> AiRuntimeStatusResponse:
+        update = request.model_dump(exclude_none=True)
+        payload = self.ai_runtime.update_config(update)
+        self.logs.insert(
+            0,
+            ActionLogItem(
+                id=str(uuid4()),
+                intent="ai_runtime_config_update",
+                tier=ActionTier.reversible,
+                result="allowed",
+                reason="updated",
+                createdAt=now_iso(),
+            ),
+        )
+        runtime_payload = payload.get("runtime", {})
+        feature_payload = payload.get("features", {})
+        config_payload = payload.get("config", {})
+        return AiRuntimeStatusResponse(
+            accepted=bool(payload.get("accepted", True)),
+            runtime=AiRuntimeServiceStatus(
+                service=str(runtime_payload.get("service", "mindi-ai-runtime")),
+                reachable=bool(runtime_payload.get("reachable", False)),
+                url=str(runtime_payload.get("url", self.ai_runtime.base_url)),
+                offlineMode=bool(runtime_payload.get("offlineMode", True)),
+                lastError=runtime_payload.get("lastError"),
+            ),
+            features={
+                "llm": AiRuntimeFeatureStatus(**feature_payload.get("llm", {})),
+                "asr": AiRuntimeFeatureStatus(**feature_payload.get("asr", {})),
+                "ocr": AiRuntimeFeatureStatus(**feature_payload.get("ocr", {})),
+            },
+            config=AiRuntimeConfig(**config_payload),
+        )
+
+    def transcribe_audio(self, request: AsrTranscribeRequest) -> AsrTranscribeResponse:
+        source_value = (request.sourceValue or "").strip()
+        if not source_value:
+            return AsrTranscribeResponse(accepted=False, reason="source_value_required")
+        if request.sourceType == "file":
+            source = Path(source_value).resolve()
+            if not source.exists() or not source.is_file():
+                return AsrTranscribeResponse(accepted=False, reason="audio_not_found")
+            if not self._is_path_allowed(source):
+                return AsrTranscribeResponse(accepted=False, reason="audio_file_not_allowed")
+            source_value = str(source)
+
+        payload = self.ai_runtime.transcribe(source_type=request.sourceType, source_value=source_value)
+        segments_payload = payload.get("segments") or []
+        segments: list[AsrSegment] = []
+        for item in segments_payload:
+            if not isinstance(item, dict):
+                continue
+            segments.append(
+                AsrSegment(
+                    startMs=max(0, int(item.get("startMs", 0))),
+                    endMs=max(0, int(item.get("endMs", 0))),
+                    text=str(item.get("text", "")),
+                )
+            )
+        return AsrTranscribeResponse(
+            accepted=bool(payload.get("accepted", False)),
+            reason=str(payload.get("reason", "runtime_unavailable")),
+            text=payload.get("text"),
+            segments=segments,
+            provider=payload.get("provider"),
+            model=payload.get("model"),
+            degraded=bool(payload.get("degraded", not bool(payload.get("accepted", False)))),
+            fallbackReason=payload.get("fallbackReason") or (
+                str(payload.get("reason")) if not bool(payload.get("accepted", False)) else None
+            ),
+        )
+
+    def prepare_intelligence_dataset(self, request: DatasetPrepareRequest) -> DatasetPrepareResponse:
+        dataset_path = Path(request.datasetPath).resolve()
+        if not dataset_path.exists():
+            return DatasetPrepareResponse(
+                accepted=False,
+                reason="dataset_not_found",
+                datasetPath=str(dataset_path),
+                outputDir=str(Path("data/runtime/intelligence").resolve()),
+                rawSamples=0,
+                trainSamples=0,
+                valSamples=0,
+            )
+        if not self._is_path_allowed(dataset_path):
+            return DatasetPrepareResponse(
+                accepted=False,
+                reason="dataset_path_not_allowed",
+                datasetPath=str(dataset_path),
+                outputDir=str(Path("data/runtime/intelligence").resolve()),
+                rawSamples=0,
+                trainSamples=0,
+                valSamples=0,
+            )
+
+        output_dir = Path(request.outputDir).resolve() if request.outputDir else Path("data/runtime/intelligence").resolve()
+        output_dir.mkdir(parents=True, exist_ok=True)
+        result = prepare_ph_dataset_artifacts(dataset_path=dataset_path, output_dir=output_dir)
+        if result.accepted:
+            self.logs.insert(
+                0,
+                ActionLogItem(
+                    id=str(uuid4()),
+                    intent="intelligence_dataset_prepare",
+                    tier=ActionTier.reversible,
+                    result="allowed",
+                    reason=f"samples:{result.rawSamples}",
+                    createdAt=now_iso(),
+                ),
+            )
+        return DatasetPrepareResponse(
+            accepted=result.accepted,
+            reason=result.reason,
+            datasetPath=result.datasetPath,
+            outputDir=result.outputDir,
+            rawSamples=result.rawSamples,
+            trainSamples=result.trainSamples,
+            valSamples=result.valSamples,
+            languagePackPath=result.languagePackPath,
+            trainJsonlPath=result.trainJsonlPath,
+            valJsonlPath=result.valJsonlPath,
+            configPath=result.configPath,
+            manifestPath=result.manifestPath,
         )
 
     def _active_tuning_config(self) -> IntelligenceTuningConfig:
@@ -379,6 +539,11 @@ class RuntimeStore:
                 createdAt=now_iso(),
             ),
         )
+        provider = "rule_local"
+        model = "fallback"
+        degraded = False
+        fallback_reason: str | None = None
+
         if decision.allowed:
             latest_snapshot = self.memory_db.latest_perception_snapshot()
             lowered = (request.text or "").lower()
@@ -395,20 +560,43 @@ class RuntimeStore:
                     f"textLength={latest_snapshot.textLength}. "
                     f"Summary: {summary}"
                 )
+                provider = "memory_snapshot"
+                model = "latest_perception_context"
             else:
-                reply = "Acknowledged. I can proceed locally and keep this action in audit logs."
+                llm_result = self.ai_runtime.generate_reply(
+                    prompt=request.text,
+                    language_mode=self.intelligence_language_mode,
+                )
+                if llm_result.get("accepted"):
+                    reply = str(llm_result.get("reply") or "").strip() or (
+                        "Acknowledged. I can proceed locally and keep this action in audit logs."
+                    )
+                    provider = str(llm_result.get("provider") or "llama.cpp")
+                    model = str(llm_result.get("model") or "Qwen/Qwen2.5-7B-Instruct")
+                else:
+                    reply = "Acknowledged. I can proceed locally and keep this action in audit logs."
+                    provider = str(llm_result.get("provider") or "rule_local")
+                    model = str(llm_result.get("model") or "fallback")
+                    degraded = True
+                    fallback_reason = str(llm_result.get("reason") or "runtime_unavailable")
             suggestions = ["Create note", "Add task", "Show status"]
             status = "ready"
         else:
             reply = "Blocked for safety. Confirm or unlock before risky execution."
             suggestions = ["Explain risk", "Request confirmation", "Open safety panel"]
             status = "blocked"
+            provider = "safety_gate"
+            model = "policy_only"
         reply = self._style_reply(reply, decision=decision, config=tuning)
         return AssistantResponse(
             reply=reply,
             decision=decision,
             suggestedActions=suggestions,
             status=status,
+            provider=provider,
+            model=model,
+            degraded=degraded,
+            fallbackReason=fallback_reason,
         )
 
     def _style_reply(
@@ -2220,8 +2408,25 @@ class RuntimeStore:
         if not self._is_path_allowed(source):
             return OcrImportResponse(accepted=False, reason="folder_not_allowed")
 
+        degraded = False
+        fallback_reason: str | None = None
+        ocr_backend = "huggingface_local"
+        ocr_model = "zai-org/GLM-OCR"
         try:
-            extracted_text, extraction_mode = extract_text_for_ocr(source)
+            runtime_ocr = self.ai_runtime.extract_ocr(path=source)
+            if runtime_ocr.get("accepted"):
+                extracted_text = str(runtime_ocr.get("text") or "").strip()
+                extraction_mode = str(runtime_ocr.get("ocrMode") or "image_ocr")
+                ocr_backend = str(runtime_ocr.get("provider") or ocr_backend)
+                ocr_model = str(runtime_ocr.get("model") or ocr_model)
+                if not extracted_text:
+                    raise ValueError("ocr_no_text_detected")
+            else:
+                extracted_text, extraction_mode = extract_text_for_ocr(source)
+                degraded = True
+                fallback_reason = str(runtime_ocr.get("reason") or "runtime_unavailable")
+                ocr_backend = "pytesseract_fallback"
+                ocr_model = "local_tesseract"
             document = self.memory_db.import_extracted_document(
                 source_path=source,
                 text=extracted_text,
@@ -2241,7 +2446,15 @@ class RuntimeStore:
                 createdAt=now_iso(),
             ),
         )
-        return OcrImportResponse(accepted=True, reason=extraction_mode, document=document)
+        return OcrImportResponse(
+            accepted=True,
+            reason=extraction_mode,
+            document=document,
+            ocrBackend=ocr_backend,
+            ocrModel=ocr_model,
+            degraded=degraded,
+            fallbackReason=fallback_reason,
+        )
 
     @staticmethod
     def _box_intersection_area(
@@ -2490,9 +2703,26 @@ class RuntimeStore:
         text: str | None = None
         ocr_mode: str | None = None
         ocr_error: str | None = None
+        ocr_backend: str | None = None
+        ocr_model: str | None = None
+        degraded = False
+        fallback_reason: str | None = None
         if request.includeOcr:
             try:
-                text, ocr_mode = extract_text_for_ocr(source)
+                runtime_ocr = self.ai_runtime.extract_ocr(path=source)
+                if runtime_ocr.get("accepted"):
+                    text = str(runtime_ocr.get("text") or "").strip() or None
+                    ocr_mode = runtime_ocr.get("ocrMode")
+                    ocr_backend = runtime_ocr.get("provider")
+                    ocr_model = runtime_ocr.get("model")
+                    if text is None:
+                        ocr_error = "ocr_no_text_detected"
+                else:
+                    text, ocr_mode = extract_text_for_ocr(source)
+                    degraded = True
+                    fallback_reason = str(runtime_ocr.get("reason") or "runtime_unavailable")
+                    ocr_backend = "pytesseract_fallback"
+                    ocr_model = "local_tesseract"
             except ValueError as exc:
                 ocr_error = str(exc)
 
@@ -2540,6 +2770,10 @@ class RuntimeStore:
             imageHeight=height,
             ocrMode=ocr_mode,
             ocrError=ocr_error,
+            ocrBackend=ocr_backend,
+            ocrModel=ocr_model,
+            degraded=degraded,
+            fallbackReason=fallback_reason,
             text=text,
             textLength=len(text or ""),
             blocks=blocks,

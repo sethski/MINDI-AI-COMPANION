@@ -2,7 +2,10 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
 from .schemas import (
+    AiRuntimeConfigUpdateRequest,
+    AsrTranscribeRequest,
     AppControlRequest,
+    DatasetPrepareRequest,
     AddPermissionGrantRequest,
     AlertActionRequest,
     AutomationChainRequest,
@@ -57,6 +60,21 @@ def hub_snapshot():
 @app.post("/assistant/respond")
 def assistant_respond(payload: AssistantRequest):
     return store.respond(payload)
+
+
+@app.get("/ops/ai/status")
+def ops_ai_status():
+    return store.ai_runtime_status()
+
+
+@app.post("/ops/ai/config")
+def ops_ai_config(payload: AiRuntimeConfigUpdateRequest):
+    return store.update_ai_runtime_config(payload)
+
+
+@app.post("/ops/asr/transcribe")
+def ops_asr_transcribe(payload: AsrTranscribeRequest):
+    return store.transcribe_audio(payload)
 
 
 @app.get("/tasks")
@@ -330,6 +348,11 @@ def ops_intelligence_adaptation_status():
 @app.post("/ops/intelligence/adaptation/export")
 def ops_intelligence_adaptation_export() -> IntelligenceAdaptationExportResponse:
     return store.export_intelligence_adaptation()
+
+
+@app.post("/ops/intelligence/dataset/prepare")
+def ops_intelligence_dataset_prepare(payload: DatasetPrepareRequest):
+    return store.prepare_intelligence_dataset(payload)
 
 
 @app.post("/calendar/export")

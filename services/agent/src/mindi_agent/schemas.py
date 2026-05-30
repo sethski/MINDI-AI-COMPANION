@@ -37,6 +37,10 @@ class AssistantResponse(BaseModel):
     decision: PolicyDecision
     suggestedActions: list[str]
     status: str
+    provider: str | None = None
+    model: str | None = None
+    degraded: bool = False
+    fallbackReason: str | None = None
 
 
 class AgentStatus(BaseModel):
@@ -214,6 +218,10 @@ class OcrImportResponse(BaseModel):
     accepted: bool
     reason: str
     document: MemoryDocument | None = None
+    ocrBackend: str | None = None
+    ocrModel: str | None = None
+    degraded: bool = False
+    fallbackReason: str | None = None
 
 
 class PerceptionAnalyzeRequest(BaseModel):
@@ -244,9 +252,110 @@ class PerceptionAnalyzeResponse(BaseModel):
     imageHeight: int | None = None
     ocrMode: str | None = None
     ocrError: str | None = None
+    ocrBackend: str | None = None
+    ocrModel: str | None = None
+    degraded: bool = False
+    fallbackReason: str | None = None
     text: str | None = None
     textLength: int = 0
     blocks: list[PerceptionUiBlock] = Field(default_factory=list)
+
+
+class AiRuntimeFeatureStatus(BaseModel):
+    enabled: bool = True
+    ready: bool = False
+    experimental: bool = False
+    pathConfigured: bool = False
+    provider: str = ""
+    model: str = ""
+    lastError: str | None = None
+
+
+class AiRuntimeServiceStatus(BaseModel):
+    service: str = "mindi-ai-runtime"
+    reachable: bool = False
+    url: str
+    offlineMode: bool = True
+    lastError: str | None = None
+
+
+class AiRuntimeConfig(BaseModel):
+    llmModelPath: str = ""
+    asrModelPath: str = ""
+    ocrModelPath: str = ""
+    llmProvider: str = "llama.cpp"
+    asrProvider: str = "huggingface_local"
+    ocrProvider: str = "huggingface_local"
+    llmModel: str = "Qwen/Qwen2.5-7B-Instruct"
+    asrModel: str = "Qwen/Qwen3-ASR-1.7B"
+    ocrModel: str = "zai-org/GLM-OCR"
+    offlineMode: bool = True
+    experimentalAsr: bool = True
+    experimentalOcr: bool = True
+
+
+class AiRuntimeStatusResponse(BaseModel):
+    accepted: bool
+    runtime: AiRuntimeServiceStatus
+    features: dict[Literal["llm", "asr", "ocr"], AiRuntimeFeatureStatus]
+    config: AiRuntimeConfig
+
+
+class AiRuntimeConfigUpdateRequest(BaseModel):
+    llmModelPath: str | None = None
+    asrModelPath: str | None = None
+    ocrModelPath: str | None = None
+    llmProvider: str | None = None
+    asrProvider: str | None = None
+    ocrProvider: str | None = None
+    llmModel: str | None = None
+    asrModel: str | None = None
+    ocrModel: str | None = None
+    offlineMode: bool | None = None
+    experimentalAsr: bool | None = None
+    experimentalOcr: bool | None = None
+
+
+class AsrSegment(BaseModel):
+    startMs: int
+    endMs: int
+    text: str
+
+
+class AsrTranscribeRequest(BaseModel):
+    sourceType: Literal["file", "mic"]
+    sourceValue: str
+
+
+class AsrTranscribeResponse(BaseModel):
+    accepted: bool
+    reason: str
+    text: str | None = None
+    segments: list[AsrSegment] = Field(default_factory=list)
+    provider: str | None = None
+    model: str | None = None
+    degraded: bool = False
+    fallbackReason: str | None = None
+
+
+class DatasetPrepareRequest(BaseModel):
+    datasetPath: str
+    outputDir: str | None = None
+
+
+class DatasetPrepareResponse(BaseModel):
+    accepted: bool
+    reason: str
+    datasetPath: str
+    outputDir: str
+    rawSamples: int
+    trainSamples: int
+    valSamples: int
+    languagePackPath: str | None = None
+    trainJsonlPath: str | None = None
+    valJsonlPath: str | None = None
+    configPath: str | None = None
+    manifestPath: str | None = None
 
 
 class PerceptionSnapshot(BaseModel):
