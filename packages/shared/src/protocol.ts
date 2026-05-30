@@ -96,6 +96,43 @@ export interface SyncQueueItem {
   status: "queued" | "synced" | "failed";
 }
 
+export type PermissionScope = "folder" | "app" | "domain" | "action";
+export type PermissionDecision = "allow" | "deny";
+
+export interface PermissionGrant {
+  id: string;
+  scope: PermissionScope;
+  subject: string;
+  decision: PermissionDecision;
+  createdAt: string;
+}
+
+export interface AddPermissionGrantRequest {
+  scope: PermissionScope;
+  subject: string;
+  decision: PermissionDecision;
+}
+
+export interface FileOrganizeRequest {
+  sourceDir: string;
+  targetDir: string;
+  mode: "preview" | "apply";
+}
+
+export interface FileOrganizeItem {
+  fileName: string;
+  sourcePath: string;
+  targetPath: string;
+  category: string;
+}
+
+export interface FileOrganizeResponse {
+  accepted: boolean;
+  reason: string;
+  movedCount: number;
+  items: FileOrganizeItem[];
+}
+
 export const TAB_ORDER: MindiTabId[] = [
   "home",
   "control",
