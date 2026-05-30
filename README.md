@@ -109,6 +109,11 @@ Windows-first local assistant. Current repo layout:
   - `POST /ops/alerts/action`
   - Prioritized alert feed with severity counts and top-risk ordering.
   - Alert actions: dismiss, create recovery task, and export alert report (JSON with recent logs).
+- Offline privacy hardening:
+  - `GET /ops/privacy/status`
+  - `POST /ops/privacy/update`
+  - Sensitive-text redaction toggle (enabled by default) for stored scrape notes and stored perception snapshots.
+  - Response metadata reports whether storage redaction was applied and match count.
 
 ## Run Desktop
 
