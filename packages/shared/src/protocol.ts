@@ -339,6 +339,11 @@ export interface AiRuntimeConfig {
   llmModelPath: string;
   asrModelPath: string;
   ocrModelPath: string;
+  llmCommand: string;
+  llmContextSize: number;
+  llmMaxTokens: number;
+  llmTemperature: number;
+  llmThreads: number;
   llmProvider: string;
   asrProvider: string;
   ocrProvider: string;
@@ -365,6 +370,11 @@ export interface AiRuntimeConfigUpdateRequest {
   llmModelPath?: string;
   asrModelPath?: string;
   ocrModelPath?: string;
+  llmCommand?: string;
+  llmContextSize?: number;
+  llmMaxTokens?: number;
+  llmTemperature?: number;
+  llmThreads?: number;
   llmProvider?: string;
   asrProvider?: string;
   ocrProvider?: string;
