@@ -115,6 +115,20 @@ Windows-first local assistant. Current repo layout:
   - Sensitive-text redaction toggle (enabled by default) for stored scrape notes and stored perception snapshots.
   - Response metadata reports whether storage redaction was applied and match count.
 
+## Current Implementation (Phase 6 Intelligence Slice)
+
+- Style profile controls:
+  - `GET /ops/intelligence/style`
+  - `POST /ops/intelligence/style`
+  - Supports language mode (`english`, `taglish`, `tagalog`) and optional slang-layer terms.
+- Measurable eval loop:
+  - `POST /ops/intelligence/eval/run`
+  - `GET /ops/intelligence/eval/history`
+  - Local eval run checks core policy behavior and stores score history for controlled tuning.
+- Ops tab intelligence panel:
+  - Update style mode/slang settings.
+  - Run eval and inspect case-level outcomes + historical scores.
+
 ## Run Desktop
 
 ```bash
