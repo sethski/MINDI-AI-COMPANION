@@ -24,7 +24,11 @@ import type {
   PerceptionAnalyzeRequest,
   PerceptionAnalyzeResponse,
   PerceptionPermissionStatus,
+  IntelligenceEvalRunRequest,
   IntelligenceEvalRunResponse,
+  IntelligenceTuningApplyResponse,
+  IntelligenceTuningStageRequest,
+  IntelligenceTuningStatus,
   IntelligenceStyleStatus,
   IntelligenceStyleUpdateRequest,
   PrivacyStatus,
@@ -332,6 +336,10 @@ export async function getIntelligenceStyleStatus(): Promise<IntelligenceStyleSta
   return agentFetch<IntelligenceStyleStatus>("/ops/intelligence/style");
 }
 
+export async function getIntelligenceTuningStatus(): Promise<IntelligenceTuningStatus> {
+  return agentFetch<IntelligenceTuningStatus>("/ops/intelligence/tuning");
+}
+
 export async function updateIntelligenceStyleStatus(
   payload: IntelligenceStyleUpdateRequest,
 ): Promise<IntelligenceStyleStatus> {
@@ -341,10 +349,27 @@ export async function updateIntelligenceStyleStatus(
   });
 }
 
-export async function runIntelligenceEval(): Promise<IntelligenceEvalRunResponse> {
+export async function stageIntelligenceTuning(
+  payload: IntelligenceTuningStageRequest,
+): Promise<IntelligenceTuningStatus> {
+  return agentFetch<IntelligenceTuningStatus>("/ops/intelligence/tuning/stage", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function discardIntelligenceTuning(): Promise<IntelligenceTuningStatus> {
+  return agentFetch<IntelligenceTuningStatus>("/ops/intelligence/tuning/pending", {
+    method: "DELETE",
+  });
+}
+
+export async function runIntelligenceEval(
+  payload: IntelligenceEvalRunRequest = {},
+): Promise<IntelligenceEvalRunResponse> {
   return agentFetch<IntelligenceEvalRunResponse>("/ops/intelligence/eval/run", {
     method: "POST",
-    body: JSON.stringify({}),
+    body: JSON.stringify(payload),
   });
 }
 
@@ -352,6 +377,13 @@ export async function listIntelligenceEvalHistory(limit = 20): Promise<Intellige
   return agentFetch<IntelligenceEvalRunResponse[]>(
     `/ops/intelligence/eval/history?limit=${limit}`,
   );
+}
+
+export async function applyIntelligenceTuning(): Promise<IntelligenceTuningApplyResponse> {
+  return agentFetch<IntelligenceTuningApplyResponse>("/ops/intelligence/tuning/apply", {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
 }
 
 export async function exportCalendar(
