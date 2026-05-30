@@ -350,6 +350,9 @@ export interface AiRuntimeConfig {
   llmModel: string;
   asrModel: string;
   ocrModel: string;
+  asrLanguageHint?: string;
+  asrReturnTimestamps: boolean;
+  asrMaxTokens: number;
   offlineMode: boolean;
   experimentalAsr: boolean;
   experimentalOcr: boolean;
@@ -381,6 +384,9 @@ export interface AiRuntimeConfigUpdateRequest {
   llmModel?: string;
   asrModel?: string;
   ocrModel?: string;
+  asrLanguageHint?: string;
+  asrReturnTimestamps?: boolean;
+  asrMaxTokens?: number;
   offlineMode?: boolean;
   experimentalAsr?: boolean;
   experimentalOcr?: boolean;
@@ -395,6 +401,8 @@ export interface AsrSegment {
 export interface AsrTranscribeRequest {
   sourceType: "file" | "mic";
   sourceValue: string;
+  languageHint?: string;
+  returnTimestamps?: boolean;
 }
 
 export interface AsrTranscribeResponse {
