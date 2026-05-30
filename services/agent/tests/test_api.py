@@ -1,6 +1,8 @@
 from fastapi.testclient import TestClient
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import base64
+import io
 import subprocess
 from unittest.mock import patch
 from PIL import Image, ImageDraw
@@ -784,3 +786,29 @@ def test_perception_screen_analyze_rejects_unsupported_type(tmp_path: Path) -> N
     body = response.json()
     assert body["accepted"] is False
     assert body["reason"] == "unsupported_file_type"
+
+
+def test_perception_screen_analyze_inline_data_url() -> None:
+    image = Image.new("RGB", (240, 140), color="white")
+    draw = ImageDraw.Draw(image)
+    draw.rectangle([12, 12, 180, 42], fill="black")
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+    data_url = f"data:image/png;base64,{encoded}"
+
+    with patch("mindi_agent.store.extract_text_for_ocr") as mock_ocr:
+        mock_ocr.return_value = ("quick panel", "image_ocr")
+        response = client.post(
+            "/perception/screen/analyze",
+            json={"imageDataUrl": data_url, "includeOcr": True, "maxBlocks": 8},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["accepted"] is True
+    assert body["reason"] == "ok"
+    assert body["imageWidth"] == 240
+    assert body["imageHeight"] == 140
+    assert body["textLength"] == len("quick panel")
+    assert len(body["blocks"]) >= 1
