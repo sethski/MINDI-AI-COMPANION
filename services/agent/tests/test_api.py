@@ -311,3 +311,29 @@ def test_parse_time_next_weekday_phrase() -> None:
     body = response.json()
     assert body["accepted"] is True
     assert body["dueAt"] is not None
+
+
+def test_calendar_export_creates_ics_file() -> None:
+    due_at = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat().replace("+00:00", "Z")
+    client.post(
+        "/tasks",
+        json={"title": "Calendar Export Task", "dueAt": due_at, "recurrence": "weekly"},
+    )
+
+    response = client.post(
+        "/calendar/export",
+        json={"fileName": "test-export.ics", "includeCompleted": False},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["accepted"] is True
+    assert body["eventCount"] >= 1
+    assert body["filePath"] is not None
+
+    export_file = Path(body["filePath"])
+    assert export_file.exists()
+    text = export_file.read_text(encoding="utf-8")
+    assert "BEGIN:VCALENDAR" in text
+    assert "BEGIN:VEVENT" in text
+    assert "SUMMARY:Calendar Export Task" in text
+    assert "RRULE:FREQ=WEEKLY" in text
