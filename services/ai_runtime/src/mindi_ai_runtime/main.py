@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+import shutil
+import subprocess
 from time import time
 
 from fastapi import FastAPI
@@ -11,6 +13,11 @@ class RuntimeConfig(BaseModel):
     llmModelPath: str = ""
     asrModelPath: str = ""
     ocrModelPath: str = ""
+    llmCommand: str = "llama-cli"
+    llmContextSize: int = 4096
+    llmMaxTokens: int = 256
+    llmTemperature: float = 0.2
+    llmThreads: int = 0
     llmProvider: str = "llama.cpp"
     asrProvider: str = "huggingface_local"
     ocrProvider: str = "huggingface_local"
@@ -40,20 +47,114 @@ app = FastAPI(title="MINDI AI Runtime", version="0.1.0")
 runtime_config = RuntimeConfig()
 
 
+def _resolve_model_path(raw_path: str) -> Path | None:
+    if not raw_path.strip():
+        return None
+    return Path(raw_path).expanduser()
+
+
+def _llm_runtime_error(model_path: Path | None) -> str | None:
+    if model_path is None:
+        return "model_path_missing"
+    if not model_path.exists() or not model_path.is_file():
+        return "model_path_missing"
+    if not runtime_config.llmCommand.strip():
+        return "llama_cpp_command_missing"
+    if shutil.which(runtime_config.llmCommand.strip()) is None:
+        return "llama_cpp_binary_missing"
+    return None
+
+
+def _build_llm_prompt(*, prompt: str, language_mode: str) -> str:
+    if language_mode == "tagalog":
+        system_instruction = "Tumugon sa malinaw at maikling Tagalog."
+    elif language_mode == "taglish":
+        system_instruction = "Respond in practical Taglish, concise and clear."
+    else:
+        system_instruction = "Respond in clear concise English."
+    return (
+        "<|system|>\n"
+        f"{system_instruction}\n"
+        "<|user|>\n"
+        f"{prompt.strip()}\n"
+        "<|assistant|>\n"
+    )
+
+
+def _clean_llama_output(text: str) -> str:
+    if not text:
+        return ""
+    cleaned = text.replace("\r", "").strip()
+    for marker in ("<|assistant|>", "assistant\n"):
+        if marker in cleaned:
+            cleaned = cleaned.split(marker, maxsplit=1)[-1].strip()
+    return cleaned
+
+
+def _run_llama_cpp(prompt: str) -> tuple[bool, dict]:
+    model_path = _resolve_model_path(runtime_config.llmModelPath)
+    runtime_error = _llm_runtime_error(model_path)
+    if runtime_error is not None or model_path is None:
+        return False, {"reason": runtime_error or "llm_model_not_ready"}
+
+    command = [
+        runtime_config.llmCommand.strip(),
+        "-m",
+        str(model_path),
+        "-p",
+        prompt,
+        "-c",
+        str(max(256, int(runtime_config.llmContextSize))),
+        "-n",
+        str(max(1, int(runtime_config.llmMaxTokens))),
+        "--temp",
+        str(float(runtime_config.llmTemperature)),
+        "--no-display-prompt",
+    ]
+    if int(runtime_config.llmThreads) > 0:
+        command.extend(["-t", str(int(runtime_config.llmThreads))])
+
+    try:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=180,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return False, {"reason": "llama_cpp_timeout"}
+    except OSError:
+        return False, {"reason": "llama_cpp_exec_failed"}
+
+    output_text = _clean_llama_output(completed.stdout)
+    if completed.returncode != 0:
+        return False, {
+            "reason": "llama_cpp_inference_failed",
+            "detail": (completed.stderr or "").strip()[:240],
+        }
+    if not output_text:
+        return False, {"reason": "llama_cpp_empty_output"}
+    return True, {"reply": output_text}
+
+
 def _feature_status() -> dict:
-    llm_path = Path(runtime_config.llmModelPath).expanduser() if runtime_config.llmModelPath else None
-    asr_path = Path(runtime_config.asrModelPath).expanduser() if runtime_config.asrModelPath else None
-    ocr_path = Path(runtime_config.ocrModelPath).expanduser() if runtime_config.ocrModelPath else None
+    llm_path = _resolve_model_path(runtime_config.llmModelPath)
+    asr_path = _resolve_model_path(runtime_config.asrModelPath)
+    ocr_path = _resolve_model_path(runtime_config.ocrModelPath)
+    llm_runtime_error = _llm_runtime_error(llm_path)
     return {
         "llm": {
             "enabled": True,
-            "ready": bool(llm_path and llm_path.exists()),
+            "ready": llm_runtime_error is None,
             "experimental": False,
             "pathConfigured": bool(runtime_config.llmModelPath.strip()),
             "provider": runtime_config.llmProvider,
             "model": runtime_config.llmModel,
             "modelPath": runtime_config.llmModelPath,
-            "lastError": None if (llm_path and llm_path.exists()) else "model_path_missing",
+            "lastError": llm_runtime_error,
         },
         "asr": {
             "enabled": True,
@@ -111,7 +212,7 @@ def llm_generate(payload: LlmGenerateRequest) -> dict:
     if not features["llm"]["ready"]:
         return {
             "accepted": False,
-            "reason": "llm_model_not_ready",
+            "reason": features["llm"]["lastError"] or "llm_model_not_ready",
             "provider": runtime_config.llmProvider,
             "model": runtime_config.llmModel,
         }
@@ -124,16 +225,21 @@ def llm_generate(payload: LlmGenerateRequest) -> dict:
             "provider": runtime_config.llmProvider,
             "model": runtime_config.llmModel,
         }
-    language_prefix = ""
-    if payload.languageMode == "taglish":
-        language_prefix = "Sige. "
-    elif payload.languageMode == "tagalog":
-        language_prefix = "Naiintindihan ko. "
-    reply = f"{language_prefix}Local runtime stub processed your request: {text[:280]}"
+    prompt = _build_llm_prompt(prompt=text, language_mode=payload.languageMode)
+    ok, result = _run_llama_cpp(prompt)
+    if not ok:
+        return {
+            "accepted": False,
+            "reason": result.get("reason", "llm_runtime_error"),
+            "detail": result.get("detail"),
+            "provider": runtime_config.llmProvider,
+            "model": runtime_config.llmModel,
+            "degraded": True,
+        }
     return {
         "accepted": True,
         "reason": "ok",
-        "reply": reply,
+        "reply": str(result["reply"]).strip(),
         "provider": runtime_config.llmProvider,
         "model": runtime_config.llmModel,
         "latencyMs": int((time() - started) * 1000),
