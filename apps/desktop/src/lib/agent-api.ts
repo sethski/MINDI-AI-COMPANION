@@ -5,6 +5,8 @@ import type {
   AssistantRequest,
   AssistantResponse,
   CreateMemoryNoteRequest,
+  DocumentImportResponse,
+  DocumentSearchResponse,
   CreateTaskRequest,
   FileOrganizeRequest,
   FileOrganizeResponse,
@@ -103,4 +105,21 @@ export async function createMemoryNote(
 export async function searchMemory(query: string, limit = 50): Promise<MemorySearchResponse> {
   const encoded = encodeURIComponent(query);
   return agentFetch<MemorySearchResponse>(`/memory/search?query=${encoded}&limit=${limit}`);
+}
+
+export async function importDocument(path: string): Promise<DocumentImportResponse> {
+  return agentFetch<DocumentImportResponse>("/memory/documents/import", {
+    method: "POST",
+    body: JSON.stringify({ path }),
+  });
+}
+
+export async function searchDocuments(
+  query: string,
+  limit = 20,
+): Promise<DocumentSearchResponse> {
+  const encoded = encodeURIComponent(query);
+  return agentFetch<DocumentSearchResponse>(
+    `/memory/documents/search?query=${encoded}&limit=${limit}`,
+  );
 }
