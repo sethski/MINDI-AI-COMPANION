@@ -199,6 +199,16 @@ export interface DocumentSearchResponse {
   items: MemoryDocumentChunk[];
 }
 
+export interface OcrImportRequest {
+  path: string;
+}
+
+export interface OcrImportResponse {
+  accepted: boolean;
+  reason: string;
+  document?: MemoryDocument;
+}
+
 export const TAB_ORDER: MindiTabId[] = [
   "home",
   "control",
