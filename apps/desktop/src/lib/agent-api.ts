@@ -18,6 +18,8 @@ import type {
   OcrImportResponse,
   PermissionGrant,
   TaskItem,
+  TaskNextRunRequest,
+  TaskNextRunResponse,
 } from "@mindi/shared";
 
 const AGENT_URL = "http://127.0.0.1:8765";
@@ -153,5 +155,14 @@ export async function runSchedulerScanNow(): Promise<SchedulerStatus> {
   return agentFetch<SchedulerStatus>("/ops/scheduler/scan", {
     method: "POST",
     body: JSON.stringify({}),
+  });
+}
+
+export async function getSchedulerNextRun(
+  payload: TaskNextRunRequest,
+): Promise<TaskNextRunResponse> {
+  return agentFetch<TaskNextRunResponse>("/ops/scheduler/next-run", {
+    method: "POST",
+    body: JSON.stringify(payload),
   });
 }
