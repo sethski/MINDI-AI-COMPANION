@@ -18,6 +18,7 @@ import {
   appControlAction,
   createMemoryNote,
   createTask,
+  updateTaskStatus,
   fetchAllowedApps,
   getAutoIndexStatus,
   fetchHubSnapshot,
@@ -251,6 +252,22 @@ export default function App() {
       enqueueSyncItem({
         type: "action",
         payload: { action: "create_task", title, dueAt, recurrence },
+      });
+      setSyncDepth(loadSyncQueue().length);
+    }
+  }
+
+  async function runTaskStatusChange(taskId: string, status: "todo" | "done") {
+    try {
+      const updated = await updateTaskStatus(taskId, { status });
+      setSnapshot((current) => ({
+        ...current,
+        tasks: current.tasks.map((task) => (task.id === updated.id ? updated : task)),
+      }));
+    } catch {
+      enqueueSyncItem({
+        type: "action",
+        payload: { action: "update_task_status", taskId, status },
       });
       setSyncDepth(loadSyncQueue().length);
     }
@@ -789,6 +806,15 @@ export default function App() {
                   [{task.status}] {task.title}
                   {task.dueAt ? ` (due ${task.dueAt})` : ""}
                   {task.recurrence ? ` [${task.recurrence}]` : ""}
+                  {" "}
+                  <button
+                    type="button"
+                    onClick={() =>
+                      void runTaskStatusChange(task.id, task.status === "done" ? "todo" : "done")
+                    }
+                  >
+                    {task.status === "done" ? "Reopen" : "Done"}
+                  </button>
                 </li>
               ))}
               {snapshot.tasks.length === 0 && <li>No tasks yet.</li>}
