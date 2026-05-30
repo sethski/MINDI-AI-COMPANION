@@ -438,6 +438,28 @@ export interface AutomationChainResponse {
   recoverySummary?: string;
 }
 
+export interface AlertFeedResponse {
+  accepted: boolean;
+  reason: string;
+  total: number;
+  critical: number;
+  warning: number;
+  info: number;
+  items: AlertItem[];
+}
+
+export interface AlertActionRequest {
+  alertId: string;
+  action: "dismiss" | "create_recovery_task" | "export_report";
+}
+
+export interface AlertActionResponse {
+  accepted: boolean;
+  reason: string;
+  createdTaskId?: string;
+  reportPath?: string;
+}
+
 export const TAB_ORDER: MindiTabId[] = [
   "home",
   "control",
