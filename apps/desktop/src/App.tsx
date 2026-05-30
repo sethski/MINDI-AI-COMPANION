@@ -16,6 +16,7 @@ import {
   type QuickToggle,
   type SchedulerStatus,
   type SyncQueueItem,
+  type WebScrapeResponse,
 } from "@mindi/shared";
 import {
   addPermissionGrant,
@@ -41,6 +42,7 @@ import {
   getSchedulerNextRun,
   parseTaskTime,
   runSchedulerScanNow,
+  scrapeWeb,
   exportCalendar,
   importCalendar,
   analyzeScreenPerception,
@@ -105,6 +107,7 @@ export default function App() {
   const [allowedApps, setAllowedApps] = useState<string[]>([]);
   const [appId, setAppId] = useState("notepad.exe");
   const [newAllowApp, setNewAllowApp] = useState("notepad.exe");
+  const [newAllowDomain, setNewAllowDomain] = useState("example.com");
   const [closeConfirm, setCloseConfirm] = useState(false);
   const [appResult, setAppResult] = useState<string>("No app action run yet.");
   const [memoryQuery, setMemoryQuery] = useState("");
@@ -117,6 +120,10 @@ export default function App() {
   const [ocrImportPath, setOcrImportPath] = useState("data/inbox");
   const [autoIndexStatus, setAutoIndexStatus] = useState<AutoIndexStatus | null>(null);
   const [schedulerStatus, setSchedulerStatus] = useState<SchedulerStatus | null>(null);
+  const [opsScrapeUrl, setOpsScrapeUrl] = useState("https://example.com");
+  const [opsScrapeStoreAsNote, setOpsScrapeStoreAsNote] = useState(true);
+  const [opsScrapeResult, setOpsScrapeResult] = useState<WebScrapeResponse | null>(null);
+  const [opsStatus, setOpsStatus] = useState("No ops run yet.");
   const [memoryStatus, setMemoryStatus] = useState("No memory action yet.");
   const [perceptionStatus, setPerceptionStatus] = useState("No perception run yet.");
   const [perceptionResult, setPerceptionResult] = useState<PerceptionAnalyzeResponse | null>(null);
@@ -348,6 +355,18 @@ export default function App() {
           return false;
         }
         await importDocument(path);
+        return true;
+      }
+      if (action === "web_scrape") {
+        const url = typeof payload.url === "string" ? payload.url.trim() : "";
+        if (!url) {
+          return false;
+        }
+        await scrapeWeb({
+          url,
+          maxChars: typeof payload.maxChars === "number" ? payload.maxChars : 3500,
+          storeAsNote: Boolean(payload.storeAsNote),
+        });
         return true;
       }
     }
@@ -715,6 +734,29 @@ export default function App() {
         payload: { action: "add_permission", scope: "app", subject },
       });
       setSyncDepth(loadSyncQueue().length);
+    }
+  }
+
+  async function addDomainAllowGrant() {
+    const subject = newAllowDomain.trim();
+    if (!subject) {
+      return;
+    }
+    try {
+      const created = await addPermissionGrant({
+        scope: "domain",
+        subject,
+        decision: "allow",
+      });
+      setPermissions((current) => [created, ...current]);
+      setOpsStatus(`Allowed domain: ${subject}`);
+    } catch {
+      enqueueSyncItem({
+        type: "action",
+        payload: { action: "add_permission", scope: "domain", subject },
+      });
+      setSyncDepth(loadSyncQueue().length);
+      setOpsStatus("Domain allow grant queued for sync.");
     }
   }
 
@@ -1116,6 +1158,37 @@ export default function App() {
     }
   }
 
+  async function runOpsWebScrape() {
+    const url = opsScrapeUrl.trim();
+    if (!url) {
+      return;
+    }
+    try {
+      const response = await scrapeWeb({
+        url,
+        maxChars: 3500,
+        storeAsNote: opsScrapeStoreAsNote,
+      });
+      setOpsScrapeResult(response);
+      if (response.accepted) {
+        setOpsStatus(
+          `Scrape ok: textLength=${response.textLength}, links=${response.links.length}, storedNote=${response.storedNoteId ?? "none"}.`,
+        );
+      } else if (response.reason === "domain_not_allowed") {
+        setOpsStatus("Scrape blocked by domain policy. Add domain allow in Control or Ops.");
+      } else {
+        setOpsStatus(`Scrape failed: ${response.reason}`);
+      }
+    } catch {
+      enqueueSyncItem({
+        type: "action",
+        payload: { action: "web_scrape", url, maxChars: 3500, storeAsNote: opsScrapeStoreAsNote },
+      });
+      setSyncDepth(loadSyncQueue().length);
+      setOpsStatus("Scrape job queued for sync.");
+    }
+  }
+
   const perceptionAverageConfidence = useMemo(() => {
     if (!perceptionResult || perceptionResult.blocks.length === 0) {
       return 0;
@@ -1351,6 +1424,14 @@ export default function App() {
               <button type="button" onClick={() => void addAppAllowGrant()}>
                 Add app allow
               </button>
+              <input
+                value={newAllowDomain}
+                onChange={(e) => setNewAllowDomain(e.target.value)}
+                placeholder="Domain to allow (example.com or *.example.com)"
+              />
+              <button type="button" onClick={() => void addDomainAllowGrant()}>
+                Add domain allow
+              </button>
             </div>
             <ul>
               {permissions.slice(0, 8).map((grant) => (
@@ -1507,6 +1588,77 @@ export default function App() {
             {selectedPerceptionSnapshot?.text ? (
               <p className="assistant-reply">{selectedPerceptionSnapshot.text.slice(0, 300)}</p>
             ) : null}
+          </div>
+        </section>
+      ) : tab === "ops" ? (
+        <section className="hub">
+          <div className="card">
+            <h3>Web Scrape Job</h3>
+            <div className="stack">
+              <input
+                value={opsScrapeUrl}
+                onChange={(event) => setOpsScrapeUrl(event.target.value)}
+                placeholder="https://example.com/article"
+              />
+              <label>
+                <input
+                  type="checkbox"
+                  checked={opsScrapeStoreAsNote}
+                  onChange={(event) => setOpsScrapeStoreAsNote(event.target.checked)}
+                />
+                Store scraped text as memory note
+              </label>
+              <button type="button" onClick={() => void runOpsWebScrape()}>
+                Run Web Scrape
+              </button>
+            </div>
+            <p className="assistant-reply">{opsStatus}</p>
+          </div>
+
+          <div className="card">
+            <h3>Scrape Result</h3>
+            <p>
+              {opsScrapeResult
+                ? `accepted=${String(opsScrapeResult.accepted)} reason=${opsScrapeResult.reason}`
+                : "No result yet."}
+            </p>
+            {opsScrapeResult?.title ? <p>title: {opsScrapeResult.title}</p> : null}
+            {opsScrapeResult?.text ? (
+              <p className="assistant-reply">{opsScrapeResult.text.slice(0, 500)}</p>
+            ) : null}
+            <ul>
+              {(opsScrapeResult?.links ?? []).slice(0, 8).map((link) => (
+                <li key={link}>{link}</li>
+              ))}
+              {opsScrapeResult && opsScrapeResult.links.length === 0 ? <li>No links extracted.</li> : null}
+            </ul>
+          </div>
+
+          <div className="card">
+            <h3>Domain Policy</h3>
+            <div className="stack">
+              <input
+                value={newAllowDomain}
+                onChange={(event) => setNewAllowDomain(event.target.value)}
+                placeholder="example.com or *.example.com"
+              />
+              <button type="button" onClick={() => void addDomainAllowGrant()}>
+                Add domain allow
+              </button>
+            </div>
+            <ul>
+              {permissions
+                .filter((item) => item.scope === "domain")
+                .slice(0, 8)
+                .map((grant) => (
+                  <li key={grant.id}>
+                    [{grant.decision}] {grant.subject}
+                  </li>
+                ))}
+              {permissions.filter((item) => item.scope === "domain").length === 0 ? (
+                <li>No domain grants yet.</li>
+              ) : null}
+            </ul>
           </div>
         </section>
       ) : (
