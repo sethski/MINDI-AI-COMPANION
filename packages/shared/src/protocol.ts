@@ -96,6 +96,13 @@ export interface TaskStatusUpdateRequest {
   status: "todo" | "in_progress" | "done";
 }
 
+export interface TaskUpdateRequest {
+  title?: string;
+  dueAt?: string | null;
+  recurrence?: "daily" | "weekly" | null;
+  status?: "todo" | "in_progress" | "done";
+}
+
 export interface TaskNextRunRequest {
   dueAt: string;
   recurrence: "daily" | "weekly";
