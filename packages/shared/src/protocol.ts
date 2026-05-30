@@ -133,6 +133,9 @@ export interface CalendarImportResponse {
   accepted: boolean;
   reason: string;
   importedCount: number;
+  createdCount: number;
+  updatedCount: number;
+  skippedCount: number;
 }
 
 export interface SyncQueueItem {
