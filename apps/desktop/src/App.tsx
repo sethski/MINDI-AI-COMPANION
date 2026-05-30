@@ -11,7 +11,9 @@ import {
 } from "@mindi/shared";
 import {
   addPermissionGrant,
+  appControlAction,
   createTask,
+  fetchAllowedApps,
   fetchHubSnapshot,
   fileOrganize,
   listPermissionGrants,
@@ -51,6 +53,11 @@ export default function App() {
   const [targetDir, setTargetDir] = useState("data/sorted");
   const [organizeResult, setOrganizeResult] = useState<FileOrganizeResponse | null>(null);
   const [newAllowFolder, setNewAllowFolder] = useState("data");
+  const [allowedApps, setAllowedApps] = useState<string[]>([]);
+  const [appId, setAppId] = useState("notepad.exe");
+  const [newAllowApp, setNewAllowApp] = useState("notepad.exe");
+  const [closeConfirm, setCloseConfirm] = useState(false);
+  const [appResult, setAppResult] = useState<string>("No app action run yet.");
 
   useEffect(() => {
     saveToggleState(toggles);
@@ -69,13 +76,14 @@ export default function App() {
 
   useEffect(() => {
     let active = true;
-    Promise.all([fetchHubSnapshot(), listPermissionGrants()])
-      .then(([hub, grantList]) => {
+    Promise.all([fetchHubSnapshot(), listPermissionGrants(), fetchAllowedApps()])
+      .then(([hub, grantList, appAllowlist]) => {
         if (!active) {
           return;
         }
         setSnapshot(hub);
         setPermissions(grantList);
+        setAllowedApps(appAllowlist.apps);
       })
       .catch(() => {
         if (active) {
@@ -169,6 +177,32 @@ export default function App() {
     }
   }
 
+  async function addAppAllowGrant() {
+    const subject = newAllowApp.trim();
+    if (!subject) {
+      return;
+    }
+    try {
+      const created = await addPermissionGrant({
+        scope: "app",
+        subject,
+        decision: "allow",
+      });
+      setPermissions((current) => [created, ...current]);
+      setAllowedApps((current) =>
+        current.some((app) => app.toLowerCase() === subject.toLowerCase())
+          ? current
+          : [subject, ...current],
+      );
+    } catch {
+      enqueueSyncItem({
+        type: "action",
+        payload: { action: "add_permission", scope: "app", subject },
+      });
+      setSyncDepth(loadSyncQueue().length);
+    }
+  }
+
   async function runOrganize(mode: "preview" | "apply") {
     try {
       const result = await fileOrganize({ sourceDir, targetDir, mode });
@@ -179,6 +213,30 @@ export default function App() {
         payload: { action: "file_organize", mode, sourceDir, targetDir },
       });
       setSyncDepth(loadSyncQueue().length);
+    }
+  }
+
+  async function runAppAction(action: "open" | "focus" | "close") {
+    const target = appId.trim();
+    if (!target) {
+      return;
+    }
+    try {
+      const response = await appControlAction({
+        action,
+        appId: target,
+        confirm: action === "close" ? closeConfirm : true,
+      });
+      setAppResult(
+        `${action}: accepted=${String(response.accepted)} tier=${response.tier} reason=${response.reason}`,
+      );
+    } catch {
+      enqueueSyncItem({
+        type: "action",
+        payload: { action: "app_control", command: action, appId: target },
+      });
+      setSyncDepth(loadSyncQueue().length);
+      setAppResult(`${action}: queued for later sync`);
     }
   }
 
@@ -242,7 +300,44 @@ export default function App() {
           </div>
 
           <div className="card">
-            <h3>Folder Allowlist</h3>
+            <h3>App Control</h3>
+            <div className="stack">
+              <input
+                value={appId}
+                onChange={(e) => setAppId(e.target.value)}
+                placeholder="App id (example: notepad.exe)"
+              />
+              <div className="row left">
+                <button type="button" onClick={() => void runAppAction("open")}>
+                  Open
+                </button>
+                <button type="button" onClick={() => void runAppAction("focus")}>
+                  Focus
+                </button>
+                <button type="button" onClick={() => void runAppAction("close")}>
+                  Close
+                </button>
+              </div>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={closeConfirm}
+                  onChange={(e) => setCloseConfirm(e.target.checked)}
+                />
+                Confirm close action
+              </label>
+            </div>
+            <p className="assistant-reply">{appResult}</p>
+            <h4>Allowed Apps</h4>
+            <ul>
+              {allowedApps.slice(0, 8).map((app) => (
+                <li key={app}>{app}</li>
+              ))}
+            </ul>
+          </div>
+
+          <div className="card">
+            <h3>Folder + App Allowlist</h3>
             <div className="stack">
               <input
                 value={newAllowFolder}
@@ -250,7 +345,15 @@ export default function App() {
                 placeholder="Path to allow"
               />
               <button type="button" onClick={() => void addFolderAllowGrant()}>
-                Add allow
+                Add folder allow
+              </button>
+              <input
+                value={newAllowApp}
+                onChange={(e) => setNewAllowApp(e.target.value)}
+                placeholder="App to allow (example: calc.exe)"
+              />
+              <button type="button" onClick={() => void addAppAllowGrant()}>
+                Add app allow
               </button>
             </div>
             <ul>
