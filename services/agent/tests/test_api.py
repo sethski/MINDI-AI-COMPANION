@@ -179,3 +179,28 @@ def test_document_import_rejects_unsupported_type(tmp_path: Path) -> None:
     body = imported.json()
     assert body["accepted"] is False
     assert body["reason"] == "unsupported_file_type"
+
+
+def test_ocr_import_success_with_mock(tmp_path: Path) -> None:
+    image = tmp_path / "scan.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    client.post(
+        "/control/permissions",
+        json={"scope": "folder", "subject": str(tmp_path), "decision": "allow"},
+    )
+
+    with patch("mindi_agent.store.extract_text_for_ocr") as mock_ocr:
+        mock_ocr.return_value = ("invoice total 4200", "image_ocr")
+        response = client.post("/memory/ocr/import", json={"path": str(image)})
+        assert response.status_code == 200
+        body = response.json()
+        assert body["accepted"] is True
+        assert body["reason"] == "image_ocr"
+        assert body["document"]["chunkCount"] >= 1
+
+
+def test_ocr_import_missing_file() -> None:
+    response = client.post("/memory/ocr/import", json={"path": "missing/file.png"})
+    assert response.status_code == 200
+    assert response.json()["accepted"] is False
