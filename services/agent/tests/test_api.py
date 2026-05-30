@@ -1801,3 +1801,70 @@ def test_assistant_uses_latest_perception_snapshot_context() -> None:
     assert body["status"] == "ready"
     assert "Latest perception snapshot available." in body["reply"]
     assert marker in body["reply"]
+
+
+def test_ai_runtime_status_endpoint_shape() -> None:
+    response = client.get("/ops/ai/status")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["accepted"] is True
+    assert "runtime" in body
+    assert "features" in body
+    assert "llm" in body["features"]
+    assert "asr" in body["features"]
+    assert "ocr" in body["features"]
+
+
+def test_asr_transcribe_rejects_invalid_source() -> None:
+    response = client.post(
+        "/ops/asr/transcribe",
+        json={"sourceType": "unsupported", "sourceValue": "data/inbox/sample.wav"},
+    )
+    assert response.status_code == 422
+
+
+def test_asr_transcribe_file_missing_returns_controlled_response() -> None:
+    response = client.post(
+        "/ops/asr/transcribe",
+        json={"sourceType": "file", "sourceValue": "data/inbox/missing.wav"},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["accepted"] is False
+    assert body["reason"] in {"runtime_unavailable", "audio_not_found", "audio_file_not_allowed"}
+
+
+def test_assistant_response_includes_runtime_metadata() -> None:
+    response = client.post("/assistant/respond", json={"text": "summarize my notes"})
+    assert response.status_code == 200
+    body = response.json()
+    assert "provider" in body
+    assert "model" in body
+    assert "degraded" in body
+    assert "fallbackReason" in body
+
+
+def test_ai_runtime_config_update_roundtrip() -> None:
+    response = client.post(
+        "/ops/ai/config",
+        json={
+            "llmModelPath": "C:/models/qwen2.5-7b-instruct.gguf",
+            "asrModelPath": "C:/models/qwen3-asr-1.7b",
+            "ocrModelPath": "C:/models/glm-ocr",
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["accepted"] is True
+    assert body["config"]["llmModelPath"] == "C:/models/qwen2.5-7b-instruct.gguf"
+
+
+def test_dataset_prepare_missing_path() -> None:
+    response = client.post(
+        "/ops/intelligence/dataset/prepare",
+        json={"datasetPath": "data/datasets/missing-ph-pretrain"},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["accepted"] is False
+    assert body["reason"] == "dataset_not_found"
