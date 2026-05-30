@@ -29,6 +29,10 @@ import type {
   TaskNextRunResponse,
   TaskTimeParseRequest,
   TaskTimeParseResponse,
+  SecurityEvent,
+  SecurityRecoveryRequest,
+  SecurityRecoveryResponse,
+  SecurityScanResponse,
   WebScrapeRequest,
   WebScrapeResponse,
   CalendarExportRequest,
@@ -251,6 +255,29 @@ export async function scrapeWeb(
   payload: WebScrapeRequest,
 ): Promise<WebScrapeResponse> {
   return agentFetch<WebScrapeResponse>("/ops/web/scrape", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function listSecurityEvents(
+  status: "open" | "resolved" | "all" = "open",
+  limit = 25,
+): Promise<SecurityEvent[]> {
+  return agentFetch<SecurityEvent[]>(`/ops/security/events?status=${status}&limit=${limit}`);
+}
+
+export async function runSecurityScan(): Promise<SecurityScanResponse> {
+  return agentFetch<SecurityScanResponse>("/ops/security/scan", {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+}
+
+export async function runSecurityRecovery(
+  payload: SecurityRecoveryRequest,
+): Promise<SecurityRecoveryResponse> {
+  return agentFetch<SecurityRecoveryResponse>("/ops/security/recover", {
     method: "POST",
     body: JSON.stringify(payload),
   });
