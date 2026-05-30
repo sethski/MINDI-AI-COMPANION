@@ -98,6 +98,9 @@ import {
   saveSyncQueue,
   saveToggleState,
 } from "./lib/local-state";
+import { MindiWakeBridge } from "./components/MindiWakeBridge";
+import { ChatPanel } from "./components/chat/ChatPanel";
+import { isTauriRuntime, orbFocus } from "./lib/tauri-window";
 
 const EMPTY_SNAPSHOT: HubSnapshot = {
   status: {
@@ -1957,9 +1960,21 @@ export default function App() {
 
   return (
     <div className="frame">
+      <MindiWakeBridge />
       <header className="topbar">
         <div className="brand">MINDI</div>
         <div className={`badge state-${topStatus}`}>{topStatus}</div>
+        {isTauriRuntime() ? (
+          <button
+            type="button"
+            className="orb-link"
+            onClick={() => {
+              void orbFocus();
+            }}
+          >
+            Orb active
+          </button>
+        ) : null}
         <div className="meta">
           profile: {snapshot.status.currentProfile} | queued: {syncDepth}
         </div>
@@ -3078,128 +3093,138 @@ export default function App() {
           </div>
         </section>
       ) : (
-        <section className="hub">
-          <div className="card">
-            <h3>Urgent Tasks & Alerts</h3>
-            <div className="row">
-              <button type="button" onClick={addTask}>
-                + Task
-              </button>
-            </div>
-            <ul>
-              {snapshot.tasks.slice(0, 4).map((task) => (
-                <li key={task.id}>
-                  [{task.status}] {task.title}
-                  {task.dueAt ? ` (due ${task.dueAt})` : ""}
-                  {task.recurrence ? ` [${task.recurrence}]` : ""}
-                  {" "}
-                  <button
-                    type="button"
-                    onClick={() => void runTaskStatusChange(task.id, "in_progress")}
-                    disabled={task.status === "in_progress"}
-                  >
-                    Start
-                  </button>
-                  {" "}
-                  <button
-                    type="button"
-                    onClick={() => void runTaskStatusChange(task.id, "done")}
-                    disabled={task.status === "done"}
-                  >
-                    Done
-                  </button>
-                  {" "}
-                  <button
-                    type="button"
-                    onClick={() => void runTaskStatusChange(task.id, "todo")}
-                    disabled={task.status === "todo"}
-                  >
-                    Reopen
-                  </button>
-                  {" "}
-                  <button type="button" onClick={() => void runTaskEdit(task.id)}>
-                    Edit
-                  </button>
-                  {" "}
-                  <button type="button" onClick={() => void runTaskDelete(task.id)}>
-                    Delete
-                  </button>
-                </li>
-              ))}
-              {snapshot.tasks.length === 0 && <li>No tasks yet.</li>}
-            </ul>
-            <ul>
-              {snapshot.alerts.slice(0, 3).map((alert) => (
-                <li key={alert.id}>
-                  [{alert.severity}] {alert.title}
-                </li>
-              ))}
-              {snapshot.alerts.length === 0 && <li>No active alerts.</li>}
-            </ul>
-          </div>
+        <section className="chat-layout">
+          <ChatPanel online={topStatus === "ready"} onSyncDepthChange={setSyncDepth} />
 
-          <div className="card">
-            <h3>Conversation</h3>
-            <div className="chatbox">
-              <input
-                value={message}
-                onChange={(event) => setMessage(event.target.value)}
-                placeholder="Ask MINDI..."
-                onKeyDown={(event) => {
-                  if (event.key === "Enter") {
-                    void handleSend();
-                  }
-                }}
-              />
-              <button type="button" onClick={() => void handleSend()}>
-                Send
-              </button>
+          <aside className="chat-aside">
+            <div className="card">
+              <div className="chat-aside__head">
+                <h3>Tasks</h3>
+                <button type="button" className="chat-aside__add" onClick={addTask}>
+                  + Task
+                </button>
+              </div>
+              <ul className="chat-aside__tasks">
+                {snapshot.tasks.slice(0, 5).map((task) => (
+                  <li key={task.id} className="chat-aside__task">
+                    <div className="chat-aside__task-row">
+                      <span className={`chat-aside__pill chat-aside__pill--${task.status}`}>
+                        {task.status}
+                      </span>
+                      <span className="chat-aside__task-title">{task.title}</span>
+                    </div>
+                    {task.dueAt ? (
+                      <span className="chat-aside__task-due">due {task.dueAt}</span>
+                    ) : null}
+                    <div className="chat-aside__task-actions">
+                      <button
+                        type="button"
+                        onClick={() => void runTaskStatusChange(task.id, "in_progress")}
+                        disabled={task.status === "in_progress"}
+                      >
+                        Start
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void runTaskStatusChange(task.id, "done")}
+                        disabled={task.status === "done"}
+                      >
+                        Done
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void runTaskStatusChange(task.id, "todo")}
+                        disabled={task.status === "todo"}
+                      >
+                        Reopen
+                      </button>
+                      <button type="button" onClick={() => void runTaskEdit(task.id)}>
+                        Edit
+                      </button>
+                      <button
+                        type="button"
+                        className="chat-aside__danger"
+                        onClick={() => void runTaskDelete(task.id)}
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  </li>
+                ))}
+                {snapshot.tasks.length === 0 && (
+                  <li className="chat-aside__muted">No tasks yet. Add one to get started.</li>
+                )}
+              </ul>
             </div>
-            <p className="assistant-reply">
-              {assistant?.reply ?? "No assistant response yet. Send a prompt to start."}
-            </p>
-          </div>
 
-          <div className="card">
-            <h3>Status & Quick Controls</h3>
-            <p>Agent: {snapshot.status.agentVersion}</p>
-            <p>Listening: {snapshot.status.listening ? "on" : "off"}</p>
-            <p>
-              scheduler:{" "}
-              {schedulerStatus
-                ? `running=${String(schedulerStatus.running)} alerts=${schedulerStatus.alertsTotal}`
-                : "unavailable"}
-            </p>
-            <button type="button" onClick={() => void runTaskSchedulerScanNow()}>
-              Run Scheduler Scan
-            </button>
-            <button type="button" onClick={() => void runCalendarExport()}>
-              Export Calendar (.ics)
-            </button>
-            <button type="button" onClick={() => void runCalendarImport()}>
-              Import Calendar (.ics)
-            </button>
-            <div className="toggles">
-              {toggles.map((toggle) => (
-                <label key={toggle.id}>
-                  <input
-                    type="checkbox"
-                    checked={toggle.enabled}
-                    onChange={(event) =>
-                      setToggles((current) =>
-                        current.map((item) =>
-                          item.id === toggle.id
-                            ? { ...item, enabled: event.target.checked }
-                            : item,
-                        ),
-                      )
-                    }
-                  />
-                  {toggle.label}
-                </label>
-              ))}
+            <div className="card">
+              <h3>Alerts</h3>
+              <ul className="chat-aside__alerts">
+                {snapshot.alerts.slice(0, 3).map((alert) => (
+                  <li key={alert.id} className={`chat-aside__alert chat-aside__alert--${alert.severity}`}>
+                    <span className="chat-aside__alert-sev">{alert.severity}</span>
+                    {alert.title}
+                  </li>
+                ))}
+                {snapshot.alerts.length === 0 && (
+                  <li className="chat-aside__muted">No active alerts.</li>
+                )}
+              </ul>
             </div>
-          </div>
+
+            <div className="card">
+              <h3>Status</h3>
+              <dl className="chat-aside__stats">
+                <div>
+                  <dt>Agent</dt>
+                  <dd>{snapshot.status.agentVersion}</dd>
+                </div>
+                <div>
+                  <dt>Listening</dt>
+                  <dd>{snapshot.status.listening ? "on" : "off"}</dd>
+                </div>
+                <div>
+                  <dt>Scheduler</dt>
+                  <dd>
+                    {schedulerStatus
+                      ? `${schedulerStatus.running ? "running" : "idle"} · ${schedulerStatus.alertsTotal} alerts`
+                      : "unavailable"}
+                  </dd>
+                </div>
+              </dl>
+              <div className="chat-aside__btn-row">
+                <button type="button" onClick={() => void runTaskSchedulerScanNow()}>
+                  Scan
+                </button>
+                <button type="button" onClick={() => void runCalendarExport()}>
+                  Export .ics
+                </button>
+                <button type="button" onClick={() => void runCalendarImport()}>
+                  Import .ics
+                </button>
+              </div>
+              <div className="toggles">
+                {toggles.map((toggle) => (
+                  <label key={toggle.id}>
+                    <input
+                      type="checkbox"
+                      checked={toggle.enabled}
+                      onChange={(event) =>
+                        setToggles((current) =>
+                          current.map((item) =>
+                            item.id === toggle.id
+                              ? { ...item, enabled: event.target.checked }
+                              : item,
+                          ),
+                        )
+                      }
+                    />
+                    {toggle.label}
+                  </label>
+                ))}
+              </div>
+            </div>
+          </aside>
         </section>
       )}
     </div>
