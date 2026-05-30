@@ -31,6 +31,7 @@ import {
   searchMemory,
   sendAssistantRequest,
   getSchedulerStatus,
+  getSchedulerNextRun,
   runSchedulerScanNow,
 } from "./lib/agent-api";
 import { enqueueSyncItem, loadSyncQueue, loadToggleState, saveToggleState } from "./lib/local-state";
@@ -181,13 +182,35 @@ export default function App() {
     }
     const dueAtRaw = prompt("Due time ISO (optional). Example: 2026-06-01T09:00:00Z") ?? "";
     const dueAt = dueAtRaw.trim() || undefined;
+    const recurrenceRaw =
+      (prompt("Recurrence (optional): none | daily | weekly", "none") ?? "none").trim().toLowerCase();
+    const recurrence =
+      recurrenceRaw === "daily" || recurrenceRaw === "weekly"
+        ? (recurrenceRaw as "daily" | "weekly")
+        : undefined;
     try {
-      const newTask = await createTask({ title, dueAt });
+      const newTask = await createTask({ title, dueAt, recurrence });
       setSnapshot((current) => ({ ...current, tasks: [newTask, ...current.tasks] }));
+      if (dueAt && recurrence) {
+        const preview = await getSchedulerNextRun({ dueAt, recurrence });
+        if (preview.accepted && preview.nextRunAt) {
+          setAssistant({
+            reply: `Recurring task set. Next run after due is ${preview.nextRunAt}.`,
+            decision: {
+              allowed: true,
+              tier: "reversible",
+              reason: "scheduler_preview",
+              requiresUnlock: false,
+            },
+            suggestedActions: ["Run scheduler scan", "View tasks"],
+            status: "ready",
+          });
+        }
+      }
     } catch {
       enqueueSyncItem({
         type: "action",
-        payload: { action: "create_task", title, dueAt },
+        payload: { action: "create_task", title, dueAt, recurrence },
       });
       setSyncDepth(loadSyncQueue().length);
     }
@@ -629,6 +652,7 @@ export default function App() {
                 <li key={task.id}>
                   [{task.status}] {task.title}
                   {task.dueAt ? ` (due ${task.dueAt})` : ""}
+                  {task.recurrence ? ` [${task.recurrence}]` : ""}
                 </li>
               ))}
               {snapshot.tasks.length === 0 && <li>No tasks yet.</li>}
