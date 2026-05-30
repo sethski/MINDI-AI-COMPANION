@@ -263,6 +263,9 @@ class CalendarImportResponse(BaseModel):
     accepted: bool
     reason: str
     importedCount: int
+    createdCount: int
+    updatedCount: int
+    skippedCount: int
 
 
 def now_iso() -> str:

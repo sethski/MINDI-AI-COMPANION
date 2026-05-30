@@ -841,30 +841,64 @@ class RuntimeStore:
         except ValueError:
             return None
 
+    def _find_task_conflict(self, title: str, due_at: str) -> TaskItem | None:
+        normalized_title = " ".join(title.split()).lower()
+        for task in self.tasks:
+            if (task.dueAt or "") != due_at:
+                continue
+            if " ".join(task.title.split()).lower() == normalized_title:
+                return task
+        return None
+
     def import_calendar(self, request: CalendarImportRequest) -> CalendarImportResponse:
         source = Path(request.filePath).resolve()
         if not source.exists() or not source.is_file():
-            return CalendarImportResponse(accepted=False, reason="file_not_found", importedCount=0)
+            return CalendarImportResponse(
+                accepted=False,
+                reason="file_not_found",
+                importedCount=0,
+                createdCount=0,
+                updatedCount=0,
+                skippedCount=0,
+            )
         if source.suffix.lower() != ".ics":
-            return CalendarImportResponse(accepted=False, reason="unsupported_file_type", importedCount=0)
+            return CalendarImportResponse(
+                accepted=False,
+                reason="unsupported_file_type",
+                importedCount=0,
+                createdCount=0,
+                updatedCount=0,
+                skippedCount=0,
+            )
         if not self._is_path_allowed(source):
-            return CalendarImportResponse(accepted=False, reason="folder_not_allowed", importedCount=0)
+            return CalendarImportResponse(
+                accepted=False,
+                reason="folder_not_allowed",
+                importedCount=0,
+                createdCount=0,
+                updatedCount=0,
+                skippedCount=0,
+            )
 
         raw_text = source.read_text(encoding="utf-8", errors="ignore")
         lines = raw_text.splitlines()
-        imported_count = 0
+        created_count = 0
+        updated_count = 0
+        skipped_count = 0
         current: dict[str, str] = {}
         in_event = False
 
         def flush_event() -> None:
-            nonlocal imported_count, current
+            nonlocal created_count, updated_count, skipped_count, current
             title_raw = current.get("SUMMARY", "").strip()
             dtstart_raw = current.get("DTSTART", "").strip()
             if not title_raw or not dtstart_raw:
+                skipped_count += 1
                 current = {}
                 return
             due = self._parse_ics_datetime(dtstart_raw)
             if due is None:
+                skipped_count += 1
                 current = {}
                 return
             recurrence: str | None = None
@@ -874,17 +908,28 @@ class RuntimeStore:
             elif "FREQ=WEEKLY" in rrule:
                 recurrence = "weekly"
 
-            task = TaskItem(
-                id=str(uuid4()),
-                title=self._ics_unescape(title_raw),
-                dueAt=self._format_utc(due),
-                recurrence=recurrence,
-                nextRunAt=self._format_utc(due),
-                status="todo",
-                source="assistant",
-            )
-            self.tasks.insert(0, task)
-            imported_count += 1
+            title = self._ics_unescape(title_raw)
+            due_at = self._format_utc(due)
+            conflict = self._find_task_conflict(title=title, due_at=due_at)
+            if conflict is not None:
+                conflict.title = title
+                conflict.dueAt = due_at
+                conflict.nextRunAt = due_at
+                conflict.recurrence = recurrence
+                conflict.source = "assistant"
+                updated_count += 1
+            else:
+                task = TaskItem(
+                    id=str(uuid4()),
+                    title=title,
+                    dueAt=due_at,
+                    recurrence=recurrence,
+                    nextRunAt=due_at,
+                    status="todo",
+                    source="assistant",
+                )
+                self.tasks.insert(0, task)
+                created_count += 1
             current = {}
 
         for raw_line in lines:
@@ -906,6 +951,7 @@ class RuntimeStore:
             key = key.split(";", 1)[0].upper().strip()
             current[key] = value.strip()
 
+        imported_count = created_count + updated_count
         if imported_count > 0:
             self.logs.insert(
                 0,
@@ -914,7 +960,7 @@ class RuntimeStore:
                     intent="calendar_import",
                     tier=ActionTier.reversible,
                     result="allowed",
-                    reason=f"events:{imported_count}",
+                    reason=f"created:{created_count},updated:{updated_count},skipped:{skipped_count}",
                     createdAt=now_iso(),
                 ),
             )
@@ -923,6 +969,9 @@ class RuntimeStore:
             accepted=True,
             reason="imported",
             importedCount=imported_count,
+            createdCount=created_count,
+            updatedCount=updated_count,
+            skippedCount=skipped_count,
         )
 
     def scheduler_scan_once(self) -> SchedulerStatus:
