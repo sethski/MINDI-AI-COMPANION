@@ -1151,6 +1151,7 @@ def test_intelligence_eval_run_and_history() -> None:
     body = run.json()
     assert body["accepted"] is True
     assert body["reason"] == "ok"
+    assert body["scope"] == "active"
     assert body["totalCases"] >= 3
     assert body["passedCases"] >= 3
     assert len(body["cases"]) == body["totalCases"]
@@ -1160,6 +1161,96 @@ def test_intelligence_eval_run_and_history() -> None:
     items = history.json()
     assert items
     assert any(item["runId"] == body["runId"] for item in items)
+
+
+def test_intelligence_tuning_apply_requires_eval_gate() -> None:
+    discarded = client.delete("/ops/intelligence/tuning/pending")
+    assert discarded.status_code == 200
+
+    staged = client.post(
+        "/ops/intelligence/tuning/stage",
+        json={"preset": "balanced", "responseVerbosity": "brief", "resetCustomRiskyTerms": True},
+    )
+    assert staged.status_code == 200
+    staged_body = staged.json()
+    assert staged_body["pending"]["preset"] == "balanced"
+    assert staged_body["pending"]["responseVerbosity"] == "brief"
+    pending_version = staged_body["pendingVersion"]
+    assert pending_version
+
+    blocked_apply = client.post("/ops/intelligence/tuning/apply")
+    assert blocked_apply.status_code == 200
+    blocked_apply_body = blocked_apply.json()
+    assert blocked_apply_body["accepted"] is False
+    assert blocked_apply_body["reason"] == "pending_candidate_not_evaluated"
+
+    eval_pending = client.post("/ops/intelligence/eval/run", json={"scope": "pending"})
+    assert eval_pending.status_code == 200
+    eval_pending_body = eval_pending.json()
+    assert eval_pending_body["accepted"] is True
+    assert eval_pending_body["scope"] == "pending"
+    assert eval_pending_body["gatePassed"] is True
+    assert eval_pending_body["score"] == 1.0
+
+    applied = client.post("/ops/intelligence/tuning/apply")
+    assert applied.status_code == 200
+    applied_body = applied.json()
+    assert applied_body["accepted"] is True
+    assert applied_body["reason"] == "applied"
+    assert applied_body["status"]["pending"] is None
+    assert applied_body["status"]["pendingVersion"] is None
+    assert applied_body["status"]["active"]["preset"] == "balanced"
+    assert applied_body["status"]["active"]["responseVerbosity"] == "brief"
+    assert applied_body["status"]["lastActiveEvalScore"] == 1.0
+
+    assistant = client.post("/assistant/respond", json={"text": "summarize my notes"})
+    assert assistant.status_code == 200
+    reply = assistant.json()["reply"]
+    assert reply.startswith("Status: ")
+
+    reset = client.post(
+        "/ops/intelligence/tuning/stage",
+        json={"preset": "safe", "responseVerbosity": "balanced", "resetCustomRiskyTerms": True},
+    )
+    assert reset.status_code == 200
+    reset_eval = client.post("/ops/intelligence/eval/run", json={"scope": "pending"})
+    assert reset_eval.status_code == 200
+    reset_apply = client.post("/ops/intelligence/tuning/apply")
+    assert reset_apply.status_code == 200
+    assert reset_apply.json()["accepted"] is True
+
+
+def test_intelligence_tuning_gate_blocks_bad_candidate() -> None:
+    discarded = client.delete("/ops/intelligence/tuning/pending")
+    assert discarded.status_code == 200
+
+    staged = client.post(
+        "/ops/intelligence/tuning/stage",
+        json={"preset": "safe", "responseVerbosity": "balanced", "addCustomRiskyTerms": ["notepad"]},
+    )
+    assert staged.status_code == 200
+    staged_body = staged.json()
+    assert "notepad" in staged_body["pending"]["customRiskyTerms"]
+
+    eval_pending = client.post("/ops/intelligence/eval/run", json={"scope": "pending"})
+    assert eval_pending.status_code == 200
+    eval_pending_body = eval_pending.json()
+    assert eval_pending_body["accepted"] is True
+    assert eval_pending_body["scope"] == "pending"
+    assert eval_pending_body["gatePassed"] is False
+    assert eval_pending_body["score"] < 1.0
+    assert any(case["id"] == "policy_open_app" and case["accepted"] is False for case in eval_pending_body["cases"])
+
+    apply_attempt = client.post("/ops/intelligence/tuning/apply")
+    assert apply_attempt.status_code == 200
+    apply_attempt_body = apply_attempt.json()
+    assert apply_attempt_body["accepted"] is False
+    assert apply_attempt_body["reason"] == "pending_eval_below_threshold"
+    assert apply_attempt_body["status"]["canApplyPending"] is False
+
+    cleanup = client.delete("/ops/intelligence/tuning/pending")
+    assert cleanup.status_code == 200
+    assert cleanup.json()["pending"] is None
 
 
 def test_perception_permissions_status_defaults_unset() -> None:
