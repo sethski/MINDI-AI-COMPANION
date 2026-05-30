@@ -194,6 +194,8 @@ export default function App() {
   const [aiRuntimeStatus, setAiRuntimeStatus] = useState<AiRuntimeStatusResponse | null>(null);
   const [aiStatusMessage, setAiStatusMessage] = useState("No AI runtime check yet.");
   const [llmModelPath, setLlmModelPath] = useState("");
+  const [llmContextSize, setLlmContextSize] = useState("4096");
+  const [llmMaxTokens, setLlmMaxTokens] = useState("256");
   const [asrModelPath, setAsrModelPath] = useState("");
   const [ocrModelPath, setOcrModelPath] = useState("");
   const [asrSourceType, setAsrSourceType] = useState<"file" | "mic">("file");
@@ -315,6 +317,8 @@ export default function App() {
           )}`,
         );
         setLlmModelPath(aiRuntimeInitial.config.llmModelPath);
+        setLlmContextSize(String(aiRuntimeInitial.config.llmContextSize));
+        setLlmMaxTokens(String(aiRuntimeInitial.config.llmMaxTokens));
         setAsrModelPath(aiRuntimeInitial.config.asrModelPath);
         setOcrModelPath(aiRuntimeInitial.config.ocrModelPath);
         if (snapshotItems.length > 0) {
@@ -1825,6 +1829,8 @@ export default function App() {
         )} asrReady=${String(status.features.asr.ready)} ocrReady=${String(status.features.ocr.ready)}`,
       );
       setLlmModelPath(status.config.llmModelPath);
+      setLlmContextSize(String(status.config.llmContextSize));
+      setLlmMaxTokens(String(status.config.llmMaxTokens));
       setAsrModelPath(status.config.asrModelPath);
       setOcrModelPath(status.config.ocrModelPath);
     } catch {
@@ -1836,10 +1842,17 @@ export default function App() {
     try {
       const status = await updateAiRuntimeConfig({
         llmModelPath,
+        llmContextSize: Math.max(256, Number.parseInt(llmContextSize, 10) || 4096),
+        llmMaxTokens: Math.max(1, Number.parseInt(llmMaxTokens, 10) || 256),
         asrModelPath,
         ocrModelPath,
       });
       setAiRuntimeStatus(status);
+      setLlmModelPath(status.config.llmModelPath);
+      setLlmContextSize(String(status.config.llmContextSize));
+      setLlmMaxTokens(String(status.config.llmMaxTokens));
+      setAsrModelPath(status.config.asrModelPath);
+      setOcrModelPath(status.config.ocrModelPath);
       setAiStatusMessage("AI runtime config updated.");
     } catch {
       setAiStatusMessage("AI runtime config update failed.");
@@ -2293,6 +2306,22 @@ export default function App() {
                   value={llmModelPath}
                   onChange={(event) => setLlmModelPath(event.target.value)}
                   placeholder="C:\\models\\qwen2.5-7b-instruct.gguf"
+                />
+              </label>
+              <label>
+                LLM context size
+                <input
+                  value={llmContextSize}
+                  onChange={(event) => setLlmContextSize(event.target.value)}
+                  placeholder="4096"
+                />
+              </label>
+              <label>
+                LLM max tokens
+                <input
+                  value={llmMaxTokens}
+                  onChange={(event) => setLlmMaxTokens(event.target.value)}
+                  placeholder="256"
                 />
               </label>
               <label>
