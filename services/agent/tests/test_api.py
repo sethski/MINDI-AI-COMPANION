@@ -872,6 +872,90 @@ def test_ops_security_recovery_kill_requires_confirmation() -> None:
     assert body["reason"] == "confirmation_required"
 
 
+def test_ops_automation_chain_success() -> None:
+    html = """
+    <html>
+      <head><title>Chain Source</title></head>
+      <body><p>chain-marker-3001</p></body>
+    </html>
+    """.encode("utf-8")
+
+    client.post(
+        "/control/permissions",
+        json={"scope": "domain", "subject": "example.com", "decision": "allow"},
+    )
+
+    def fake_run(args, **kwargs):
+        cmd = [str(part).lower() for part in args]
+        if cmd[:1] == ["tasklist"]:
+            stdout = '"explorer.exe","1111","Console","1","12,000 K"\n'
+            return subprocess.CompletedProcess(args=args, returncode=0, stdout=stdout, stderr="")
+        if cmd[:2] == ["sc", "query"]:
+            return subprocess.CompletedProcess(
+                args=args,
+                returncode=0,
+                stdout="SERVICE_NAME: WinDefend\nSTATE              : 4  RUNNING\n",
+                stderr="",
+            )
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+
+    with patch("mindi_agent.store.urlopen") as mock_urlopen, patch(
+        "mindi_agent.store.subprocess.run",
+        side_effect=fake_run,
+    ):
+        mock_urlopen.return_value = _MockUrlResponse(html)
+        response = client.post(
+            "/ops/automation/run",
+            json={
+                "name": "ops-chain-a",
+                "continueOnFailure": False,
+                "steps": [
+                    {"kind": "web_scrape", "url": "https://example.com/a", "storeAsNote": True},
+                    {"kind": "security_scan"},
+                    {"kind": "create_task", "title": "chain task"},
+                    {"kind": "create_note", "title": "chain note", "text": "chain done"},
+                ],
+            },
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["accepted"] is True
+    assert body["reason"] == "ok"
+    assert body["completedSteps"] == 4
+    assert body["totalSteps"] == 4
+    assert len(body["steps"]) == 4
+    assert all(step["accepted"] is True for step in body["steps"])
+
+
+def test_ops_automation_chain_failure_reports_recovery() -> None:
+    client.post(
+        "/control/permissions",
+        json={"scope": "domain", "subject": "blocked-chain.example.com", "decision": "deny"},
+    )
+
+    response = client.post(
+        "/ops/automation/run",
+        json={
+            "name": "ops-chain-b",
+            "continueOnFailure": False,
+            "steps": [
+                {"kind": "web_scrape", "url": "https://blocked-chain.example.com/a"},
+                {"kind": "create_task", "title": "should not run"},
+            ],
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["accepted"] is False
+    assert body["reason"] == "partial_failure"
+    assert body["failedStepIndex"] == 0
+    assert body["completedSteps"] == 0
+    assert body["recoverySummary"] is not None
+    assert body["steps"][0]["accepted"] is False
+    assert body["steps"][0]["recoveryHint"] is not None
+
+
 def test_perception_permissions_status_defaults_unset() -> None:
     response = client.get("/perception/permissions")
     assert response.status_code == 200
