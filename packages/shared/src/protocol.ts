@@ -487,6 +487,34 @@ export interface IntelligenceStyleUpdateRequest {
   resetSlangTerms?: boolean;
 }
 
+export interface IntelligenceTuningConfig {
+  preset: "safe" | "balanced" | "companion";
+  responseVerbosity: "brief" | "balanced" | "detailed";
+  customRiskyTerms: string[];
+}
+
+export interface IntelligenceTuningStatus {
+  active: IntelligenceTuningConfig;
+  pending?: IntelligenceTuningConfig;
+  pendingVersion?: string;
+  lastActiveEvalScore?: number;
+  lastPendingEvalScore?: number;
+  lastPendingEvalVersion?: string;
+  minApplyScore: number;
+  canApplyPending: boolean;
+}
+
+export interface IntelligenceTuningStageRequest {
+  preset?: "safe" | "balanced" | "companion";
+  responseVerbosity?: "brief" | "balanced" | "detailed";
+  addCustomRiskyTerms?: string[];
+  resetCustomRiskyTerms?: boolean;
+}
+
+export interface IntelligenceEvalRunRequest {
+  scope?: "active" | "pending";
+}
+
 export interface IntelligenceEvalCaseResult {
   id: string;
   accepted: boolean;
@@ -500,10 +528,18 @@ export interface IntelligenceEvalRunResponse {
   reason: string;
   runId: string;
   createdAt: string;
+  scope: "active" | "pending";
+  gatePassed: boolean;
   totalCases: number;
   passedCases: number;
   score: number;
   cases: IntelligenceEvalCaseResult[];
+}
+
+export interface IntelligenceTuningApplyResponse {
+  accepted: boolean;
+  reason: string;
+  status: IntelligenceTuningStatus;
 }
 
 export const TAB_ORDER: MindiTabId[] = [
