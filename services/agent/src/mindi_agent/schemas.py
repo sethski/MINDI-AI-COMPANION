@@ -400,6 +400,38 @@ class PrivacyUpdateRequest(BaseModel):
     redactionEnabled: bool
 
 
+class IntelligenceStyleStatus(BaseModel):
+    languageMode: Literal["english", "taglish", "tagalog"] = "english"
+    slangEnabled: bool = False
+    slangTerms: list[str] = Field(default_factory=list)
+
+
+class IntelligenceStyleUpdateRequest(BaseModel):
+    languageMode: Literal["english", "taglish", "tagalog"] | None = None
+    slangEnabled: bool | None = None
+    addSlangTerms: list[str] = Field(default_factory=list)
+    resetSlangTerms: bool = False
+
+
+class IntelligenceEvalCaseResult(BaseModel):
+    id: str
+    accepted: bool
+    score: float
+    expected: str
+    observed: str
+
+
+class IntelligenceEvalRunResponse(BaseModel):
+    accepted: bool
+    reason: str
+    runId: str
+    createdAt: str
+    totalCases: int
+    passedCases: int
+    score: float
+    cases: list[IntelligenceEvalCaseResult] = Field(default_factory=list)
+
+
 class AutoIndexStatus(BaseModel):
     running: bool
     watchedPaths: list[str]

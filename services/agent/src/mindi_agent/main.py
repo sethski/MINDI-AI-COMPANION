@@ -7,6 +7,7 @@ from .schemas import (
     AlertActionRequest,
     AutomationChainRequest,
     AssistantRequest,
+    IntelligenceStyleUpdateRequest,
     CreateMemoryNoteRequest,
     CreateTaskRequest,
     TaskStatusUpdateRequest,
@@ -254,6 +255,26 @@ def ops_privacy_status():
 @app.post("/ops/privacy/update")
 def ops_privacy_update(payload: PrivacyUpdateRequest):
     return store.update_privacy(payload)
+
+
+@app.get("/ops/intelligence/style")
+def ops_intelligence_style():
+    return store.intelligence_style_status()
+
+
+@app.post("/ops/intelligence/style")
+def ops_intelligence_style_update(payload: IntelligenceStyleUpdateRequest):
+    return store.update_intelligence_style(payload)
+
+
+@app.post("/ops/intelligence/eval/run")
+def ops_intelligence_eval_run():
+    return store.run_intelligence_eval()
+
+
+@app.get("/ops/intelligence/eval/history")
+def ops_intelligence_eval_history(limit: int = Query(default=20, ge=1, le=200)):
+    return store.list_intelligence_eval_history(limit=limit)
 
 
 @app.post("/calendar/export")
