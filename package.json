@@ -9,6 +9,7 @@
     "dev:agent": "python -m uvicorn mindi_agent.main:app --reload --host 127.0.0.1 --port 8765 --app-dir services/agent/src",
     "dev:ai-runtime": "python -m uvicorn mindi_ai_runtime.main:app --reload --host 127.0.0.1 --port 8877 --app-dir services/ai_runtime/src",
     "dev:all": "concurrently -k -n AGENT,RUNTIME,DESKTOP -c blue,cyan,magenta \"pnpm dev:agent\" \"pnpm dev:ai-runtime\" \"pnpm dev:desktop\"",
+    "ops:ai-smoke": "python scripts/ops_ai_smoke.py",
     "test:agent": "python -m pytest services/agent/tests",
     "test:e2e": "playwright test",
     "test:e2e:headed": "playwright test --headed",
