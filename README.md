@@ -64,8 +64,12 @@ Windows-first local assistant. Current repo layout:
 
 - Screen analysis API:
   - `POST /perception/screen/analyze`
+  - Accepts either `path` or inline `imageDataUrl` capture payloads.
   - Extracts OCR text (when available) and lightweight UI text-region blocks from screenshots.
   - Handles OCR failures gracefully by returning detected blocks with an OCR error reason.
+- Vision tab capture hook:
+  - Captures a live screen frame via browser display-capture API.
+  - Sends the frame to local perception analysis and renders block + OCR summary.
 
 ## Run Desktop
 
