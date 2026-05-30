@@ -11,6 +11,7 @@ import {
   type MindiTabId,
   type PerceptionPermissionStatus,
   type PerceptionAnalyzeResponse,
+  type PerceptionSnapshot,
   type PermissionGrant,
   type QuickToggle,
   type SchedulerStatus,
@@ -44,6 +45,8 @@ import {
   importCalendar,
   analyzeScreenPerception,
   getPerceptionPermissionStatus,
+  listPerceptionSnapshots,
+  searchPerceptionSnapshots,
 } from "./lib/agent-api";
 import {
   enqueueSyncItem,
@@ -71,6 +74,17 @@ const PERCEPTION_CAMERA_SUBJECT = "perception.camera.capture";
 
 function formatTab(tab: MindiTabId): string {
   return tab[0].toUpperCase() + tab.slice(1);
+}
+
+function formatIsoTime(value: string | undefined): string {
+  if (!value) {
+    return "n/a";
+  }
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return value;
+  }
+  return parsed.toLocaleString();
 }
 
 export default function App() {
@@ -107,6 +121,10 @@ export default function App() {
   const [perceptionStatus, setPerceptionStatus] = useState("No perception run yet.");
   const [perceptionResult, setPerceptionResult] = useState<PerceptionAnalyzeResponse | null>(null);
   const [perceptionPermission, setPerceptionPermission] = useState<PerceptionPermissionStatus | null>(null);
+  const [perceptionSnapshots, setPerceptionSnapshots] = useState<PerceptionSnapshot[]>([]);
+  const [perceptionSnapshotQuery, setPerceptionSnapshotQuery] = useState("");
+  const [perceptionSnapshotStatus, setPerceptionSnapshotStatus] = useState("No snapshot query run yet.");
+  const [perceptionSelectedSnapshotId, setPerceptionSelectedSnapshotId] = useState<string | null>(null);
   const [perceptionCapturePreview, setPerceptionCapturePreview] = useState<string | null>(null);
   const [perceptionIncludeOcr, setPerceptionIncludeOcr] = useState(true);
   const [perceptionBusy, setPerceptionBusy] = useState(false);
@@ -139,8 +157,19 @@ export default function App() {
       getAutoIndexStatus(),
       getSchedulerStatus(),
       getPerceptionPermissionStatus(),
+      listPerceptionSnapshots(12),
     ])
-      .then(([hub, grantList, appAllowlist, notes, indexStatus, scheduleStatus, perceptionPermissionStatus]) => {
+      .then(
+        ([
+          hub,
+          grantList,
+          appAllowlist,
+          notes,
+          indexStatus,
+          scheduleStatus,
+          perceptionPermissionStatus,
+          snapshotItems,
+        ]) => {
         if (!active) {
           return;
         }
@@ -151,7 +180,13 @@ export default function App() {
         setAutoIndexStatus(indexStatus);
         setSchedulerStatus(scheduleStatus);
         setPerceptionPermission(perceptionPermissionStatus);
-      })
+        setPerceptionSnapshots(snapshotItems);
+        if (snapshotItems.length > 0) {
+          setPerceptionSelectedSnapshotId(snapshotItems[0].id);
+          setPerceptionSnapshotStatus(`Loaded ${snapshotItems.length} recent snapshots.`);
+        }
+        },
+      )
       .catch(() => {
         if (active) {
           setSnapshot((current) => ({
@@ -708,6 +743,37 @@ export default function App() {
     }
   }
 
+  async function refreshPerceptionSnapshots() {
+    try {
+      const items = await listPerceptionSnapshots(12);
+      setPerceptionSnapshots(items);
+      if (items.length > 0 && !items.some((item) => item.id === perceptionSelectedSnapshotId)) {
+        setPerceptionSelectedSnapshotId(items[0].id);
+      }
+      setPerceptionSnapshotStatus(`Loaded ${items.length} recent snapshots.`);
+    } catch {
+      setPerceptionSnapshotStatus("Snapshot reload failed while offline.");
+    }
+  }
+
+  async function runPerceptionSnapshotSearch() {
+    const query = perceptionSnapshotQuery.trim();
+    if (!query) {
+      await refreshPerceptionSnapshots();
+      return;
+    }
+    try {
+      const response = await searchPerceptionSnapshots(query, 12);
+      setPerceptionSnapshots(response.items);
+      if (response.items.length > 0) {
+        setPerceptionSelectedSnapshotId(response.items[0].id);
+      }
+      setPerceptionSnapshotStatus(`Search hits: ${response.items.length}`);
+    } catch {
+      setPerceptionSnapshotStatus("Snapshot search failed while offline.");
+    }
+  }
+
   async function runOrganize(mode: "preview" | "apply") {
     try {
       const result = await fileOrganize({ sourceDir, targetDir, mode });
@@ -1032,6 +1098,10 @@ export default function App() {
         setPerceptionStatus(
           `Perception ok: ${response.blocks.length} blocks, textLength=${response.textLength}, snapshot=${response.snapshotId ?? "n/a"}.`,
         );
+        await refreshPerceptionSnapshots();
+        if (response.snapshotId) {
+          setPerceptionSelectedSnapshotId(response.snapshotId);
+        }
       } else {
         setPerceptionStatus(`Perception failed: ${response.reason}`);
       }
@@ -1045,6 +1115,34 @@ export default function App() {
       setPerceptionBusy(false);
     }
   }
+
+  const perceptionAverageConfidence = useMemo(() => {
+    if (!perceptionResult || perceptionResult.blocks.length === 0) {
+      return 0;
+    }
+    const total = perceptionResult.blocks.reduce((sum, block) => sum + block.confidence, 0);
+    return total / perceptionResult.blocks.length;
+  }, [perceptionResult]);
+
+  const perceptionCoveragePercent = useMemo(() => {
+    if (!perceptionResult?.imageWidth || !perceptionResult.imageHeight || perceptionResult.blocks.length === 0) {
+      return 0;
+    }
+    const imageArea = perceptionResult.imageWidth * perceptionResult.imageHeight;
+    if (imageArea <= 0) {
+      return 0;
+    }
+    const blockArea = perceptionResult.blocks.reduce(
+      (sum, block) => sum + Math.max(1, block.width) * Math.max(1, block.height),
+      0,
+    );
+    return Math.min(100, (blockArea / imageArea) * 100);
+  }, [perceptionResult]);
+
+  const selectedPerceptionSnapshot = useMemo(
+    () => perceptionSnapshots.find((item) => item.id === perceptionSelectedSnapshotId) ?? null,
+    [perceptionSnapshots, perceptionSelectedSnapshotId],
+  );
 
   return (
     <div className="frame">
@@ -1327,6 +1425,20 @@ export default function App() {
                 ? `accepted=${String(perceptionResult.accepted)} reason=${perceptionResult.reason}`
                 : "No result yet."}
             </p>
+            {perceptionResult ? (
+              <div className="metric-grid">
+                <p>snapshot: {perceptionResult.snapshotId ?? "n/a"}</p>
+                <p>
+                  image: {perceptionResult.imageWidth ?? 0} x {perceptionResult.imageHeight ?? 0}
+                </p>
+                <p>blocks: {perceptionResult.blocks.length}</p>
+                <p>textLength: {perceptionResult.textLength}</p>
+                <p>avg confidence: {perceptionAverageConfidence.toFixed(2)}</p>
+                <p>coverage: {perceptionCoveragePercent.toFixed(1)}%</p>
+                <p>ocr mode: {perceptionResult.ocrMode ?? "n/a"}</p>
+                <p>ocr error: {perceptionResult.ocrError ?? "none"}</p>
+              </div>
+            ) : null}
             {perceptionResult?.text ? (
               <p className="assistant-reply">{perceptionResult.text.slice(0, 400)}</p>
             ) : null}
@@ -1335,10 +1447,66 @@ export default function App() {
                 <li key={`${block.x}-${block.y}-${index}`}>
                   [{block.kind}] x={block.x} y={block.y} w={block.width} h={block.height} c=
                   {block.confidence.toFixed(2)}
+                  <div className="confidence-track">
+                    <div
+                      className="confidence-fill"
+                      style={{ width: `${Math.max(2, Math.min(100, block.confidence * 100))}%` }}
+                    />
+                  </div>
                 </li>
               ))}
               {perceptionResult && perceptionResult.blocks.length === 0 ? <li>No blocks detected.</li> : null}
             </ul>
+          </div>
+          <div className="card">
+            <h3>Snapshot Memory</h3>
+            <div className="stack">
+              <div className="chatbox">
+                <input
+                  value={perceptionSnapshotQuery}
+                  onChange={(event) => setPerceptionSnapshotQuery(event.target.value)}
+                  placeholder="Search OCR text/reason/path"
+                />
+                <button type="button" onClick={() => void runPerceptionSnapshotSearch()}>
+                  Search
+                </button>
+              </div>
+              <button type="button" onClick={() => void refreshPerceptionSnapshots()}>
+                Refresh
+              </button>
+            </div>
+            <p className="assistant-reply">{perceptionSnapshotStatus}</p>
+            <ul className="snapshot-list">
+              {perceptionSnapshots.map((item) => (
+                <li key={item.id}>
+                  <button
+                    type="button"
+                    className={item.id === perceptionSelectedSnapshotId ? "tab active" : "tab"}
+                    onClick={() => setPerceptionSelectedSnapshotId(item.id)}
+                  >
+                    {formatIsoTime(item.createdAt)} | b={item.blockCount} | t={item.textLength}
+                  </button>
+                </li>
+              ))}
+              {perceptionSnapshots.length === 0 ? <li>No snapshots yet.</li> : null}
+            </ul>
+            {selectedPerceptionSnapshot ? (
+              <div className="metric-grid">
+                <p>id: {selectedPerceptionSnapshot.id}</p>
+                <p>time: {formatIsoTime(selectedPerceptionSnapshot.createdAt)}</p>
+                <p>reason: {selectedPerceptionSnapshot.reason}</p>
+                <p>ocr mode: {selectedPerceptionSnapshot.ocrMode ?? "n/a"}</p>
+                <p>source: {selectedPerceptionSnapshot.sourcePath ?? "inline_capture"}</p>
+                <p>
+                  image: {selectedPerceptionSnapshot.imageWidth ?? 0} x {selectedPerceptionSnapshot.imageHeight ?? 0}
+                </p>
+                <p>blocks: {selectedPerceptionSnapshot.blockCount}</p>
+                <p>textLength: {selectedPerceptionSnapshot.textLength}</p>
+              </div>
+            ) : null}
+            {selectedPerceptionSnapshot?.text ? (
+              <p className="assistant-reply">{selectedPerceptionSnapshot.text.slice(0, 300)}</p>
+            ) : null}
           </div>
         </section>
       ) : (
