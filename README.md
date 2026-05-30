@@ -44,6 +44,9 @@ Windows-first local assistant. Current repo layout:
 - Background auto-index watcher:
   - `GET /memory/auto-index/status`
   - `POST /memory/auto-index/scan`
+- Task due scheduler:
+  - `GET /ops/scheduler/status`
+  - `POST /ops/scheduler/scan`
 - Memory tab UI for note creation and retrieval.
 
 ## Run Desktop
