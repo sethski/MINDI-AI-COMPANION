@@ -53,6 +53,8 @@ from .schemas import (
     OcrImportResponse,
     PerceptionAnalyzeRequest,
     PerceptionAnalyzeResponse,
+    PerceptionSnapshot,
+    PerceptionSnapshotSearchResponse,
     PerceptionUiBlock,
     PermissionGrant,
     PolicyDecision,
@@ -177,7 +179,23 @@ class RuntimeStore:
             ),
         )
         if decision.allowed:
-            reply = "Acknowledged. I can proceed locally and keep this action in audit logs."
+            latest_snapshot = self.memory_db.latest_perception_snapshot()
+            lowered = (request.text or "").lower()
+            asks_about_screen = any(
+                term in lowered
+                for term in ("screen", "vision", "display", "what do you see", "what's on screen", "ocr")
+            )
+            if asks_about_screen and latest_snapshot is not None:
+                snippet = (latest_snapshot.text or "").strip()
+                summary = snippet[:220] if snippet else "No OCR text available."
+                reply = (
+                    "Latest perception snapshot available. "
+                    f"Captured at {latest_snapshot.createdAt}, blocks={latest_snapshot.blockCount}, "
+                    f"textLength={latest_snapshot.textLength}. "
+                    f"Summary: {summary}"
+                )
+            else:
+                reply = "Acknowledged. I can proceed locally and keep this action in audit logs."
             suggestions = ["Create note", "Add task", "Show status"]
             status = "ready"
         else:
@@ -451,6 +469,15 @@ class RuntimeStore:
 
     def search_memory(self, query: str, limit: int = 50) -> MemorySearchResponse:
         return MemorySearchResponse(query=query, items=self.memory_db.search_notes(query, limit=limit))
+
+    def list_perception_snapshots(self, limit: int = 20) -> list[PerceptionSnapshot]:
+        return self.memory_db.list_perception_snapshots(limit=limit)
+
+    def search_perception_snapshots(self, query: str, limit: int = 20) -> PerceptionSnapshotSearchResponse:
+        return PerceptionSnapshotSearchResponse(
+            query=query,
+            items=self.memory_db.search_perception_snapshots(query=query, limit=limit),
+        )
 
     def import_document(self, request: DocumentImportRequest) -> DocumentImportResponse:
         source = Path(request.path).resolve()
@@ -761,9 +788,20 @@ class RuntimeStore:
             ),
         )
 
+        snapshot = self.memory_db.add_perception_snapshot(
+            source_path=str(source),
+            reason=reason,
+            ocr_mode=ocr_mode,
+            text=text,
+            block_count=len(blocks),
+            image_width=width,
+            image_height=height,
+        )
+
         response = PerceptionAnalyzeResponse(
             accepted=True,
             reason=reason,
+            snapshotId=snapshot.id,
             path=str(source),
             imageWidth=width,
             imageHeight=height,

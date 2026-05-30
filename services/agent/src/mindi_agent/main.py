@@ -155,6 +155,19 @@ def perception_screen_analyze(payload: PerceptionAnalyzeRequest):
     return store.analyze_screen(payload)
 
 
+@app.get("/memory/perception")
+def memory_perception(limit: int = Query(default=20, ge=1, le=200)):
+    return store.list_perception_snapshots(limit=limit)
+
+
+@app.get("/memory/perception/search")
+def memory_perception_search(
+    q: str = Query(default="", alias="query"),
+    limit: int = Query(default=20, ge=1, le=200),
+):
+    return store.search_perception_snapshots(query=q, limit=limit)
+
+
 @app.get("/memory/auto-index/status")
 def memory_auto_index_status():
     return store.auto_index_status()

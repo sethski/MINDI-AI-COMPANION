@@ -236,6 +236,7 @@ class PerceptionUiBlock(BaseModel):
 class PerceptionAnalyzeResponse(BaseModel):
     accepted: bool
     reason: str
+    snapshotId: str | None = None
     path: str | None = None
     imageWidth: int | None = None
     imageHeight: int | None = None
@@ -244,6 +245,24 @@ class PerceptionAnalyzeResponse(BaseModel):
     text: str | None = None
     textLength: int = 0
     blocks: list[PerceptionUiBlock] = Field(default_factory=list)
+
+
+class PerceptionSnapshot(BaseModel):
+    id: str
+    sourcePath: str | None = None
+    reason: str
+    ocrMode: str | None = None
+    text: str | None = None
+    textLength: int = 0
+    blockCount: int = 0
+    imageWidth: int | None = None
+    imageHeight: int | None = None
+    createdAt: str
+
+
+class PerceptionSnapshotSearchResponse(BaseModel):
+    query: str
+    items: list[PerceptionSnapshot]
 
 
 class AutoIndexStatus(BaseModel):
