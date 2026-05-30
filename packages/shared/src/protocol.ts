@@ -474,6 +474,38 @@ export interface PrivacyUpdateRequest {
   redactionEnabled: boolean;
 }
 
+export interface IntelligenceStyleStatus {
+  languageMode: "english" | "taglish" | "tagalog";
+  slangEnabled: boolean;
+  slangTerms: string[];
+}
+
+export interface IntelligenceStyleUpdateRequest {
+  languageMode?: "english" | "taglish" | "tagalog";
+  slangEnabled?: boolean;
+  addSlangTerms?: string[];
+  resetSlangTerms?: boolean;
+}
+
+export interface IntelligenceEvalCaseResult {
+  id: string;
+  accepted: boolean;
+  score: number;
+  expected: string;
+  observed: string;
+}
+
+export interface IntelligenceEvalRunResponse {
+  accepted: boolean;
+  reason: string;
+  runId: string;
+  createdAt: string;
+  totalCases: number;
+  passedCases: number;
+  score: number;
+  cases: IntelligenceEvalCaseResult[];
+}
+
 export const TAB_ORDER: MindiTabId[] = [
   "home",
   "control",
