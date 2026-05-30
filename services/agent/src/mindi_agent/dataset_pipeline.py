@@ -5,6 +5,7 @@ from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 import re
+from typing import Any
 
 
 _SUPPORTED_SUFFIXES = {".jsonl", ".json", ".csv", ".txt", ".md"}
@@ -25,6 +26,8 @@ class DatasetPrepResult:
     valJsonlPath: str | None = None
     configPath: str | None = None
     manifestPath: str | None = None
+    validationPassed: bool = False
+    validationIssues: list[str] | None = None
 
 
 def _normalize_text(value: str) -> str:
@@ -121,6 +124,117 @@ def _to_chat_row(text: str) -> dict:
     }
 
 
+def _validate_json_object(path: Path, required_keys: set[str]) -> tuple[dict[str, Any] | None, list[str]]:
+    issues: list[str] = []
+    if not path.exists() or not path.is_file():
+        return None, [f"missing:{path.name}"]
+    if path.stat().st_size == 0:
+        return None, [f"empty:{path.name}"]
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None, [f"invalid_json:{path.name}"]
+    if not isinstance(payload, dict):
+        return None, [f"invalid_shape:{path.name}"]
+    for key in sorted(required_keys):
+        if key not in payload:
+            issues.append(f"missing_key:{path.name}:{key}")
+    return payload, issues
+
+
+def _validate_chat_jsonl(path: Path, *, label: str) -> list[str]:
+    issues: list[str] = []
+    if not path.exists() or not path.is_file():
+        return [f"missing:{label}"]
+    if path.stat().st_size == 0:
+        return [f"empty:{label}"]
+    lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    if not lines:
+        return [f"empty:{label}"]
+    for index, line in enumerate(lines):
+        if not line.strip():
+            issues.append(f"blank_line:{label}:{index + 1}")
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            issues.append(f"invalid_jsonl:{label}:{index + 1}")
+            continue
+        if not isinstance(payload, dict):
+            issues.append(f"invalid_row_shape:{label}:{index + 1}")
+            continue
+        messages = payload.get("messages")
+        if not isinstance(messages, list) or len(messages) < 3:
+            issues.append(f"invalid_messages:{label}:{index + 1}")
+            continue
+    return issues
+
+
+def _validate_artifacts(
+    *,
+    dataset_path: Path,
+    output_dir: Path,
+    language_pack: Path,
+    train_jsonl: Path,
+    val_jsonl: Path,
+    config: Path,
+    manifest: Path,
+) -> list[str]:
+    issues: list[str] = []
+    issues.extend(_validate_chat_jsonl(train_jsonl, label="train_jsonl"))
+    issues.extend(_validate_chat_jsonl(val_jsonl, label="val_jsonl"))
+
+    language_pack_payload, pack_issues = _validate_json_object(
+        language_pack,
+        {"languageModeDefault", "sourceDataset", "sampleCount", "topTerms"},
+    )
+    issues.extend(pack_issues)
+    if isinstance(language_pack_payload, dict):
+        if str(language_pack_payload.get("sourceDataset", "")) != str(dataset_path):
+            issues.append("source_dataset_mismatch:language_pack")
+        if not isinstance(language_pack_payload.get("topTerms"), list):
+            issues.append("invalid_top_terms:language_pack")
+
+    config_payload, config_issues = _validate_json_object(
+        config,
+        {"baseModel", "method", "dataset", "training", "targetHardware", "executionScope"},
+    )
+    issues.extend(config_issues)
+    if isinstance(config_payload, dict):
+        dataset_payload = config_payload.get("dataset")
+        if not isinstance(dataset_payload, dict):
+            issues.append("invalid_dataset_block:config")
+        else:
+            if str(dataset_payload.get("trainJsonl", "")) != str(train_jsonl):
+                issues.append("train_path_mismatch:config")
+            if str(dataset_payload.get("valJsonl", "")) != str(val_jsonl):
+                issues.append("val_path_mismatch:config")
+
+    manifest_payload, manifest_issues = _validate_json_object(
+        manifest,
+        {"accepted", "reason", "datasetPath", "outputDir", "artifacts", "validation"},
+    )
+    issues.extend(manifest_issues)
+    if isinstance(manifest_payload, dict):
+        if str(manifest_payload.get("datasetPath", "")) != str(dataset_path):
+            issues.append("dataset_path_mismatch:manifest")
+        if str(manifest_payload.get("outputDir", "")) != str(output_dir):
+            issues.append("output_dir_mismatch:manifest")
+        artifacts_payload = manifest_payload.get("artifacts")
+        if not isinstance(artifacts_payload, dict):
+            issues.append("invalid_artifacts_block:manifest")
+        else:
+            if str(artifacts_payload.get("languagePackPath", "")) != str(language_pack):
+                issues.append("language_pack_path_mismatch:manifest")
+            if str(artifacts_payload.get("trainJsonlPath", "")) != str(train_jsonl):
+                issues.append("train_path_mismatch:manifest")
+            if str(artifacts_payload.get("valJsonlPath", "")) != str(val_jsonl):
+                issues.append("val_path_mismatch:manifest")
+            if str(artifacts_payload.get("configPath", "")) != str(config):
+                issues.append("config_path_mismatch:manifest")
+    return issues
+
+
 def prepare_ph_dataset_artifacts(dataset_path: Path, output_dir: Path) -> DatasetPrepResult:
     resolved_dataset = dataset_path.resolve()
     if not resolved_dataset.exists():
@@ -132,6 +246,8 @@ def prepare_ph_dataset_artifacts(dataset_path: Path, output_dir: Path) -> Datase
             rawSamples=0,
             trainSamples=0,
             valSamples=0,
+            validationPassed=False,
+            validationIssues=["dataset_not_found"],
         )
     raw_samples = _iter_text_samples(resolved_dataset)
     if not raw_samples:
@@ -143,6 +259,8 @@ def prepare_ph_dataset_artifacts(dataset_path: Path, output_dir: Path) -> Datase
             rawSamples=0,
             trainSamples=0,
             valSamples=0,
+            validationPassed=False,
+            validationIssues=["dataset_empty_or_unsupported"],
         )
 
     output_dir = output_dir.resolve()
@@ -222,9 +340,21 @@ def prepare_ph_dataset_artifacts(dataset_path: Path, output_dir: Path) -> Datase
     }
     manifest.write_text(json.dumps(manifest_payload, ensure_ascii=True, indent=2), encoding="utf-8")
 
+    validation_issues = _validate_artifacts(
+        dataset_path=resolved_dataset,
+        output_dir=output_dir,
+        language_pack=language_pack,
+        train_jsonl=train_jsonl,
+        val_jsonl=val_jsonl,
+        config=config,
+        manifest=manifest,
+    )
+    accepted = len(validation_issues) == 0
+    reason = "prepared" if accepted else "artifact_validation_failed"
+
     return DatasetPrepResult(
-        accepted=True,
-        reason="prepared",
+        accepted=accepted,
+        reason=reason,
         datasetPath=str(resolved_dataset),
         outputDir=str(output_dir),
         rawSamples=len(raw_samples),
@@ -235,4 +365,6 @@ def prepare_ph_dataset_artifacts(dataset_path: Path, output_dir: Path) -> Datase
         valJsonlPath=str(val_jsonl),
         configPath=str(config),
         manifestPath=str(manifest),
+        validationPassed=accepted,
+        validationIssues=validation_issues,
     )

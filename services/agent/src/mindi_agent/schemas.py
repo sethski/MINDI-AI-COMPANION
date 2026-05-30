@@ -283,6 +283,7 @@ class AiRuntimeServiceStatus(BaseModel):
 
 class AiRuntimeConfig(BaseModel):
     llmModelPath: str = ""
+    llmLanguagePackPath: str = ""
     asrModelPath: str = ""
     ocrModelPath: str = ""
     llmCommand: str = "llama-cli"
@@ -313,6 +314,7 @@ class AiRuntimeStatusResponse(BaseModel):
 
 class AiRuntimeConfigUpdateRequest(BaseModel):
     llmModelPath: str | None = None
+    llmLanguagePackPath: str | None = None
     asrModelPath: str | None = None
     ocrModelPath: str | None = None
     llmCommand: str | None = None
@@ -376,6 +378,10 @@ class DatasetPrepareResponse(BaseModel):
     valJsonlPath: str | None = None
     configPath: str | None = None
     manifestPath: str | None = None
+    validationPassed: bool = False
+    validationIssues: list[str] = Field(default_factory=list)
+    languagePackLoaded: bool = False
+    languagePackLoadReason: str | None = None
 
 
 class PerceptionSnapshot(BaseModel):

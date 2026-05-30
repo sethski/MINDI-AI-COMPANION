@@ -437,6 +437,10 @@ class RuntimeStore:
                 rawSamples=0,
                 trainSamples=0,
                 valSamples=0,
+                validationPassed=False,
+                validationIssues=["dataset_not_found"],
+                languagePackLoaded=False,
+                languagePackLoadReason="dataset_not_found",
             )
         if not self._is_path_allowed(dataset_path):
             return DatasetPrepareResponse(
@@ -447,11 +451,33 @@ class RuntimeStore:
                 rawSamples=0,
                 trainSamples=0,
                 valSamples=0,
+                validationPassed=False,
+                validationIssues=["dataset_path_not_allowed"],
+                languagePackLoaded=False,
+                languagePackLoadReason="dataset_path_not_allowed",
             )
 
         output_dir = Path(request.outputDir).resolve() if request.outputDir else Path("data/runtime/intelligence").resolve()
         output_dir.mkdir(parents=True, exist_ok=True)
         result = prepare_ph_dataset_artifacts(dataset_path=dataset_path, output_dir=output_dir)
+        language_pack_loaded = False
+        language_pack_load_reason: str | None = None
+        if result.accepted and result.languagePackPath:
+            try:
+                runtime_status = self.ai_runtime.update_config({"llmLanguagePackPath": result.languagePackPath})
+                config_payload = runtime_status.get("config", {})
+                configured_path = str(config_payload.get("llmLanguagePackPath", "")).strip()
+                language_pack_loaded = configured_path == result.languagePackPath
+                language_pack_load_reason = "loaded" if language_pack_loaded else "runtime_config_rejected"
+            except Exception:
+                language_pack_loaded = False
+                language_pack_load_reason = "runtime_config_update_failed"
+            if not language_pack_loaded:
+                result.accepted = False
+                result.reason = "language_pack_load_failed"
+                issues = result.validationIssues or []
+                result.validationIssues = issues + [language_pack_load_reason or "language_pack_load_failed"]
+                result.validationPassed = False
         if result.accepted:
             self.logs.insert(
                 0,
@@ -477,6 +503,10 @@ class RuntimeStore:
             valJsonlPath=result.valJsonlPath,
             configPath=result.configPath,
             manifestPath=result.manifestPath,
+            validationPassed=result.validationPassed,
+            validationIssues=result.validationIssues or [],
+            languagePackLoaded=language_pack_loaded,
+            languagePackLoadReason=language_pack_load_reason,
         )
 
     def _active_tuning_config(self) -> IntelligenceTuningConfig:

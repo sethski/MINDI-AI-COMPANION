@@ -19,6 +19,7 @@ class LocalAiRuntimeClient:
     def _load_config(self) -> dict:
         defaults = {
             "llmModelPath": "",
+            "llmLanguagePackPath": "",
             "asrModelPath": "",
             "ocrModelPath": "",
             "llmCommand": "llama-cli",
@@ -166,6 +167,7 @@ class LocalAiRuntimeClient:
         merged = dict(self._config)
         for key in (
             "llmModelPath",
+            "llmLanguagePackPath",
             "asrModelPath",
             "ocrModelPath",
             "llmCommand",
