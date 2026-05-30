@@ -254,3 +254,38 @@ def test_scheduler_generates_due_alerts() -> None:
     assert hub.status_code == 200
     alert_titles = [item["title"] for item in hub.json()["alerts"]]
     assert any(title in alert for alert in alert_titles)
+
+
+def test_scheduler_next_run_endpoint() -> None:
+    due_at = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat().replace("+00:00", "Z")
+    response = client.post(
+        "/ops/scheduler/next-run",
+        json={"dueAt": due_at, "recurrence": "daily"},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["accepted"] is True
+    assert body["nextRunAt"] is not None
+
+
+def test_recurring_task_rolls_to_next_due() -> None:
+    due_at = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat().replace("+00:00", "Z")
+    title = "recurring-rollover-9122"
+    created = client.post(
+        "/tasks",
+        json={"title": title, "dueAt": due_at, "recurrence": "daily"},
+    )
+    assert created.status_code == 200
+
+    scan = client.post("/ops/scheduler/scan")
+    assert scan.status_code == 200
+
+    tasks = client.get("/tasks")
+    assert tasks.status_code == 200
+    matched = [item for item in tasks.json() if item["title"] == title]
+    assert matched
+    task = matched[0]
+    assert task["dueAt"] is not None
+    assert task["nextRunAt"] is not None
+    # Should roll forward after scan for recurring task.
+    assert task["dueAt"] != due_at
