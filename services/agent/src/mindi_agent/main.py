@@ -12,6 +12,7 @@ from .schemas import (
     OcrImportRequest,
     SyncQueueRequest,
     TaskNextRunRequest,
+    TaskTimeParseRequest,
 )
 from .store import RuntimeStore
 
@@ -143,3 +144,8 @@ def ops_scheduler_scan():
 @app.post("/ops/scheduler/next-run")
 def ops_scheduler_next_run(payload: TaskNextRunRequest):
     return store.task_next_run(payload)
+
+
+@app.post("/ops/scheduler/parse-time")
+def ops_scheduler_parse_time(payload: TaskTimeParseRequest):
+    return store.parse_task_time(payload)

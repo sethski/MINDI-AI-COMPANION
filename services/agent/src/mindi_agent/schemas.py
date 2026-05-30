@@ -232,5 +232,16 @@ class TaskNextRunResponse(BaseModel):
     nextRunAt: str | None = None
 
 
+class TaskTimeParseRequest(BaseModel):
+    text: str
+    timezone: str | None = None
+
+
+class TaskTimeParseResponse(BaseModel):
+    accepted: bool
+    reason: str
+    dueAt: str | None = None
+
+
 def now_iso() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")

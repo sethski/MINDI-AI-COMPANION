@@ -1,11 +1,13 @@
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import re
 from shutil import move
 import subprocess
 from threading import Event, Thread
 from time import time
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from .memory_db import ALLOWED_DOCUMENT_SUFFIXES, MemoryDB
 from .ocr_service import OCR_IMAGE_SUFFIXES, extract_text_for_ocr
@@ -14,6 +16,8 @@ from .schemas import (
     SchedulerStatus,
     TaskNextRunRequest,
     TaskNextRunResponse,
+    TaskTimeParseRequest,
+    TaskTimeParseResponse,
     AppControlRequest,
     AppControlResponse,
     ActionLogItem,
@@ -578,6 +582,29 @@ class RuntimeStore:
         return parsed.astimezone(timezone.utc)
 
     @staticmethod
+    def _parse_time_component(raw: str | None) -> tuple[int, int]:
+        if not raw:
+            return (9, 0)
+        text = raw.strip().lower()
+        match_ampm = re.fullmatch(r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)", text)
+        if match_ampm:
+            hour = int(match_ampm.group(1))
+            minute = int(match_ampm.group(2) or "0")
+            meridiem = match_ampm.group(3)
+            hour = hour % 12
+            if meridiem == "pm":
+                hour += 12
+            return (hour, minute)
+
+        match_24 = re.fullmatch(r"(\d{1,2})(?::(\d{2}))?", text)
+        if match_24:
+            hour = int(match_24.group(1))
+            minute = int(match_24.group(2) or "0")
+            if 0 <= hour <= 23 and 0 <= minute <= 59:
+                return (hour, minute)
+        return (9, 0)
+
+    @staticmethod
     def _format_utc(value: datetime) -> str:
         return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
@@ -599,6 +626,104 @@ class RuntimeStore:
             reason="ok",
             nextRunAt=self._format_utc(next_due),
         )
+
+    def parse_task_time(self, request: TaskTimeParseRequest) -> TaskTimeParseResponse:
+        text = (request.text or "").strip()
+        if not text:
+            return TaskTimeParseResponse(accepted=False, reason="empty_text")
+
+        tz_name = request.timezone or "UTC"
+        timezone_fallback = False
+        try:
+            tz = ZoneInfo(tz_name)
+        except Exception:
+            tz = timezone.utc
+            timezone_fallback = True
+
+        now_local = datetime.now(tz)
+        lowered = text.lower()
+
+        # Direct ISO path first.
+        direct = self._parse_due_at(text)
+        if direct is not None:
+            reason = "iso_with_timezone_fallback" if timezone_fallback else "iso"
+            return TaskTimeParseResponse(accepted=True, reason=reason, dueAt=self._format_utc(direct))
+
+        # in N minutes/hours/days
+        in_match = re.fullmatch(r"in\s+(\d+)\s*(minute|minutes|hour|hours|day|days)", lowered)
+        if in_match:
+            amount = int(in_match.group(1))
+            unit = in_match.group(2)
+            delta = timedelta(minutes=amount)
+            if "hour" in unit:
+                delta = timedelta(hours=amount)
+            elif "day" in unit:
+                delta = timedelta(days=amount)
+            due = now_local + delta
+            return TaskTimeParseResponse(
+                accepted=True,
+                reason="relative_with_timezone_fallback" if timezone_fallback else "relative",
+                dueAt=self._format_utc(due.astimezone(timezone.utc)),
+            )
+
+        # today/tomorrow [time]
+        tt_match = re.fullmatch(r"(today|tomorrow)(?:\s+(.+))?", lowered)
+        if tt_match:
+            base = now_local.date()
+            if tt_match.group(1) == "tomorrow":
+                base = base + timedelta(days=1)
+            hour, minute = self._parse_time_component(tt_match.group(2))
+            due_local = datetime(
+                base.year,
+                base.month,
+                base.day,
+                hour,
+                minute,
+                tzinfo=tz,
+            )
+            return TaskTimeParseResponse(
+                accepted=True,
+                reason="day_phrase_with_timezone_fallback" if timezone_fallback else "day_phrase",
+                dueAt=self._format_utc(due_local.astimezone(timezone.utc)),
+            )
+
+        # next weekday [time]
+        nw_match = re.fullmatch(
+            r"next\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)(?:\s+(.+))?",
+            lowered,
+        )
+        if nw_match:
+            weekdays = {
+                "monday": 0,
+                "tuesday": 1,
+                "wednesday": 2,
+                "thursday": 3,
+                "friday": 4,
+                "saturday": 5,
+                "sunday": 6,
+            }
+            target = weekdays[nw_match.group(1)]
+            current = now_local.weekday()
+            days_ahead = (target - current + 7) % 7
+            if days_ahead == 0:
+                days_ahead = 7
+            base = now_local.date() + timedelta(days=days_ahead)
+            hour, minute = self._parse_time_component(nw_match.group(2))
+            due_local = datetime(
+                base.year,
+                base.month,
+                base.day,
+                hour,
+                minute,
+                tzinfo=tz,
+            )
+            return TaskTimeParseResponse(
+                accepted=True,
+                reason="next_weekday_with_timezone_fallback" if timezone_fallback else "next_weekday",
+                dueAt=self._format_utc(due_local.astimezone(timezone.utc)),
+            )
+
+        return TaskTimeParseResponse(accepted=False, reason="unsupported_time_phrase")
 
     def scheduler_scan_once(self) -> SchedulerStatus:
         now_utc = datetime.now(timezone.utc)
