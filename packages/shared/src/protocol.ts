@@ -325,6 +325,8 @@ export interface AiRuntimeFeatureStatus {
   provider: string;
   model: string;
   lastError?: string;
+  lastLatencyMs?: number;
+  lastFailureReason?: string;
 }
 
 export interface AiRuntimeServiceStatus {
