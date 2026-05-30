@@ -24,6 +24,9 @@ import type {
   PerceptionAnalyzeRequest,
   PerceptionAnalyzeResponse,
   PerceptionPermissionStatus,
+  IntelligenceEvalRunResponse,
+  IntelligenceStyleStatus,
+  IntelligenceStyleUpdateRequest,
   PrivacyStatus,
   PrivacyUpdateRequest,
   PerceptionSnapshot,
@@ -323,6 +326,32 @@ export async function updatePrivacyStatus(
     method: "POST",
     body: JSON.stringify(payload),
   });
+}
+
+export async function getIntelligenceStyleStatus(): Promise<IntelligenceStyleStatus> {
+  return agentFetch<IntelligenceStyleStatus>("/ops/intelligence/style");
+}
+
+export async function updateIntelligenceStyleStatus(
+  payload: IntelligenceStyleUpdateRequest,
+): Promise<IntelligenceStyleStatus> {
+  return agentFetch<IntelligenceStyleStatus>("/ops/intelligence/style", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function runIntelligenceEval(): Promise<IntelligenceEvalRunResponse> {
+  return agentFetch<IntelligenceEvalRunResponse>("/ops/intelligence/eval/run", {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+}
+
+export async function listIntelligenceEvalHistory(limit = 20): Promise<IntelligenceEvalRunResponse[]> {
+  return agentFetch<IntelligenceEvalRunResponse[]>(
+    `/ops/intelligence/eval/history?limit=${limit}`,
+  );
 }
 
 export async function exportCalendar(
