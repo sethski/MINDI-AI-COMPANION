@@ -2054,6 +2054,7 @@ def test_ai_runtime_config_update_roundtrip() -> None:
         "/ops/ai/config",
         json={
             "llmModelPath": "C:/models/qwen2.5-7b-instruct.gguf",
+            "llmLanguagePackPath": "C:/models/language_pack_ph.json",
             "asrModelPath": "C:/models/qwen3-asr-1.7b",
             "ocrModelPath": "C:/models/glm-ocr",
             "llmContextSize": 8192,
@@ -2066,6 +2067,7 @@ def test_ai_runtime_config_update_roundtrip() -> None:
     body = response.json()
     assert body["accepted"] is True
     assert body["config"]["llmModelPath"] == "C:/models/qwen2.5-7b-instruct.gguf"
+    assert body["config"]["llmLanguagePackPath"] == "C:/models/language_pack_ph.json"
     assert body["config"]["llmContextSize"] == 8192
     assert body["config"]["llmMaxTokens"] == 384
     assert body["config"]["asrLanguageHint"] == "Filipino"
@@ -2081,3 +2083,48 @@ def test_dataset_prepare_missing_path() -> None:
     body = response.json()
     assert body["accepted"] is False
     assert body["reason"] == "dataset_not_found"
+    assert body["validationPassed"] is False
+    assert body["languagePackLoaded"] is False
+
+
+def test_dataset_prepare_success_and_loads_language_pack(tmp_path: Path) -> None:
+    dataset_dir = tmp_path / "dataset"
+    dataset_dir.mkdir(parents=True, exist_ok=True)
+    sample_rows = "\n".join(
+        f'{{"text": "Kamusta sample line {index} para sa Taglish adaptation."}}' for index in range(12)
+    )
+    (dataset_dir / "sample.jsonl").write_text(sample_rows, encoding="utf-8")
+    output_dir = tmp_path / "artifacts"
+
+    client.post(
+        "/control/permissions",
+        json={"scope": "folder", "subject": str(tmp_path), "decision": "allow"},
+    )
+
+    response = client.post(
+        "/ops/intelligence/dataset/prepare",
+        json={"datasetPath": str(dataset_dir), "outputDir": str(output_dir)},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["accepted"] is True
+    assert body["reason"] == "prepared"
+    assert body["validationPassed"] is True
+    assert body["validationIssues"] == []
+    assert body["languagePackLoaded"] is True
+    assert body["languagePackLoadReason"] == "loaded"
+    assert body["languagePackPath"]
+    assert Path(body["languagePackPath"]).exists() is True
+    assert body["trainJsonlPath"]
+    assert Path(body["trainJsonlPath"]).exists() is True
+    assert body["valJsonlPath"]
+    assert Path(body["valJsonlPath"]).exists() is True
+    assert body["configPath"]
+    assert Path(body["configPath"]).exists() is True
+    assert body["manifestPath"]
+    assert Path(body["manifestPath"]).exists() is True
+
+    status = client.get("/ops/ai/status")
+    assert status.status_code == 200
+    status_body = status.json()
+    assert status_body["config"]["llmLanguagePackPath"] == body["languagePackPath"]
