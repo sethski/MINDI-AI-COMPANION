@@ -2,6 +2,9 @@ import type {
   AddPermissionGrantRequest,
   AppControlRequest,
   AppControlResponse,
+  AlertActionRequest,
+  AlertActionResponse,
+  AlertFeedResponse,
   AssistantRequest,
   AssistantResponse,
   CreateMemoryNoteRequest,
@@ -289,6 +292,19 @@ export async function runAutomationChain(
   payload: AutomationChainRequest,
 ): Promise<AutomationChainResponse> {
   return agentFetch<AutomationChainResponse>("/ops/automation/run", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function getAlertFeed(limit = 25): Promise<AlertFeedResponse> {
+  return agentFetch<AlertFeedResponse>(`/ops/alerts/feed?limit=${limit}`);
+}
+
+export async function runAlertAction(
+  payload: AlertActionRequest,
+): Promise<AlertActionResponse> {
+  return agentFetch<AlertActionResponse>("/ops/alerts/action", {
     method: "POST",
     body: JSON.stringify(payload),
   });
