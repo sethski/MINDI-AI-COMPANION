@@ -1,5 +1,7 @@
 from fastapi.testclient import TestClient
 from pathlib import Path
+import subprocess
+from unittest.mock import patch
 
 from mindi_agent.main import app
 
@@ -71,3 +73,52 @@ def test_file_organize_preview_and_apply(tmp_path: Path) -> None:
     assert apply_body["movedCount"] == 2
     assert not (source / "a.txt").exists()
     assert (target / "documents" / "a.txt").exists()
+
+
+def test_app_control_requires_allowlist_and_confirmation() -> None:
+    denied = client.post(
+        "/control/apps/action",
+        json={"action": "open", "appId": "calc.exe", "confirm": True},
+    )
+    assert denied.status_code == 200
+    denied_body = denied.json()
+    assert denied_body["accepted"] is False
+    assert denied_body["reason"] == "app_not_allowlisted"
+
+    client.post(
+        "/control/permissions",
+        json={"scope": "app", "subject": "calc.exe", "decision": "allow"},
+    )
+    close_needs_confirm = client.post(
+        "/control/apps/action",
+        json={"action": "close", "appId": "calc.exe", "confirm": False},
+    )
+    assert close_needs_confirm.status_code == 200
+    close_body = close_needs_confirm.json()
+    assert close_body["accepted"] is False
+    assert close_body["requiresConfirmation"] is True
+
+
+def test_app_control_open_and_close_success() -> None:
+    client.post(
+        "/control/permissions",
+        json={"scope": "app", "subject": "calc.exe", "decision": "allow"},
+    )
+
+    with patch("mindi_agent.store.subprocess.Popen") as mock_open:
+        mock_open.return_value = None
+        open_response = client.post(
+            "/control/apps/action",
+            json={"action": "open", "appId": "calc.exe", "confirm": True},
+        )
+        assert open_response.status_code == 200
+        assert open_response.json()["accepted"] is True
+
+    with patch("mindi_agent.store.subprocess.run") as mock_run:
+        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0)
+        close_response = client.post(
+            "/control/apps/action",
+            json={"action": "close", "appId": "calc.exe", "confirm": True},
+        )
+        assert close_response.status_code == 200
+        assert close_response.json()["accepted"] is True
