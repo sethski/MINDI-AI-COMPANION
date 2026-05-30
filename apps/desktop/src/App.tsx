@@ -11,6 +11,7 @@ import {
   type MindiTabId,
   type PermissionGrant,
   type QuickToggle,
+  type SchedulerStatus,
 } from "@mindi/shared";
 import {
   addPermissionGrant,
@@ -29,6 +30,8 @@ import {
   searchDocuments,
   searchMemory,
   sendAssistantRequest,
+  getSchedulerStatus,
+  runSchedulerScanNow,
 } from "./lib/agent-api";
 import { enqueueSyncItem, loadSyncQueue, loadToggleState, saveToggleState } from "./lib/local-state";
 
@@ -78,6 +81,7 @@ export default function App() {
   const [documentChunks, setDocumentChunks] = useState<MemoryDocumentChunk[]>([]);
   const [ocrImportPath, setOcrImportPath] = useState("data/inbox");
   const [autoIndexStatus, setAutoIndexStatus] = useState<AutoIndexStatus | null>(null);
+  const [schedulerStatus, setSchedulerStatus] = useState<SchedulerStatus | null>(null);
   const [memoryStatus, setMemoryStatus] = useState("No memory action yet.");
 
   useEffect(() => {
@@ -103,8 +107,9 @@ export default function App() {
       fetchAllowedApps(),
       listMemoryNotes(20),
       getAutoIndexStatus(),
+      getSchedulerStatus(),
     ])
-      .then(([hub, grantList, appAllowlist, notes, indexStatus]) => {
+      .then(([hub, grantList, appAllowlist, notes, indexStatus, scheduleStatus]) => {
         if (!active) {
           return;
         }
@@ -113,6 +118,7 @@ export default function App() {
         setAllowedApps(appAllowlist.apps);
         setMemoryNotes(notes);
         setAutoIndexStatus(indexStatus);
+        setSchedulerStatus(scheduleStatus);
       })
       .catch(() => {
         if (active) {
@@ -173,13 +179,15 @@ export default function App() {
     if (!title) {
       return;
     }
+    const dueAtRaw = prompt("Due time ISO (optional). Example: 2026-06-01T09:00:00Z") ?? "";
+    const dueAt = dueAtRaw.trim() || undefined;
     try {
-      const newTask = await createTask({ title });
+      const newTask = await createTask({ title, dueAt });
       setSnapshot((current) => ({ ...current, tasks: [newTask, ...current.tasks] }));
     } catch {
       enqueueSyncItem({
         type: "action",
-        payload: { action: "create_task", title },
+        payload: { action: "create_task", title, dueAt },
       });
       setSyncDepth(loadSyncQueue().length);
     }
@@ -371,6 +379,15 @@ export default function App() {
       setMemoryStatus(`Auto-index run complete. Indexed ${status.indexedLastRun} files.`);
     } catch {
       setMemoryStatus("Auto-index scan failed.");
+    }
+  }
+
+  async function runTaskSchedulerScanNow() {
+    try {
+      const status = await runSchedulerScanNow();
+      setSchedulerStatus(status);
+    } catch {
+      // Keep UI steady when scheduler endpoint is unreachable.
     }
   }
 
@@ -611,6 +628,7 @@ export default function App() {
               {snapshot.tasks.slice(0, 4).map((task) => (
                 <li key={task.id}>
                   [{task.status}] {task.title}
+                  {task.dueAt ? ` (due ${task.dueAt})` : ""}
                 </li>
               ))}
               {snapshot.tasks.length === 0 && <li>No tasks yet.</li>}
@@ -651,6 +669,15 @@ export default function App() {
             <h3>Status & Quick Controls</h3>
             <p>Agent: {snapshot.status.agentVersion}</p>
             <p>Listening: {snapshot.status.listening ? "on" : "off"}</p>
+            <p>
+              scheduler:{" "}
+              {schedulerStatus
+                ? `running=${String(schedulerStatus.running)} alerts=${schedulerStatus.alertsTotal}`
+                : "unavailable"}
+            </p>
+            <button type="button" onClick={() => void runTaskSchedulerScanNow()}>
+              Run Scheduler Scan
+            </button>
             <div className="toggles">
               {toggles.map((toggle) => (
                 <label key={toggle.id}>
