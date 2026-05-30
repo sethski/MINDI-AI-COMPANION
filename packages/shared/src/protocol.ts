@@ -125,6 +125,16 @@ export interface CalendarExportResponse {
   eventCount: number;
 }
 
+export interface CalendarImportRequest {
+  filePath: string;
+}
+
+export interface CalendarImportResponse {
+  accepted: boolean;
+  reason: string;
+  importedCount: number;
+}
+
 export interface SyncQueueItem {
   id: string;
   type: "chat" | "action" | "note" | "scrape" | "ocr";
