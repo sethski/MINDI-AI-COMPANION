@@ -13,4 +13,6 @@ __pycache__/
 apps/desktop/src-tauri/target/
 data/runtime/
 *.egg-info/
+playwright-report/
+test-results/
 
