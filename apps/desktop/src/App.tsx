@@ -32,6 +32,7 @@ import {
   sendAssistantRequest,
   getSchedulerStatus,
   getSchedulerNextRun,
+  parseTaskTime,
   runSchedulerScanNow,
 } from "./lib/agent-api";
 import { enqueueSyncItem, loadSyncQueue, loadToggleState, saveToggleState } from "./lib/local-state";
@@ -180,8 +181,45 @@ export default function App() {
     if (!title) {
       return;
     }
-    const dueAtRaw = prompt("Due time ISO (optional). Example: 2026-06-01T09:00:00Z") ?? "";
-    const dueAt = dueAtRaw.trim() || undefined;
+    const dueAtRaw = prompt(
+      "Due time (optional): ISO or natural text like 'tomorrow 9am', 'next monday 14:00', 'in 2 hours'",
+    ) ?? "";
+    const dueAtText = dueAtRaw.trim();
+    let dueAt: string | undefined;
+    if (dueAtText) {
+      try {
+        const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+        const parsed = await parseTaskTime({ text: dueAtText, timezone });
+        if (!parsed.accepted || !parsed.dueAt) {
+          setAssistant({
+            reply: `Could not parse due time: ${parsed.reason}.`,
+            decision: {
+              allowed: false,
+              tier: "read_only",
+              reason: "invalid_due_time",
+              requiresUnlock: false,
+            },
+            suggestedActions: ["Use ISO time", "Try 'tomorrow 9am'"],
+            status: "blocked",
+          });
+          return;
+        }
+        dueAt = parsed.dueAt;
+      } catch {
+        setAssistant({
+          reply: "Due-time parser unavailable while offline.",
+          decision: {
+            allowed: false,
+            tier: "read_only",
+            reason: "parse_service_unavailable",
+            requiresUnlock: false,
+          },
+          suggestedActions: ["Run local agent", "Use ISO time"],
+          status: "blocked",
+        });
+        return;
+      }
+    }
     const recurrenceRaw =
       (prompt("Recurrence (optional): none | daily | weekly", "none") ?? "none").trim().toLowerCase();
     const recurrence =
