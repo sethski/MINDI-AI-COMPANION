@@ -133,6 +133,19 @@ export interface FileOrganizeResponse {
   items: FileOrganizeItem[];
 }
 
+export interface AppControlRequest {
+  action: "open" | "focus" | "close";
+  appId: string;
+  confirm?: boolean;
+}
+
+export interface AppControlResponse {
+  accepted: boolean;
+  reason: string;
+  tier: ActionTier;
+  requiresConfirmation: boolean;
+}
+
 export const TAB_ORDER: MindiTabId[] = [
   "home",
   "control",
