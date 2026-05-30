@@ -13,6 +13,23 @@ from mindi_agent.main import app
 client = TestClient(app)
 
 
+class _MockUrlResponse:
+    def __init__(self, body: bytes, content_type: str = "text/html; charset=utf-8") -> None:
+        self._body = body
+        self.headers = {"Content-Type": content_type}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        return None
+
+    def read(self, size: int = -1) -> bytes:
+        if size < 0:
+            return self._body
+        return self._body[:size]
+
+
 def test_health() -> None:
     response = client.get("/health")
     assert response.status_code == 200
@@ -711,6 +728,69 @@ def test_calendar_export_writes_valarm_when_reminder_present(tmp_path: Path) -> 
     assert "SUMMARY:Alarm Export Task" in text
     assert "BEGIN:VALARM" in text
     assert "TRIGGER:-PT45M" in text
+
+
+def test_ops_web_scrape_success_and_store_note() -> None:
+    html = """
+    <html>
+      <head><title>Ops News</title></head>
+      <body>
+        <p>Threat bulletin critical update marker-ops-1173.</p>
+        <a href="/alert">Alert</a>
+      </body>
+    </html>
+    """.encode("utf-8")
+
+    client.post(
+        "/control/permissions",
+        json={"scope": "domain", "subject": "example.com", "decision": "allow"},
+    )
+
+    with patch("mindi_agent.store.urlopen") as mock_urlopen:
+        mock_urlopen.return_value = _MockUrlResponse(html)
+        response = client.post(
+            "/ops/web/scrape",
+            json={"url": "https://example.com/security", "maxChars": 800, "storeAsNote": True},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["accepted"] is True
+    assert body["reason"] == "ok"
+    assert body["title"] == "Ops News"
+    assert body["textLength"] > 0
+    assert body["storedNoteId"] is not None
+    assert len(body["links"]) >= 1
+
+    searched = client.get("/memory/search?query=marker-ops-1173")
+    assert searched.status_code == 200
+    assert any("marker-ops-1173" in item["content"] for item in searched.json()["items"])
+
+
+def test_ops_web_scrape_blocked_by_domain_policy() -> None:
+    client.post(
+        "/control/permissions",
+        json={"scope": "domain", "subject": "blocked.example.com", "decision": "deny"},
+    )
+    response = client.post(
+        "/ops/web/scrape",
+        json={"url": "https://blocked.example.com/page", "storeAsNote": False},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["accepted"] is False
+    assert body["reason"] == "domain_not_allowed"
+
+
+def test_ops_web_scrape_rejects_invalid_url() -> None:
+    response = client.post(
+        "/ops/web/scrape",
+        json={"url": "file:///tmp/secret.txt", "storeAsNote": False},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["accepted"] is False
+    assert body["reason"] == "invalid_url"
 
 
 def test_perception_permissions_status_defaults_unset() -> None:
