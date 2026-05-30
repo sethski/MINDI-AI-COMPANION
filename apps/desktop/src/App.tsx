@@ -12,6 +12,7 @@ import {
   type PermissionGrant,
   type QuickToggle,
   type SchedulerStatus,
+  type SyncQueueItem,
 } from "@mindi/shared";
 import {
   addPermissionGrant,
@@ -40,7 +41,13 @@ import {
   exportCalendar,
   importCalendar,
 } from "./lib/agent-api";
-import { enqueueSyncItem, loadSyncQueue, loadToggleState, saveToggleState } from "./lib/local-state";
+import {
+  enqueueSyncItem,
+  loadSyncQueue,
+  loadToggleState,
+  saveSyncQueue,
+  saveToggleState,
+} from "./lib/local-state";
 
 const EMPTY_SNAPSHOT: HubSnapshot = {
   status: {
@@ -90,6 +97,9 @@ export default function App() {
   const [autoIndexStatus, setAutoIndexStatus] = useState<AutoIndexStatus | null>(null);
   const [schedulerStatus, setSchedulerStatus] = useState<SchedulerStatus | null>(null);
   const [memoryStatus, setMemoryStatus] = useState("No memory action yet.");
+  const [syncReplayBusy, setSyncReplayBusy] = useState(false);
+  const [syncReplayRetryToken, setSyncReplayRetryToken] = useState(0);
+  const [syncReplayDelayMs, setSyncReplayDelayMs] = useState(2000);
 
   useEffect(() => {
     saveToggleState(toggles);
@@ -142,6 +152,232 @@ export default function App() {
       active = false;
     };
   }, []);
+
+  async function replaySyncItem(item: SyncQueueItem): Promise<boolean> {
+    const payload = item.payload as Record<string, unknown>;
+
+    if (item.type === "chat") {
+      const text = typeof payload.text === "string" ? payload.text.trim() : "";
+      if (!text) {
+        return false;
+      }
+      const replayTab =
+        typeof payload.tab === "string" && TAB_ORDER.includes(payload.tab as MindiTabId)
+          ? (payload.tab as MindiTabId)
+          : undefined;
+      await sendAssistantRequest({
+        text,
+        mode: "chat",
+        tab: replayTab,
+      });
+      return true;
+    }
+
+    if (item.type === "note") {
+      const title = typeof payload.title === "string" ? payload.title.trim() : "";
+      const content = typeof payload.content === "string" ? payload.content.trim() : "";
+      if (!title || !content) {
+        return false;
+      }
+      await createMemoryNote({ title, content, tags: [] });
+      return true;
+    }
+
+    if (item.type === "ocr") {
+      const path = typeof payload.path === "string" ? payload.path.trim() : "";
+      if (!path) {
+        return false;
+      }
+      await importOcrDocument(path);
+      return true;
+    }
+
+    if (item.type === "action") {
+      const action = typeof payload.action === "string" ? payload.action : "";
+      if (action === "create_task") {
+        const title = typeof payload.title === "string" ? payload.title.trim() : "";
+        if (!title) {
+          return false;
+        }
+        await createTask({
+          title,
+          dueAt: typeof payload.dueAt === "string" ? payload.dueAt : undefined,
+          recurrence:
+            payload.recurrence === "daily" || payload.recurrence === "weekly"
+              ? payload.recurrence
+              : undefined,
+        });
+        return true;
+      }
+      if (action === "update_task_status") {
+        const taskId = typeof payload.taskId === "string" ? payload.taskId : "";
+        const status = payload.status;
+        if (
+          !taskId ||
+          (status !== "todo" && status !== "in_progress" && status !== "done")
+        ) {
+          return false;
+        }
+        await updateTaskStatus(taskId, { status });
+        return true;
+      }
+      if (action === "update_task") {
+        const taskId = typeof payload.taskId === "string" ? payload.taskId : "";
+        if (!taskId) {
+          return false;
+        }
+        const recurrence =
+          payload.recurrence === "daily" || payload.recurrence === "weekly"
+            ? payload.recurrence
+            : payload.recurrence === null
+              ? null
+              : undefined;
+        const status =
+          payload.status === "todo" || payload.status === "in_progress" || payload.status === "done"
+            ? payload.status
+            : undefined;
+        await updateTask(taskId, {
+          title: typeof payload.title === "string" ? payload.title : undefined,
+          dueAt:
+            typeof payload.dueAt === "string"
+              ? payload.dueAt
+              : payload.dueAt === null
+                ? null
+                : undefined,
+          recurrence,
+          status,
+        });
+        return true;
+      }
+      if (action === "delete_task") {
+        const taskId = typeof payload.taskId === "string" ? payload.taskId : "";
+        if (!taskId) {
+          return false;
+        }
+        await deleteTask(taskId);
+        return true;
+      }
+      if (action === "add_permission") {
+        const scope = payload.scope;
+        const subject = typeof payload.subject === "string" ? payload.subject : "";
+        if (
+          !subject ||
+          (scope !== "folder" && scope !== "app" && scope !== "domain" && scope !== "action")
+        ) {
+          return false;
+        }
+        await addPermissionGrant({
+          scope,
+          subject,
+          decision: "allow",
+        });
+        return true;
+      }
+      if (action === "file_organize") {
+        const mode = payload.mode;
+        const sourceDir = typeof payload.sourceDir === "string" ? payload.sourceDir : "";
+        const targetDir = typeof payload.targetDir === "string" ? payload.targetDir : "";
+        if (!sourceDir || !targetDir || (mode !== "preview" && mode !== "apply")) {
+          return false;
+        }
+        await fileOrganize({ sourceDir, targetDir, mode });
+        return true;
+      }
+      if (action === "app_control") {
+        const command = payload.command;
+        const appId = typeof payload.appId === "string" ? payload.appId : "";
+        if (!appId || (command !== "open" && command !== "focus" && command !== "close")) {
+          return false;
+        }
+        await appControlAction({ action: command, appId, confirm: command === "close" });
+        return true;
+      }
+      if (action === "document_import") {
+        const path = typeof payload.path === "string" ? payload.path.trim() : "";
+        if (!path) {
+          return false;
+        }
+        await importDocument(path);
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  useEffect(() => {
+    if (!networkOnline || syncReplayBusy || syncDepth === 0) {
+      return;
+    }
+    let active = true;
+    let retryTimer: number | null = null;
+    setSyncReplayBusy(true);
+
+    async function replayQueue(): Promise<void> {
+      const queue = loadSyncQueue();
+      if (queue.length === 0) {
+        if (active) {
+          setSyncDepth(0);
+          setSyncReplayBusy(false);
+        }
+        return;
+      }
+
+      const remaining: SyncQueueItem[] = [];
+      let replayedAny = false;
+      for (let index = 0; index < queue.length; index += 1) {
+        const item = queue[index];
+        try {
+          const ok = await replaySyncItem(item);
+          if (ok) {
+            replayedAny = true;
+          } else {
+            remaining.push({ ...item, status: "failed" });
+          }
+        } catch {
+          remaining.push({ ...item, status: "failed" });
+          if (!navigator.onLine) {
+            remaining.push(...queue.slice(index + 1));
+            break;
+          }
+        }
+      }
+
+      if (!active) {
+        return;
+      }
+      saveSyncQueue(remaining);
+      setSyncDepth(remaining.length);
+      setSyncReplayBusy(false);
+      if (remaining.length > 0) {
+        setSyncReplayDelayMs((current) => Math.min(current * 2, 30000));
+        retryTimer = window.setTimeout(() => {
+          setSyncReplayRetryToken((value) => value + 1);
+        }, syncReplayDelayMs);
+      } else {
+        setSyncReplayDelayMs(2000);
+      }
+
+      if (replayedAny) {
+        try {
+          const hub = await fetchHubSnapshot();
+          if (active) {
+            setSnapshot(hub);
+          }
+        } catch {
+          // No-op, queue already retained for failed items.
+        }
+      }
+    }
+
+    void replayQueue();
+    return () => {
+      active = false;
+      if (retryTimer !== null) {
+        window.clearTimeout(retryTimer);
+      }
+    };
+  }, [networkOnline, syncDepth, syncReplayRetryToken]);
 
   const topStatus = useMemo(() => {
     if (!networkOnline) {

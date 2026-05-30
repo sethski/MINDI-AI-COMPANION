@@ -11,6 +11,7 @@ Windows-first local assistant. Current repo layout:
 
 - Notch-style desktop shell in `apps/desktop` with PRD tab layout.
 - Local-first quick toggles and offline sync queue persistence.
+- Hybrid sync worker in desktop app replays queued offline actions with retry/backoff.
 - Service worker cache for offline shell boot.
 - FastAPI local agent in `services/agent` for:
   - health checks
