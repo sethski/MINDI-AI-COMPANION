@@ -1844,6 +1844,47 @@ def test_assistant_response_includes_runtime_metadata() -> None:
     assert "fallbackReason" in body
 
 
+def test_assistant_response_runtime_success_path() -> None:
+    with patch.object(
+        store.ai_runtime,
+        "generate_reply",
+        return_value={
+            "accepted": True,
+            "reply": "runtime response",
+            "provider": "llama.cpp",
+            "model": "Qwen/Qwen2.5-7B-Instruct",
+            "latencyMs": 42,
+        },
+    ):
+        response = client.post("/assistant/respond", json={"text": "summarize my notes"})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["degraded"] is False
+    assert body["fallbackReason"] is None
+    assert body["provider"] == "llama.cpp"
+    assert body["model"] == "Qwen/Qwen2.5-7B-Instruct"
+
+
+def test_assistant_response_runtime_failure_falls_back() -> None:
+    with patch.object(
+        store.ai_runtime,
+        "generate_reply",
+        return_value={
+            "accepted": False,
+            "reason": "llama_cpp_timeout",
+            "provider": "llama.cpp",
+            "model": "Qwen/Qwen2.5-7B-Instruct",
+        },
+    ):
+        response = client.post("/assistant/respond", json={"text": "summarize my notes"})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["degraded"] is True
+    assert body["fallbackReason"] == "llama_cpp_timeout"
+    assert body["provider"] == "llama.cpp"
+    assert body["model"] == "Qwen/Qwen2.5-7B-Instruct"
+
+
 def test_ai_runtime_config_update_roundtrip() -> None:
     response = client.post(
         "/ops/ai/config",
@@ -1851,12 +1892,16 @@ def test_ai_runtime_config_update_roundtrip() -> None:
             "llmModelPath": "C:/models/qwen2.5-7b-instruct.gguf",
             "asrModelPath": "C:/models/qwen3-asr-1.7b",
             "ocrModelPath": "C:/models/glm-ocr",
+            "llmContextSize": 8192,
+            "llmMaxTokens": 384,
         },
     )
     assert response.status_code == 200
     body = response.json()
     assert body["accepted"] is True
     assert body["config"]["llmModelPath"] == "C:/models/qwen2.5-7b-instruct.gguf"
+    assert body["config"]["llmContextSize"] == 8192
+    assert body["config"]["llmMaxTokens"] == 384
 
 
 def test_dataset_prepare_missing_path() -> None:
