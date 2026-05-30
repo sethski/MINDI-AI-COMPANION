@@ -1,3 +1,5 @@
+import base64
+import binascii
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -653,21 +655,69 @@ class RuntimeStore:
         return width, height, ui_blocks
 
     def analyze_screen(self, request: PerceptionAnalyzeRequest) -> PerceptionAnalyzeResponse:
-        source = Path(request.path).resolve()
-        if not source.exists() or not source.is_file():
+        source: Path | None = None
+        remove_source_after = False
+
+        image_data_url = (request.imageDataUrl or "").strip()
+        path_value = (request.path or "").strip()
+        if image_data_url:
+            if not image_data_url.startswith("data:image/") or ";base64," not in image_data_url:
+                return PerceptionAnalyzeResponse(
+                    accepted=False,
+                    reason="invalid_image_data_url",
+                )
+            header, encoded = image_data_url.split(",", 1)
+            mime_part = header[5:].split(";", 1)[0].lower()
+            suffix = {
+                "image/png": ".png",
+                "image/jpeg": ".jpg",
+                "image/webp": ".webp",
+                "image/bmp": ".bmp",
+                "image/tiff": ".tiff",
+            }.get(mime_part)
+            if suffix is None:
+                return PerceptionAnalyzeResponse(
+                    accepted=False,
+                    reason="unsupported_file_type",
+                )
+            try:
+                image_bytes = base64.b64decode(encoded, validate=True)
+            except (ValueError, binascii.Error):
+                return PerceptionAnalyzeResponse(
+                    accepted=False,
+                    reason="invalid_image_data_url",
+                )
+            if not image_bytes:
+                return PerceptionAnalyzeResponse(
+                    accepted=False,
+                    reason="invalid_image_data_url",
+                )
+            captures_dir = Path("data/runtime/perception").resolve()
+            captures_dir.mkdir(parents=True, exist_ok=True)
+            source = captures_dir / f"capture-{uuid4()}{suffix}"
+            source.write_bytes(image_bytes)
+            remove_source_after = True
+        elif path_value:
+            source = Path(path_value).resolve()
+            if not source.exists() or not source.is_file():
+                return PerceptionAnalyzeResponse(
+                    accepted=False,
+                    reason="image_not_found",
+                )
+            if source.suffix.lower() not in OCR_IMAGE_SUFFIXES:
+                return PerceptionAnalyzeResponse(
+                    accepted=False,
+                    reason="unsupported_file_type",
+                )
+            if not self._is_path_allowed(source):
+                return PerceptionAnalyzeResponse(
+                    accepted=False,
+                    reason="folder_not_allowed",
+                )
+        else:
             return PerceptionAnalyzeResponse(
                 accepted=False,
-                reason="image_not_found",
-            )
-        if source.suffix.lower() not in OCR_IMAGE_SUFFIXES:
-            return PerceptionAnalyzeResponse(
-                accepted=False,
-                reason="unsupported_file_type",
-            )
-        if not self._is_path_allowed(source):
-            return PerceptionAnalyzeResponse(
-                accepted=False,
-                reason="folder_not_allowed",
+                reason="path_or_image_required",
             )
 
         try:
@@ -676,6 +726,11 @@ class RuntimeStore:
                 max_blocks=request.maxBlocks,
             )
         except Exception:
+            if remove_source_after:
+                try:
+                    source.unlink(missing_ok=True)
+                except Exception:
+                    pass
             return PerceptionAnalyzeResponse(
                 accepted=False,
                 reason="image_parse_failed",
@@ -706,7 +761,7 @@ class RuntimeStore:
             ),
         )
 
-        return PerceptionAnalyzeResponse(
+        response = PerceptionAnalyzeResponse(
             accepted=True,
             reason=reason,
             path=str(source),
@@ -718,6 +773,12 @@ class RuntimeStore:
             textLength=len(text or ""),
             blocks=blocks,
         )
+        if remove_source_after:
+            try:
+                source.unlink(missing_ok=True)
+            except Exception:
+                pass
+        return response
 
     def _watched_paths(self) -> list[Path]:
         defaults = [Path("data/inbox"), Path("data/notes"), Path("data/screenshots")]

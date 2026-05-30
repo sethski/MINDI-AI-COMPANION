@@ -217,7 +217,8 @@ class OcrImportResponse(BaseModel):
 
 
 class PerceptionAnalyzeRequest(BaseModel):
-    path: str
+    path: str | None = None
+    imageDataUrl: str | None = None
     includeOcr: bool = True
     maxBlocks: int = Field(default=25, ge=1, le=200)
 
