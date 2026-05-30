@@ -200,5 +200,14 @@ class OcrImportResponse(BaseModel):
     document: MemoryDocument | None = None
 
 
+class AutoIndexStatus(BaseModel):
+    running: bool
+    watchedPaths: list[str]
+    lastScanAt: str | None = None
+    indexedTotal: int = 0
+    indexedLastRun: int = 0
+    lastError: str | None = None
+
+
 def now_iso() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")

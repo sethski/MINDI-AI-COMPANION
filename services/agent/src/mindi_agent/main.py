@@ -117,3 +117,13 @@ def memory_document_search(
 @app.post("/memory/ocr/import")
 def memory_ocr_import(payload: OcrImportRequest):
     return store.import_ocr_document(payload)
+
+
+@app.get("/memory/auto-index/status")
+def memory_auto_index_status():
+    return store.auto_index_status()
+
+
+@app.post("/memory/auto-index/scan")
+def memory_auto_index_scan():
+    return store.auto_index_scan_once()

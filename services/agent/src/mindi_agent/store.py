@@ -2,12 +2,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from shutil import move
 import subprocess
+from threading import Event, Thread
 from time import time
 from uuid import uuid4
 
-from .memory_db import MemoryDB
-from .ocr_service import extract_text_for_ocr
+from .memory_db import ALLOWED_DOCUMENT_SUFFIXES, MemoryDB
+from .ocr_service import OCR_IMAGE_SUFFIXES, extract_text_for_ocr
 from .schemas import (
+    AutoIndexStatus,
     AppControlRequest,
     AppControlResponse,
     ActionLogItem,
@@ -68,6 +70,13 @@ class RuntimeStore:
     sync_queue: list[dict] = field(default_factory=list)
     permission_grants: list[PermissionGrant] = field(default_factory=list)
     memory_db: MemoryDB = field(default_factory=MemoryDB)
+    auto_index_stop: Event = field(default_factory=Event)
+    auto_index_thread: Thread | None = field(default=None, init=False)
+    auto_index_last_scan: str | None = None
+    auto_index_last_error: str | None = None
+    auto_index_indexed_total: int = 0
+    auto_index_indexed_last_run: int = 0
+    auto_index_seen_mtime: dict[str, int] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         # Safe default for local file organization sandbox.
@@ -80,6 +89,7 @@ class RuntimeStore:
                 createdAt=now_iso(),
             )
         )
+        self.start_auto_indexer()
         self.permission_grants.append(
             PermissionGrant(
                 id=str(uuid4()),
@@ -428,3 +438,86 @@ class RuntimeStore:
             ),
         )
         return OcrImportResponse(accepted=True, reason=extraction_mode, document=document)
+
+    def _watched_paths(self) -> list[Path]:
+        defaults = [Path("data/inbox"), Path("data/notes"), Path("data/screenshots")]
+        folder_grants = [
+            Path(grant.subject)
+            for grant in self.permission_grants
+            if grant.scope == "folder" and grant.decision == "allow"
+        ]
+        seen: set[str] = set()
+        resolved_dirs: list[Path] = []
+        for candidate in defaults + folder_grants:
+            path = candidate.resolve()
+            if not path.exists() or not path.is_dir():
+                continue
+            key = str(path).lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            resolved_dirs.append(path)
+        return resolved_dirs
+
+    def auto_index_status(self) -> AutoIndexStatus:
+        paths = [str(path) for path in self._watched_paths()]
+        return AutoIndexStatus(
+            running=self.auto_index_thread is not None and self.auto_index_thread.is_alive(),
+            watchedPaths=paths,
+            lastScanAt=self.auto_index_last_scan,
+            indexedTotal=self.auto_index_indexed_total,
+            indexedLastRun=self.auto_index_indexed_last_run,
+            lastError=self.auto_index_last_error,
+        )
+
+    def start_auto_indexer(self) -> None:
+        if self.auto_index_thread is not None and self.auto_index_thread.is_alive():
+            return
+        self.auto_index_stop.clear()
+        self.auto_index_thread = Thread(target=self._auto_index_loop, daemon=True)
+        self.auto_index_thread.start()
+
+    def _auto_index_loop(self) -> None:
+        while not self.auto_index_stop.is_set():
+            self.auto_index_scan_once()
+            self.auto_index_stop.wait(30)
+
+    def auto_index_scan_once(self) -> AutoIndexStatus:
+        indexed_now = 0
+        self.auto_index_last_error = None
+        supported_suffixes = ALLOWED_DOCUMENT_SUFFIXES | OCR_IMAGE_SUFFIXES | {".pdf"}
+
+        for directory in self._watched_paths():
+            for file_path in directory.rglob("*"):
+                if not file_path.is_file():
+                    continue
+                if file_path.suffix.lower() not in supported_suffixes:
+                    continue
+                try:
+                    mtime_ns = file_path.stat().st_mtime_ns
+                except OSError:
+                    continue
+                file_key = str(file_path.resolve())
+                if self.auto_index_seen_mtime.get(file_key) == mtime_ns:
+                    continue
+
+                try:
+                    if file_path.suffix.lower() in ALLOWED_DOCUMENT_SUFFIXES:
+                        self.memory_db.import_document(file_path)
+                    else:
+                        extracted_text, _ = extract_text_for_ocr(file_path)
+                        self.memory_db.import_extracted_document(
+                            source_path=file_path,
+                            text=extracted_text,
+                            title=file_path.name,
+                        )
+                    self.auto_index_seen_mtime[file_key] = mtime_ns
+                    indexed_now += 1
+                except ValueError as exc:
+                    self.auto_index_seen_mtime[file_key] = mtime_ns
+                    self.auto_index_last_error = str(exc)
+
+        self.auto_index_last_scan = now_iso()
+        self.auto_index_indexed_last_run = indexed_now
+        self.auto_index_indexed_total += indexed_now
+        return self.auto_index_status()

@@ -1,11 +1,13 @@
 from pathlib import Path
 
+OCR_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tiff", ".tif"}
+
 
 def extract_text_for_ocr(path: Path) -> tuple[str, str]:
     suffix = path.suffix.lower()
     if suffix == ".pdf":
         return _extract_pdf_text(path), "pdf_text_layer"
-    if suffix in {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tiff", ".tif"}:
+    if suffix in OCR_IMAGE_SUFFIXES:
         return _extract_image_text(path), "image_ocr"
     raise ValueError("ocr_unsupported_file_type")
 
