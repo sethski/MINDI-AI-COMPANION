@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import {
   QUICK_TOGGLES,
   TAB_ORDER,
+  type AutoIndexStatus,
   type AssistantResponse,
   type FileOrganizeResponse,
   type HubSnapshot,
@@ -17,12 +18,14 @@ import {
   createMemoryNote,
   createTask,
   fetchAllowedApps,
+  getAutoIndexStatus,
   fetchHubSnapshot,
   fileOrganize,
   importOcrDocument,
   importDocument,
   listPermissionGrants,
   listMemoryNotes,
+  scanAutoIndexNow,
   searchDocuments,
   searchMemory,
   sendAssistantRequest,
@@ -74,6 +77,7 @@ export default function App() {
   const [documentImportPath, setDocumentImportPath] = useState("data/inbox");
   const [documentChunks, setDocumentChunks] = useState<MemoryDocumentChunk[]>([]);
   const [ocrImportPath, setOcrImportPath] = useState("data/inbox");
+  const [autoIndexStatus, setAutoIndexStatus] = useState<AutoIndexStatus | null>(null);
   const [memoryStatus, setMemoryStatus] = useState("No memory action yet.");
 
   useEffect(() => {
@@ -98,8 +102,9 @@ export default function App() {
       listPermissionGrants(),
       fetchAllowedApps(),
       listMemoryNotes(20),
+      getAutoIndexStatus(),
     ])
-      .then(([hub, grantList, appAllowlist, notes]) => {
+      .then(([hub, grantList, appAllowlist, notes, indexStatus]) => {
         if (!active) {
           return;
         }
@@ -107,6 +112,7 @@ export default function App() {
         setPermissions(grantList);
         setAllowedApps(appAllowlist.apps);
         setMemoryNotes(notes);
+        setAutoIndexStatus(indexStatus);
       })
       .catch(() => {
         if (active) {
@@ -358,6 +364,16 @@ export default function App() {
     }
   }
 
+  async function runAutoIndexScanNow() {
+    try {
+      const status = await scanAutoIndexNow();
+      setAutoIndexStatus(status);
+      setMemoryStatus(`Auto-index run complete. Indexed ${status.indexedLastRun} files.`);
+    } catch {
+      setMemoryStatus("Auto-index scan failed.");
+    }
+  }
+
   return (
     <div className="frame">
       <header className="topbar">
@@ -453,7 +469,16 @@ export default function App() {
               <button type="button" onClick={() => void runDocumentSearch()}>
                 Search Documents
               </button>
+              <button type="button" onClick={() => void runAutoIndexScanNow()}>
+                Run Auto-Index Scan
+              </button>
             </div>
+            <p className="assistant-reply">
+              auto-index:{" "}
+              {autoIndexStatus
+                ? `running=${String(autoIndexStatus.running)} indexedTotal=${autoIndexStatus.indexedTotal}`
+                : "status unavailable"}
+            </p>
             <ul>
               {documentChunks.slice(0, 6).map((chunk) => (
                 <li key={chunk.id}>
