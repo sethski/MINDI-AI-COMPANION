@@ -1975,6 +1975,8 @@ def test_ai_runtime_status_endpoint_shape() -> None:
     assert "llm" in body["features"]
     assert "asr" in body["features"]
     assert "ocr" in body["features"]
+    assert "lastFailureReason" in body["features"]["llm"]
+    assert "lastLatencyMs" in body["features"]["llm"]
 
 
 def test_asr_transcribe_rejects_invalid_source() -> None:
