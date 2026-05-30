@@ -34,6 +34,7 @@ import {
   getSchedulerNextRun,
   parseTaskTime,
   runSchedulerScanNow,
+  exportCalendar,
 } from "./lib/agent-api";
 import { enqueueSyncItem, loadSyncQueue, loadToggleState, saveToggleState } from "./lib/local-state";
 
@@ -452,6 +453,52 @@ export default function App() {
     }
   }
 
+  async function runCalendarExport() {
+    try {
+      const result = await exportCalendar({
+        fileName: "mindi-tasks.ics",
+        includeCompleted: false,
+      });
+      if (result.accepted) {
+        setAssistant({
+          reply: `Calendar exported: ${result.filePath} (${result.eventCount} events).`,
+          decision: {
+            allowed: true,
+            tier: "reversible",
+            reason: "calendar_exported",
+            requiresUnlock: false,
+          },
+          suggestedActions: ["Open exported file", "Share calendar"],
+          status: "ready",
+        });
+      } else {
+        setAssistant({
+          reply: `Calendar export failed: ${result.reason}`,
+          decision: {
+            allowed: false,
+            tier: "read_only",
+            reason: "calendar_export_failed",
+            requiresUnlock: false,
+          },
+          suggestedActions: ["Retry export"],
+          status: "blocked",
+        });
+      }
+    } catch {
+      setAssistant({
+        reply: "Calendar export unavailable while offline.",
+        decision: {
+          allowed: false,
+          tier: "read_only",
+          reason: "calendar_export_unavailable",
+          requiresUnlock: false,
+        },
+        suggestedActions: ["Run local agent", "Retry export"],
+        status: "blocked",
+      });
+    }
+  }
+
   return (
     <div className="frame">
       <header className="topbar">
@@ -739,6 +786,9 @@ export default function App() {
             </p>
             <button type="button" onClick={() => void runTaskSchedulerScanNow()}>
               Run Scheduler Scan
+            </button>
+            <button type="button" onClick={() => void runCalendarExport()}>
+              Export Calendar (.ics)
             </button>
             <div className="toggles">
               {toggles.map((toggle) => (
