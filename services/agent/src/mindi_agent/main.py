@@ -127,3 +127,13 @@ def memory_auto_index_status():
 @app.post("/memory/auto-index/scan")
 def memory_auto_index_scan():
     return store.auto_index_scan_once()
+
+
+@app.get("/ops/scheduler/status")
+def ops_scheduler_status():
+    return store.scheduler_status()
+
+
+@app.post("/ops/scheduler/scan")
+def ops_scheduler_scan():
+    return store.scheduler_scan_once()

@@ -209,5 +209,14 @@ class AutoIndexStatus(BaseModel):
     lastError: str | None = None
 
 
+class SchedulerStatus(BaseModel):
+    running: bool
+    lastScanAt: str | None = None
+    alertsTotal: int = 0
+    alertsLastRun: int = 0
+    trackedTasks: int = 0
+    lastError: str | None = None
+
+
 def now_iso() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")

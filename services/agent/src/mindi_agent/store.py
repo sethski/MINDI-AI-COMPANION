@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from shutil import move
 import subprocess
@@ -10,6 +11,7 @@ from .memory_db import ALLOWED_DOCUMENT_SUFFIXES, MemoryDB
 from .ocr_service import OCR_IMAGE_SUFFIXES, extract_text_for_ocr
 from .schemas import (
     AutoIndexStatus,
+    SchedulerStatus,
     AppControlRequest,
     AppControlResponse,
     ActionLogItem,
@@ -77,6 +79,13 @@ class RuntimeStore:
     auto_index_indexed_total: int = 0
     auto_index_indexed_last_run: int = 0
     auto_index_seen_mtime: dict[str, int] = field(default_factory=dict)
+    scheduler_stop: Event = field(default_factory=Event)
+    scheduler_thread: Thread | None = field(default=None, init=False)
+    scheduler_last_scan: str | None = None
+    scheduler_last_error: str | None = None
+    scheduler_alerts_total: int = 0
+    scheduler_alerts_last_run: int = 0
+    scheduler_alerted_due: dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         # Safe default for local file organization sandbox.
@@ -90,6 +99,7 @@ class RuntimeStore:
             )
         )
         self.start_auto_indexer()
+        self.start_scheduler()
         self.permission_grants.append(
             PermissionGrant(
                 id=str(uuid4()),
@@ -172,6 +182,8 @@ class RuntimeStore:
             source="manual",
         )
         self.tasks.insert(0, task)
+        if task.id in self.scheduler_alerted_due:
+            self.scheduler_alerted_due.pop(task.id, None)
         return task
 
     def enqueue_sync(self, request: SyncQueueRequest) -> dict:
@@ -521,3 +533,82 @@ class RuntimeStore:
         self.auto_index_indexed_last_run = indexed_now
         self.auto_index_indexed_total += indexed_now
         return self.auto_index_status()
+
+    def scheduler_status(self) -> SchedulerStatus:
+        return SchedulerStatus(
+            running=self.scheduler_thread is not None and self.scheduler_thread.is_alive(),
+            lastScanAt=self.scheduler_last_scan,
+            alertsTotal=self.scheduler_alerts_total,
+            alertsLastRun=self.scheduler_alerts_last_run,
+            trackedTasks=len(self.tasks),
+            lastError=self.scheduler_last_error,
+        )
+
+    def start_scheduler(self) -> None:
+        if self.scheduler_thread is not None and self.scheduler_thread.is_alive():
+            return
+        self.scheduler_stop.clear()
+        self.scheduler_thread = Thread(target=self._scheduler_loop, daemon=True)
+        self.scheduler_thread.start()
+
+    def _scheduler_loop(self) -> None:
+        while not self.scheduler_stop.is_set():
+            self.scheduler_scan_once()
+            self.scheduler_stop.wait(20)
+
+    @staticmethod
+    def _parse_due_at(value: str | None) -> datetime | None:
+        if not value:
+            return None
+        raw = value.strip()
+        if not raw:
+            return None
+        if raw.endswith("Z"):
+            raw = raw[:-1] + "+00:00"
+        try:
+            parsed = datetime.fromisoformat(raw)
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+
+    def scheduler_scan_once(self) -> SchedulerStatus:
+        now_utc = datetime.now(timezone.utc)
+        created_alerts = 0
+        self.scheduler_last_error = None
+
+        for task in self.tasks:
+            if task.status == "done":
+                continue
+            due = self._parse_due_at(task.dueAt)
+            if due is None:
+                continue
+
+            marker = f"{task.id}:{task.dueAt}"
+            if due <= now_utc and self.scheduler_alerted_due.get(task.id) != marker:
+                overdue_seconds = (now_utc - due).total_seconds()
+                severity = "critical" if overdue_seconds >= 3600 else "warning"
+                detail = (
+                    f"Task '{task.title}' reached due time ({task.dueAt})."
+                    if overdue_seconds < 60
+                    else f"Task '{task.title}' is overdue ({task.dueAt})."
+                )
+                self.alerts.insert(
+                    0,
+                    AlertItem(
+                        id=str(uuid4()),
+                        severity=severity,
+                        title=f"Task Due: {task.title}",
+                        detail=detail,
+                        createdAt=now_iso(),
+                    ),
+                )
+                self.scheduler_alerted_due[task.id] = marker
+                created_alerts += 1
+
+        self.alerts = self.alerts[:100]
+        self.scheduler_last_scan = now_iso()
+        self.scheduler_alerts_last_run = created_alerts
+        self.scheduler_alerts_total += created_alerts
+        return self.scheduler_status()
