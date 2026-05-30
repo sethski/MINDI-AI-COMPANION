@@ -20,6 +20,14 @@ Windows-first local assistant. Current repo layout:
   - local sync queue intake
 - Shared TypeScript contracts in `packages/shared`.
 
+## Current Implementation (Phase 2 Control Slice)
+
+- Control APIs for allow/deny permission grants.
+- Safe file organize pipeline with `preview` and `apply` modes.
+- Allowlist enforcement before file operations.
+- Audit log entries for file organize runs.
+- Control tab UI for folder allowlist management and file-organize actions.
+
 ## Run Desktop
 
 ```bash
