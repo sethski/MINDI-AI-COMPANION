@@ -150,7 +150,8 @@ def test_memory_note_create_and_search() -> None:
 
 def test_document_import_and_search(tmp_path: Path) -> None:
     doc = tmp_path / "knowledge.md"
-    doc.write_text("MINDI local memory retrieval and chunk index", encoding="utf-8")
+    marker = "doc-search-marker-6129"
+    doc.write_text(f"MINDI local memory retrieval {marker} and chunk index", encoding="utf-8")
 
     client.post(
         "/control/permissions",
@@ -163,7 +164,7 @@ def test_document_import_and_search(tmp_path: Path) -> None:
     assert imported_body["accepted"] is True
     assert imported_body["document"]["chunkCount"] >= 1
 
-    searched = client.get("/memory/documents/search?query=chunk")
+    searched = client.get(f"/memory/documents/search?query={marker}")
     assert searched.status_code == 200
     items = searched.json()["items"]
     assert any(item["sourcePath"] == str(doc.resolve()) for item in items)
@@ -711,6 +712,48 @@ def test_calendar_export_writes_valarm_when_reminder_present(tmp_path: Path) -> 
     assert "TRIGGER:-PT45M" in text
 
 
+def test_perception_permissions_status_defaults_unset() -> None:
+    response = client.get("/perception/permissions")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["screenSubject"] == "perception.screen.capture"
+    assert body["cameraSubject"] == "perception.camera.capture"
+    assert body["screenDecision"] in {"allow", "deny", "unset"}
+    assert body["cameraDecision"] in {"allow", "deny", "unset"}
+
+
+def test_perception_screen_analyze_blocked_without_permission_and_audited() -> None:
+    image = Image.new("RGB", (200, 120), color="white")
+    draw = ImageDraw.Draw(image)
+    draw.rectangle([12, 12, 140, 36], fill="black")
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+    data_url = f"data:image/png;base64,{encoded}"
+
+    # Force an explicit deny to make behavior deterministic even if prior tests granted allow.
+    client.post(
+        "/control/permissions",
+        json={"scope": "action", "subject": "perception.screen.capture", "decision": "deny"},
+    )
+
+    blocked = client.post(
+        "/perception/screen/analyze",
+        json={"imageDataUrl": data_url, "includeOcr": False},
+    )
+    assert blocked.status_code == 200
+    body = blocked.json()
+    assert body["accepted"] is False
+    assert body["reason"] == "screen_permission_denied"
+
+    logs = client.get("/audit/logs")
+    assert logs.status_code == 200
+    first = logs.json()[0]
+    assert first["intent"] == "perception_screen_analyze"
+    assert first["result"] == "blocked"
+    assert first["reason"] == "screen_permission_denied"
+
+
 def test_perception_screen_analyze_success(tmp_path: Path) -> None:
     image_path = tmp_path / "screen.png"
     image = Image.new("RGB", (320, 180), color="white")
@@ -722,6 +765,10 @@ def test_perception_screen_analyze_success(tmp_path: Path) -> None:
     client.post(
         "/control/permissions",
         json={"scope": "folder", "subject": str(tmp_path), "decision": "allow"},
+    )
+    client.post(
+        "/control/permissions",
+        json={"scope": "action", "subject": "perception.screen.capture", "decision": "allow"},
     )
 
     with patch("mindi_agent.store.extract_text_for_ocr") as mock_ocr:
@@ -753,6 +800,10 @@ def test_perception_screen_analyze_allows_blocks_when_ocr_fails(tmp_path: Path) 
         "/control/permissions",
         json={"scope": "folder", "subject": str(tmp_path), "decision": "allow"},
     )
+    client.post(
+        "/control/permissions",
+        json={"scope": "action", "subject": "perception.screen.capture", "decision": "allow"},
+    )
 
     with patch("mindi_agent.store.extract_text_for_ocr") as mock_ocr:
         mock_ocr.side_effect = ValueError("tesseract_not_installed")
@@ -777,6 +828,10 @@ def test_perception_screen_analyze_rejects_unsupported_type(tmp_path: Path) -> N
         "/control/permissions",
         json={"scope": "folder", "subject": str(tmp_path), "decision": "allow"},
     )
+    client.post(
+        "/control/permissions",
+        json={"scope": "action", "subject": "perception.screen.capture", "decision": "allow"},
+    )
 
     response = client.post(
         "/perception/screen/analyze",
@@ -796,6 +851,11 @@ def test_perception_screen_analyze_inline_data_url() -> None:
     image.save(buffer, format="PNG")
     encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
     data_url = f"data:image/png;base64,{encoded}"
+
+    client.post(
+        "/control/permissions",
+        json={"scope": "action", "subject": "perception.screen.capture", "decision": "allow"},
+    )
 
     with patch("mindi_agent.store.extract_text_for_ocr") as mock_ocr:
         mock_ocr.return_value = ("quick panel", "image_ocr")
@@ -823,6 +883,11 @@ def test_perception_snapshot_memory_bridge_list_and_search() -> None:
     image.save(buffer, format="PNG")
     encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
     data_url = f"data:image/png;base64,{encoded}"
+
+    client.post(
+        "/control/permissions",
+        json={"scope": "action", "subject": "perception.screen.capture", "decision": "allow"},
+    )
 
     with patch("mindi_agent.store.extract_text_for_ocr") as mock_ocr:
         mock_ocr.return_value = (f"screen says {marker}", "image_ocr")
@@ -857,6 +922,11 @@ def test_assistant_uses_latest_perception_snapshot_context() -> None:
     image.save(buffer, format="PNG")
     encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
     data_url = f"data:image/png;base64,{encoded}"
+
+    client.post(
+        "/control/permissions",
+        json={"scope": "action", "subject": "perception.screen.capture", "decision": "allow"},
+    )
 
     with patch("mindi_agent.store.extract_text_for_ocr") as mock_ocr:
         mock_ocr.return_value = (f"latest ui text {marker}", "image_ocr")
