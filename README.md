@@ -67,6 +67,12 @@ pnpm install
 pnpm dev:desktop
 ```
 
+## Run Full Stack
+
+```bash
+pnpm dev:all
+```
+
 ## Run Agent
 
 ```bash
