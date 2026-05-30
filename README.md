@@ -60,6 +60,13 @@ Windows-first local assistant. Current repo layout:
   - task status transitions (`todo` -> `done` -> `todo`)
   - calendar export/import roundtrip with dedupe validation
 
+## Current Implementation (Phase 4 Perception Slice)
+
+- Screen analysis API:
+  - `POST /perception/screen/analyze`
+  - Extracts OCR text (when available) and lightweight UI text-region blocks from screenshots.
+  - Handles OCR failures gracefully by returning detected blocks with an OCR error reason.
+
 ## Run Desktop
 
 ```bash
