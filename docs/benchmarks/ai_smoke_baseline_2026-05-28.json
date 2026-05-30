@@ -1,0 +1,54 @@
+{
+  "capturedAt": "2026-05-27T18:32:04.795049+00:00",
+  "request": {
+    "includeLlm": true,
+    "includeAsr": false,
+    "includeOcr": false,
+    "llmPrompt": "Summarize this system status in one sentence.",
+    "languageMode": "english"
+  },
+  "result": {
+    "accepted": false,
+    "reason": "one_or_more_probes_failed",
+    "startedAt": "2026-05-27T18:32:04.707751Z",
+    "finishedAt": "2026-05-27T18:32:04.792990Z",
+    "probes": {
+      "llm": {
+        "attempted": true,
+        "accepted": false,
+        "reason": "model_path_missing",
+        "provider": "llama.cpp",
+        "model": "Qwen/Qwen2.5-7B-Instruct",
+        "latencyMs": 23,
+        "degraded": true,
+        "fallbackReason": "model_path_missing",
+        "textPreview": null,
+        "segmentCount": null
+      },
+      "asr": {
+        "attempted": false,
+        "accepted": false,
+        "reason": "not_requested",
+        "provider": null,
+        "model": null,
+        "latencyMs": null,
+        "degraded": false,
+        "fallbackReason": null,
+        "textPreview": null,
+        "segmentCount": null
+      },
+      "ocr": {
+        "attempted": false,
+        "accepted": false,
+        "reason": "not_requested",
+        "provider": null,
+        "model": null,
+        "latencyMs": null,
+        "degraded": false,
+        "fallbackReason": null,
+        "textPreview": null,
+        "segmentCount": null
+      }
+    }
+  }
+}
