@@ -8,7 +8,7 @@ import re
 from typing import Any
 
 
-_SUPPORTED_SUFFIXES = {".jsonl", ".json", ".csv", ".txt", ".md"}
+_SUPPORTED_SUFFIXES = {".jsonl", ".json", ".csv", ".txt", ".md", ".parquet"}
 _WORD_PATTERN = re.compile(r"[A-Za-z][A-Za-z'-]{1,31}")
 
 
@@ -34,7 +34,85 @@ def _normalize_text(value: str) -> str:
     return " ".join((value or "").split()).strip()
 
 
-def _iter_text_samples(dataset_path: Path) -> list[str]:
+def _row_matches_filter(
+    row: dict[str, Any],
+    *,
+    languages: list[str] | None = None,
+    quality_buckets: list[str] | None = None,
+) -> bool:
+    normalized_languages = {item.strip().lower() for item in languages or [] if item.strip()}
+    normalized_quality = {item.strip().lower() for item in quality_buckets or [] if item.strip()}
+    if normalized_languages:
+        language_value = str(
+            row.get("language")
+            or row.get("lang")
+            or row.get("locale")
+            or row.get("language_code")
+            or ""
+        ).strip().lower()
+        if language_value and language_value not in normalized_languages:
+            return False
+        if not language_value:
+            return False
+    if normalized_quality:
+        quality_value = str(
+            row.get("quality")
+            or row.get("quality_bucket")
+            or row.get("qualityBucket")
+            or row.get("bucket")
+            or ""
+        ).strip().lower()
+        if quality_value and quality_value not in normalized_quality:
+            return False
+        if not quality_value:
+            return False
+    return True
+
+
+def _extract_row_text(row: dict[str, Any]) -> str:
+    for key in ("text", "content", "sentence", "body", "sample"):
+        value = row.get(key)
+        if value is not None:
+            text = _normalize_text(str(value))
+            if text:
+                return text
+    return _normalize_text(" ".join(str(value) for value in row.values() if value is not None))
+
+
+def _iter_parquet_text_samples(
+    file_path: Path,
+    *,
+    max_samples: int | None = None,
+    languages: list[str] | None = None,
+    quality_buckets: list[str] | None = None,
+) -> list[str]:
+    try:
+        import pyarrow.parquet as parquet
+    except ImportError:
+        return []
+
+    samples: list[str] = []
+    table = parquet.read_table(file_path)
+    for row in table.to_pylist():
+        if not isinstance(row, dict):
+            continue
+        if not _row_matches_filter(row, languages=languages, quality_buckets=quality_buckets):
+            continue
+        text = _extract_row_text(row)
+        if text:
+            samples.append(text)
+        if max_samples is not None and len(samples) >= max_samples:
+            break
+    return samples
+
+
+def _iter_text_samples(
+    dataset_path: Path,
+    *,
+    max_samples: int | None = None,
+    languages: list[str] | None = None,
+    quality_buckets: list[str] | None = None,
+) -> list[str]:
     samples: list[str] = []
     if dataset_path.is_file():
         files = [dataset_path]
@@ -44,10 +122,25 @@ def _iter_text_samples(dataset_path: Path) -> list[str]:
         suffix = file_path.suffix.lower()
         if suffix not in _SUPPORTED_SUFFIXES:
             continue
+        remaining = None if max_samples is None else max_samples - len(samples)
+        if remaining is not None and remaining <= 0:
+            break
+        if suffix == ".parquet":
+            samples.extend(
+                _iter_parquet_text_samples(
+                    file_path,
+                    max_samples=remaining,
+                    languages=languages,
+                    quality_buckets=quality_buckets,
+                )
+            )
+            continue
         if suffix in {".txt", ".md"}:
             text = _normalize_text(file_path.read_text(encoding="utf-8", errors="ignore"))
             if text:
                 samples.append(text)
+            if max_samples is not None and len(samples) >= max_samples:
+                break
             continue
         if suffix == ".csv":
             with file_path.open("r", encoding="utf-8", errors="ignore", newline="") as handle:
@@ -56,6 +149,8 @@ def _iter_text_samples(dataset_path: Path) -> list[str]:
                     text = _normalize_text(" ".join(row))
                     if text:
                         samples.append(text)
+                    if max_samples is not None and len(samples) >= max_samples:
+                        break
             continue
         if suffix == ".jsonl":
             for raw in file_path.read_text(encoding="utf-8", errors="ignore").splitlines():
@@ -74,6 +169,8 @@ def _iter_text_samples(dataset_path: Path) -> list[str]:
                     text = _normalize_text(item)
                     if text:
                         samples.append(text)
+                if max_samples is not None and len(samples) >= max_samples:
+                    break
             continue
         if suffix == ".json":
             try:
@@ -90,10 +187,14 @@ def _iter_text_samples(dataset_path: Path) -> list[str]:
                         text = _normalize_text(entry)
                         if text:
                             samples.append(text)
+                    if max_samples is not None and len(samples) >= max_samples:
+                        break
             elif isinstance(item, dict):
                 text = _normalize_text(str(item.get("text") or item.get("content") or ""))
                 if text:
                     samples.append(text)
+            if max_samples is not None and len(samples) >= max_samples:
+                break
     return samples
 
 
@@ -235,7 +336,14 @@ def _validate_artifacts(
     return issues
 
 
-def prepare_ph_dataset_artifacts(dataset_path: Path, output_dir: Path) -> DatasetPrepResult:
+def prepare_ph_dataset_artifacts(
+    dataset_path: Path,
+    output_dir: Path,
+    *,
+    max_samples: int | None = None,
+    languages: list[str] | None = None,
+    quality_buckets: list[str] | None = None,
+) -> DatasetPrepResult:
     resolved_dataset = dataset_path.resolve()
     if not resolved_dataset.exists():
         return DatasetPrepResult(
@@ -249,7 +357,12 @@ def prepare_ph_dataset_artifacts(dataset_path: Path, output_dir: Path) -> Datase
             validationPassed=False,
             validationIssues=["dataset_not_found"],
         )
-    raw_samples = _iter_text_samples(resolved_dataset)
+    raw_samples = _iter_text_samples(
+        resolved_dataset,
+        max_samples=max_samples,
+        languages=languages,
+        quality_buckets=quality_buckets,
+    )
     if not raw_samples:
         return DatasetPrepResult(
             accepted=False,

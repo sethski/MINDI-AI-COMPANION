@@ -3,7 +3,7 @@ import { emit } from "@tauri-apps/api/event";
 import { isTauriRuntime } from "./tauri-window";
 
 const INGEST_URL = "http://127.0.0.1:7917/ingest/3c5996e2-44eb-48a9-8416-3cd194097893";
-const SESSION_ID = "4cfb89";
+const SESSION_ID = "13bb3e";
 
 export function debugSessionLog(payload: Record<string, unknown>): void {
   const line = JSON.stringify({

@@ -35,6 +35,13 @@ _DEFAULT_TEST_CONFIG = {
 
 
 @pytest.fixture(autouse=True)
+def isolated_agent_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep pytest from writing tasks/permissions to data/runtime/agent_state.json."""
+    state_path = tmp_path / "agent_state.json"
+    monkeypatch.setattr(store, "agent_state_path", state_path)
+
+
+@pytest.fixture(autouse=True)
 def isolated_memory_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Avoid cross-test pollution in the shared data/runtime/memory.db."""
     monkeypatch.setattr(store, "memory_db", MemoryDB(tmp_path / "memory.db"))

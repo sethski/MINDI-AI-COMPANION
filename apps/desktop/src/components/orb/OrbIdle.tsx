@@ -1,12 +1,12 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { motion } from "framer-motion";
-
 interface OrbIdleProps {
   offline: boolean;
   micDisabled: boolean;
   onActivate: () => void;
   onOpenDashboard: () => void;
   onDragStart: () => void;
+  onMenuOpenChange: (open: boolean) => void;
   onQuit: () => void;
 }
 
@@ -29,18 +29,26 @@ function MicGlyph() {
   );
 }
 
-export function OrbIdle({ offline, micDisabled, onActivate, onOpenDashboard, onDragStart, onQuit }: OrbIdleProps) {
+export function OrbIdle({
+  offline,
+  micDisabled,
+  onActivate,
+  onOpenDashboard,
+  onDragStart,
+  onMenuOpenChange,
+  onQuit,
+}: OrbIdleProps) {
   const pointerRef = useRef<{ x: number; y: number } | null>(null);
   const draggedRef = useRef(false);
   const [menuOpen, setMenuOpen] = useState(false);
 
+  useEffect(() => {
+    onMenuOpenChange(menuOpen);
+  }, [menuOpen, onMenuOpenChange]);
+
   return (
     <motion.div
       className={`orb-idle ${offline ? "orb-idle--offline" : ""} ${menuOpen ? "orb-idle--menu-open" : ""}`}
-      role="button"
-      tabIndex={0}
-      aria-label="Open MINDI dashboard"
-      title="Click to open MINDI. Say Hey MINDI or use the mic to talk."
       onPointerDown={(event) => {
         if (event.button !== 0) {
           return;
@@ -57,6 +65,7 @@ export function OrbIdle({ offline, micDisabled, onActivate, onOpenDashboard, onD
         const deltaY = Math.abs(event.clientY - start.y);
         if (deltaX > DRAG_THRESHOLD_PX || deltaY > DRAG_THRESHOLD_PX) {
           draggedRef.current = true;
+          setMenuOpen(false);
           onDragStart();
         }
       }}
@@ -71,31 +80,39 @@ export function OrbIdle({ offline, micDisabled, onActivate, onOpenDashboard, onD
         event.preventDefault();
         setMenuOpen(true);
       }}
-      onClick={(event) => {
-        if ((event.target as HTMLElement).closest(".orb-idle__mic, .orb-idle__menu")) {
-          return;
-        }
-        if (menuOpen) {
-          setMenuOpen(false);
-          return;
-        }
-        if (draggedRef.current) {
-          return;
-        }
-        onOpenDashboard();
-      }}
-      onKeyDown={(event) => {
-        if (event.key === "Enter" || event.key === " ") {
-          event.preventDefault();
-          onOpenDashboard();
-        }
-      }}
       whileTap={{ scale: 0.96 }}
       layout
     >
-      <span className="orb-idle__core" aria-hidden="true" />
+      <button
+        type="button"
+        className="orb-idle__core"
+        aria-label="Open MINDI menu"
+        title="Click to open MINDI menu. Say Hey MINDI or use the mic to talk."
+        onClick={() => {
+          if (menuOpen) {
+            setMenuOpen(false);
+            return;
+          }
+          if (draggedRef.current) {
+            return;
+          }
+          setMenuOpen(true);
+        }}
+      />
       {menuOpen ? (
         <div className="orb-idle__menu" role="menu">
+          <button
+            type="button"
+            role="menuitem"
+            className="orb-idle__menu-item"
+            onClick={(event) => {
+              event.stopPropagation();
+              setMenuOpen(false);
+              onOpenDashboard();
+            }}
+          >
+            Open MINDI
+          </button>
           <button
             type="button"
             role="menuitem"

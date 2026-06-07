@@ -8,6 +8,7 @@ export type OrbPhase =
   | "error";
 
 export const ORB_IDLE_SIZE = { width: 72, height: 72 } as const;
+export const ORB_MENU_SIZE = { width: 180, height: 156 } as const;
 export const ORB_ACTIVE_SIZE = { width: 320, height: 120 } as const;
 
 export const ORB_GREETINGS = [

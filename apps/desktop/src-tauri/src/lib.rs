@@ -124,7 +124,7 @@ async fn show_main_window(app: AppHandle) -> Result<(), String> {
 fn write_debug_session_log(app: &AppHandle, line: &str) {
     use std::io::Write;
     let workspace_path =
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../debug-4cfb89.log");
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../debug-13bb3e.log");
     let mut paths = vec![workspace_path];
     if let Ok(app_data) = app.path().app_data_dir() {
         paths.push(app_data.join("debug-e8d849.log"));

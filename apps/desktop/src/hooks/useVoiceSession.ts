@@ -1,6 +1,5 @@
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 import { sendAssistantRequest, transcribeMicBlob } from "../lib/agent-api";
-import { debugSessionLog } from "../lib/debug-session-log";
 import { enqueueSyncItem } from "../lib/local-state";
 import { isTauriRuntime, orbSaveAudioTemp } from "../lib/tauri-window";
 import { isMicEnabled } from "../lib/orb-agent";
@@ -237,15 +236,6 @@ export function useVoiceSession(options: VoiceSessionOptions = {}) {
         if (silenceStartRef.current === null) {
           silenceStartRef.current = now;
         } else if (now - silenceStartRef.current >= SILENCE_END_MS) {
-          // #region agent log
-          debugSessionLog({
-            runId: "pre-fix",
-            hypothesisId: "D",
-            location: "useVoiceSession.ts:vad",
-            message: "silence after speech triggers utterance complete",
-            data: { level: Math.round(level), transcriptLen: transcriptRef.current.length },
-          });
-          // #endregion
           utteranceCompleteRef.current?.();
           return;
         }
@@ -365,21 +355,6 @@ export function useVoiceSession(options: VoiceSessionOptions = {}) {
         mode: "chat",
         tab: "home",
       });
-      // #region agent log
-      debugSessionLog({
-        runId: "post-fix",
-        hypothesisId: "E",
-        location: "useVoiceSession.ts:askAssistant",
-        message: "assistant respond received",
-        data: {
-          provider: response.provider,
-          model: response.model,
-          degraded: response.degraded,
-          fallbackReason: response.fallbackReason,
-          replyLen: (response.reply ?? "").length,
-        },
-      });
-      // #endregion
       if (response.degraded) {
         return {
           reply:
@@ -403,10 +378,13 @@ export function useVoiceSession(options: VoiceSessionOptions = {}) {
     }
   }, []);
 
-  return {
-    speak,
-    startListening,
-    stopListening,
-    askAssistant,
-  };
+  return useMemo(
+    () => ({
+      speak,
+      startListening,
+      stopListening,
+      askAssistant,
+    }),
+    [speak, startListening, stopListening, askAssistant],
+  );
 }

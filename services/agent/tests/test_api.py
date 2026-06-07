@@ -217,6 +217,79 @@ def test_document_import_and_search(tmp_path: Path) -> None:
     assert any(item["sourcePath"] == str(doc.resolve()) for item in items)
 
 
+def test_document_search_uses_semantic_hybrid_retrieval(tmp_path: Path) -> None:
+    doc = tmp_path / "file-helper.md"
+    doc.write_text(
+        "MINDI organizes folders safely, renames documents, and sorts downloads into clean categories.",
+        encoding="utf-8",
+    )
+
+    client.post(
+        "/control/permissions",
+        json={"scope": "folder", "subject": str(tmp_path), "decision": "allow"},
+    )
+
+    imported = client.post("/memory/documents/import", json={"path": str(doc)})
+    assert imported.status_code == 200
+    assert imported.json()["accepted"] is True
+
+    searched = client.get("/memory/documents/search", params={"query": "arrange my messy files"})
+
+    assert searched.status_code == 200
+    body = searched.json()
+    assert body["retrievalMode"] == "hybrid"
+    assert body["confidence"] > 0
+    assert any(
+        item["sourcePath"] == str(doc.resolve()) and item["retrievalMode"] in {"semantic", "hybrid"}
+        for item in body["items"]
+    )
+
+
+def test_assistant_response_includes_rag_citations(tmp_path: Path) -> None:
+    doc = tmp_path / "assistant-file-help.md"
+    doc.write_text(
+        "MINDI can organize folders, rename files, sort downloads, and keep destructive actions confirmation gated.",
+        encoding="utf-8",
+    )
+
+    client.post(
+        "/control/permissions",
+        json={"scope": "folder", "subject": str(tmp_path), "decision": "allow"},
+    )
+
+    imported = client.post("/memory/documents/import", json={"path": str(doc)})
+    assert imported.status_code == 200
+    assert imported.json()["accepted"] is True
+
+    captured: dict[str, str] = {}
+
+    def fake_generate_reply(*, prompt: str, language_mode: str):
+        captured["prompt"] = prompt
+        return {
+            "accepted": True,
+            "response": "MINDI can organize and sort your files while requiring confirmation for risky actions.",
+            "provider": "local",
+            "model": "test-model",
+        }
+
+    original = store.ai_runtime.generate_reply
+    store.ai_runtime.generate_reply = fake_generate_reply
+    try:
+        response = client.post(
+            "/assistant/respond",
+            json={"text": "How can MINDI arrange my messy files?"},
+        )
+    finally:
+        store.ai_runtime.generate_reply = original
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["citations"]
+    assert body["citations"][0]["sourcePath"] == str(doc.resolve())
+    assert body["rag"]["retrievalMode"] == "hybrid"
+    assert "assistant-file-help.md" in captured["prompt"]
+
+
 def test_document_import_rejects_unsupported_type(tmp_path: Path) -> None:
     doc = tmp_path / "payload.exe"
     doc.write_bytes(b"MZ")
@@ -2299,3 +2372,56 @@ def test_dataset_prepare_success_and_loads_language_pack(tmp_path: Path) -> None
     assert status.status_code == 200
     status_body = status.json()
     assert status_body["config"]["llmLanguagePackPath"] == body["languagePackPath"]
+
+
+def test_dataset_prepare_parquet_uses_filters_and_loads_language_pack(tmp_path: Path, monkeypatch) -> None:
+    from mindi_agent import dataset_pipeline
+
+    dataset_dir = tmp_path / "dataset"
+    dataset_dir.mkdir(parents=True, exist_ok=True)
+    parquet_path = dataset_dir / "train.parquet"
+    parquet_path.write_bytes(b"placeholder")
+    output_dir = tmp_path / "artifacts"
+
+    def fake_parquet_reader(
+        file_path: Path,
+        *,
+        max_samples: int | None = None,
+        languages: list[str] | None = None,
+        quality_buckets: list[str] | None = None,
+    ):
+        assert file_path == parquet_path
+        assert max_samples == 2
+        assert languages == ["fil", "tgl"]
+        assert quality_buckets == ["high"]
+        return [
+            "Kamusta MINDI Taglish helper para sa araw araw.",
+            "Ayusin ang files nang safe at malinaw.",
+        ]
+
+    monkeypatch.setattr(dataset_pipeline, "_iter_parquet_text_samples", fake_parquet_reader)
+
+    client.post(
+        "/control/permissions",
+        json={"scope": "folder", "subject": str(tmp_path), "decision": "allow"},
+    )
+
+    response = client.post(
+        "/ops/intelligence/dataset/prepare",
+        json={
+            "datasetPath": str(dataset_dir),
+            "outputDir": str(output_dir),
+            "maxSamples": 2,
+            "languages": ["fil", "tgl"],
+            "qualityBuckets": ["high"],
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["accepted"] is True
+    assert body["reason"] == "prepared"
+    assert body["validationPassed"] is True
+    assert body["languagePackLoaded"] is True
+    assert body["sampleCount"] == 2
+    assert Path(body["languagePackPath"]).exists() is True

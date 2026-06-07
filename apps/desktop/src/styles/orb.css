@@ -36,6 +36,11 @@ body {
   padding: 4px;
 }
 
+.orb-shell--menu {
+  align-items: start;
+  justify-items: center;
+}
+
 .orb-idle {
   position: relative;
   width: 56px;
@@ -51,12 +56,14 @@ body {
   display: block;
   width: 100%;
   height: 100%;
+  padding: 0;
   border-radius: inherit;
   background: linear-gradient(160deg, rgba(20, 38, 52, 0.96), rgba(10, 18, 26, 0.98));
   border: 1px solid rgba(255, 255, 255, 0.1);
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.08),
     0 10px 28px rgba(0, 0, 0, 0.35);
+  cursor: pointer;
 }
 
 .orb-idle--offline .orb-idle__core {
@@ -69,7 +76,7 @@ body {
   left: 50%;
   transform: translateX(-50%);
   z-index: 2;
-  min-width: 120px;
+  min-width: 144px;
   padding: 4px;
   border-radius: 10px;
   border: 1px solid rgba(255, 255, 255, 0.12);

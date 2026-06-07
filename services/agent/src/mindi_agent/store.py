@@ -19,6 +19,7 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 from PIL import Image
 
+from .agent_state import DEFAULT_AGENT_STATE_PATH, load_agent_state, save_agent_state
 from .ai_runtime_client import LocalAiRuntimeClient
 from .dataset_pipeline import prepare_ph_dataset_artifacts
 from .memory_db import ALLOWED_DOCUMENT_SUFFIXES, MemoryDB
@@ -292,9 +293,20 @@ class RuntimeStore:
     intelligence_adaptation_last_export_path: str | None = None
     ai_runtime: LocalAiRuntimeClient = field(default_factory=LocalAiRuntimeClient)
     orb_listening: bool = False
+    agent_state_path: Path = field(default_factory=lambda: DEFAULT_AGENT_STATE_PATH)
 
     def __post_init__(self) -> None:
-        # Safe default for local file organization sandbox.
+        snapshot = load_agent_state(self.agent_state_path)
+        if snapshot is not None:
+            self.tasks = snapshot.tasks
+            self.permission_grants = snapshot.permission_grants
+        else:
+            self._seed_default_permissions()
+        self.start_auto_indexer()
+        self.start_scheduler()
+
+    def _seed_default_permissions(self) -> None:
+        # Safe defaults for local file organization and app control on first run.
         self.permission_grants.append(
             PermissionGrant(
                 id=str(uuid4()),
@@ -304,8 +316,6 @@ class RuntimeStore:
                 createdAt=now_iso(),
             )
         )
-        self.start_auto_indexer()
-        self.start_scheduler()
         self.permission_grants.append(
             PermissionGrant(
                 id=str(uuid4()),
@@ -315,6 +325,9 @@ class RuntimeStore:
                 createdAt=now_iso(),
             )
         )
+
+    def _persist_durable_state(self) -> None:
+        save_agent_state(self.tasks, self.permission_grants, self.agent_state_path)
 
     def status(self) -> AgentStatus:
         return AgentStatus(
@@ -603,7 +616,13 @@ class RuntimeStore:
 
         output_dir = Path(request.outputDir).resolve() if request.outputDir else Path("data/runtime/intelligence").resolve()
         output_dir.mkdir(parents=True, exist_ok=True)
-        result = prepare_ph_dataset_artifacts(dataset_path=dataset_path, output_dir=output_dir)
+        result = prepare_ph_dataset_artifacts(
+            dataset_path=dataset_path,
+            output_dir=output_dir,
+            max_samples=request.maxSamples,
+            languages=request.languages,
+            quality_buckets=request.qualityBuckets,
+        )
         language_pack_loaded = False
         language_pack_load_reason: str | None = None
         if result.accepted and result.languagePackPath:
@@ -640,6 +659,7 @@ class RuntimeStore:
             datasetPath=result.datasetPath,
             outputDir=result.outputDir,
             rawSamples=result.rawSamples,
+            sampleCount=result.rawSamples,
             trainSamples=result.trainSamples,
             valSamples=result.valSamples,
             languagePackPath=result.languagePackPath,
@@ -703,31 +723,6 @@ class RuntimeStore:
             requiresUnlock=False,
         )
 
-    def _debug_agent_log(
-        self,
-        *,
-        hypothesis_id: str,
-        location: str,
-        message: str,
-        data: dict,
-        run_id: str = "pre-fix",
-    ) -> None:
-        payload = {
-            "sessionId": "4cfb89",
-            "runId": run_id,
-            "hypothesisId": hypothesis_id,
-            "location": location,
-            "message": message,
-            "data": data,
-            "timestamp": int(time() * 1000),
-        }
-        log_path = Path(__file__).resolve().parents[4] / "debug-4cfb89.log"
-        try:
-            with log_path.open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps(payload) + "\n")
-        except OSError:
-            pass
-
     def respond(self, request: AssistantRequest) -> AssistantResponse:
         tuning = self._active_tuning_config()
         decision = self.policy_decision(request, config=tuning)
@@ -747,6 +742,8 @@ class RuntimeStore:
         model = "fallback"
         degraded = False
         fallback_reason: str | None = None
+        citations: list[dict] = []
+        rag_trace = {"retrievalMode": "none", "confidence": 0.0, "fallbackReason": None}
 
         if decision.allowed:
             latest_snapshot = self.memory_db.latest_perception_snapshot()
@@ -767,12 +764,57 @@ class RuntimeStore:
                 provider = "memory_snapshot"
                 model = "latest_perception_context"
             else:
+                rag_items = self.memory_db.search_documents(query=request.text, limit=3)
+                if rag_items:
+                    retrieval_mode = self._document_retrieval_mode(rag_items)
+                    confidence = self._document_retrieval_confidence(rag_items)
+                    rag_trace = {
+                        "retrievalMode": retrieval_mode,
+                        "confidence": confidence,
+                        "fallbackReason": None,
+                    }
+                    citations = [
+                        {
+                            "chunkId": item.id,
+                            "documentId": item.documentId,
+                            "sourcePath": item.sourcePath,
+                            "title": item.title,
+                            "chunkIndex": item.chunkIndex,
+                            "score": item.score,
+                            "textPreview": item.text[:240],
+                        }
+                        for item in rag_items
+                    ]
+                    context_blocks = []
+                    for index, item in enumerate(rag_items, start=1):
+                        context_blocks.append(
+                            "\n".join(
+                                [
+                                    f"Source {index}: {item.title}",
+                                    f"Path: {item.sourcePath}",
+                                    f"Excerpt: {item.text[:900]}",
+                                ]
+                            )
+                        )
+                    llm_prompt = (
+                        "Answer using the local source context when it is relevant. "
+                        "Do not invent citations. If the context is weak, say what is missing.\n\n"
+                        + "\n\n".join(context_blocks)
+                        + f"\n\nUser request: {request.text}"
+                    )
+                else:
+                    llm_prompt = request.text
+                    rag_trace = {
+                        "retrievalMode": "none",
+                        "confidence": 0.0,
+                        "fallbackReason": "no_relevant_local_sources",
+                    }
                 llm_result = self.ai_runtime.generate_reply(
-                    prompt=request.text,
+                    prompt=llm_prompt,
                     language_mode=self.intelligence_language_mode,
                 )
                 if llm_result.get("accepted"):
-                    reply = str(llm_result.get("reply") or "").strip()
+                    reply = str(llm_result.get("reply") or llm_result.get("response") or "").strip()
                     if not reply:
                         reply = "I heard you, but the model returned an empty response."
                     provider = str(llm_result.get("provider") or "llama.cpp")
@@ -788,18 +830,6 @@ class RuntimeStore:
                     model = str(llm_result.get("model") or "fallback")
                     degraded = True
                     fallback_reason = reason
-                self._debug_agent_log(
-                    hypothesis_id="E",
-                    location="store.py:respond",
-                    message="assistant llm path",
-                    data={
-                        "accepted": bool(llm_result.get("accepted")),
-                        "provider": provider,
-                        "model": model,
-                        "degraded": degraded,
-                        "reason": fallback_reason,
-                    },
-                )
             suggestions = ["Create note", "Add task", "Show status"]
             status = "ready"
         else:
@@ -818,6 +848,8 @@ class RuntimeStore:
             model=model,
             degraded=degraded,
             fallbackReason=fallback_reason,
+            citations=citations,
+            rag=rag_trace,
         )
 
     def _style_reply(
@@ -870,6 +902,7 @@ class RuntimeStore:
         self.tasks.insert(0, task)
         if task.id in self.scheduler_alerted_due:
             self.scheduler_alerted_due.pop(task.id, None)
+        self._persist_durable_state()
         return task
 
     def update_task_status(self, task_id: str, request: TaskStatusUpdateRequest) -> TaskItem | None:
@@ -879,6 +912,7 @@ class RuntimeStore:
             task.status = request.status
             if request.status != "done":
                 self.scheduler_alerted_due.pop(task.id, None)
+            self._persist_durable_state()
             return task
         return None
 
@@ -898,6 +932,7 @@ class RuntimeStore:
                 task.status = request.status
                 if request.status != "done":
                     self.scheduler_alerted_due.pop(task.id, None)
+            self._persist_durable_state()
             return task
         return None
 
@@ -907,6 +942,7 @@ class RuntimeStore:
                 continue
             removed = self.tasks.pop(index)
             self.scheduler_alerted_due.pop(task_id, None)
+            self._persist_durable_state()
             return removed
         return None
 
@@ -944,6 +980,7 @@ class RuntimeStore:
                 createdAt=now_iso(),
             ),
         )
+        self._persist_durable_state()
         return grant
 
     @staticmethod
@@ -2636,7 +2673,27 @@ class RuntimeStore:
 
     def search_documents(self, query: str, limit: int = 20) -> DocumentSearchResponse:
         items = self.memory_db.search_documents(query=query, limit=limit)
-        return DocumentSearchResponse(query=query, items=items)
+        return DocumentSearchResponse(
+            query=query,
+            items=items,
+            retrievalMode=self._document_retrieval_mode(items),
+            confidence=self._document_retrieval_confidence(items),
+        )
+
+    @staticmethod
+    def _document_retrieval_mode(items: list[MemoryDocumentChunk]) -> str:
+        if not items:
+            return "none"
+        modes = {item.retrievalMode for item in items}
+        if "hybrid" in modes or "semantic" in modes:
+            return "hybrid"
+        return "keyword"
+
+    @staticmethod
+    def _document_retrieval_confidence(items: list[MemoryDocumentChunk]) -> float:
+        if not items:
+            return 0.0
+        return round(max(0.0, min(1.0, items[0].score / 6.0)), 3)
 
     def import_ocr_document(self, request: OcrImportRequest) -> OcrImportResponse:
         source = Path(request.path).resolve()
@@ -3689,6 +3746,9 @@ class RuntimeStore:
                 ),
             )
 
+        if created_count > 0 or updated_count > 0:
+            self._persist_durable_state()
+
         return CalendarImportResponse(
             accepted=True,
             reason="imported",
@@ -3701,6 +3761,7 @@ class RuntimeStore:
     def scheduler_scan_once(self) -> SchedulerStatus:
         now_utc = datetime.now(timezone.utc)
         created_alerts = 0
+        tasks_mutated = False
         self.scheduler_last_error = None
 
         for task in self.tasks:
@@ -3738,8 +3799,11 @@ class RuntimeStore:
                     )
                     task.nextRunAt = self._format_utc(next_due)
                     task.dueAt = task.nextRunAt
+                    tasks_mutated = True
                 created_alerts += 1
 
+        if tasks_mutated:
+            self._persist_durable_state()
         self.alerts = self.alerts[:100]
         self.scheduler_last_scan = now_iso()
         self.scheduler_alerts_last_run = created_alerts

@@ -32,6 +32,22 @@ class AssistantRequest(BaseModel):
     conversation: list[ChatMessage] | None = None
 
 
+class RagCitation(BaseModel):
+    chunkId: str
+    documentId: str
+    sourcePath: str
+    title: str
+    chunkIndex: int
+    score: float
+    textPreview: str
+
+
+class RagTrace(BaseModel):
+    retrievalMode: Literal["none", "keyword", "semantic", "hybrid"] = "none"
+    confidence: float = 0.0
+    fallbackReason: str | None = None
+
+
 class AssistantResponse(BaseModel):
     reply: str
     decision: PolicyDecision
@@ -41,6 +57,8 @@ class AssistantResponse(BaseModel):
     model: str | None = None
     degraded: bool = False
     fallbackReason: str | None = None
+    citations: list[RagCitation] = Field(default_factory=list)
+    rag: RagTrace = Field(default_factory=RagTrace)
 
 
 class AgentStatus(BaseModel):
@@ -197,6 +215,7 @@ class MemoryDocumentChunk(BaseModel):
     text: str
     chunkIndex: int
     score: float
+    retrievalMode: Literal["keyword", "semantic", "hybrid"] = "keyword"
 
 
 class DocumentImportResponse(BaseModel):
@@ -208,6 +227,8 @@ class DocumentImportResponse(BaseModel):
 class DocumentSearchResponse(BaseModel):
     query: str
     items: list[MemoryDocumentChunk]
+    retrievalMode: Literal["none", "keyword", "semantic", "hybrid"] = "none"
+    confidence: float = 0.0
 
 
 class OcrImportRequest(BaseModel):
@@ -406,6 +427,9 @@ class AiRuntimeSmokeResponse(BaseModel):
 class DatasetPrepareRequest(BaseModel):
     datasetPath: str
     outputDir: str | None = None
+    maxSamples: int | None = Field(default=None, ge=1)
+    languages: list[str] | None = None
+    qualityBuckets: list[str] | None = None
 
 
 class DatasetPrepareResponse(BaseModel):
@@ -414,6 +438,7 @@ class DatasetPrepareResponse(BaseModel):
     datasetPath: str
     outputDir: str
     rawSamples: int
+    sampleCount: int = 0
     trainSamples: int
     valSamples: int
     languagePackPath: str | None = None

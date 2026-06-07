@@ -19,6 +19,9 @@ export default defineConfig({
       url: "http://127.0.0.1:8765/health",
       reuseExistingServer: !process.env.CI,
       timeout: 120_000,
+      env: {
+        MINDI_AI_RUNTIME_URL: "http://127.0.0.1:59999",
+      },
     },
     {
       command: "pnpm --dir apps/desktop dev --host 127.0.0.1 --port 5173",

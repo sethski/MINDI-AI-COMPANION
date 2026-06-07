@@ -12,9 +12,12 @@
     "ops:ai-smoke": "python scripts/ops_ai_smoke.py",
     "ops:restore-ai-config": "python scripts/restore_ai_runtime_config.py",
     "test:agent": "python -m pytest services/agent/tests",
+    "test:agent:integration": "python -m pytest services/agent/tests/test_agent_runtime_integration.py -m integration",
+    "test:ai-runtime": "python -m pytest services/ai_runtime/tests",
+    "verify:release": "powershell -ExecutionPolicy Bypass -File scripts/verify-release.ps1",
     "test:e2e": "playwright test",
     "test:e2e:headed": "playwright test --headed",
-    "ci:check": "pnpm test:agent && pnpm build:desktop && pnpm test:e2e"
+    "ci:check": "pnpm test:agent && pnpm test:ai-runtime && pnpm build:desktop && pnpm test:e2e"
   },
   "devDependencies": {
     "@playwright/test": "^1.60.0",

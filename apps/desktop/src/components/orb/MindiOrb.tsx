@@ -11,11 +11,11 @@ import {
   listenMicToggle,
   setOrbListening,
 } from "../../lib/orb-agent";
-import { debugSessionLog } from "../../lib/debug-session-log";
 import {
   isActivePhase,
   ORB_ACTIVE_SIZE,
   ORB_IDLE_SIZE,
+  ORB_MENU_SIZE,
   OrbPhase,
   pickGreeting,
   prefersReducedMotion,
@@ -41,12 +41,17 @@ export function MindiOrb() {
   const [caption, setCaption] = useState(IDLE_CAPTION);
   const [offline, setOffline] = useState(false);
   const [micEnabled, setMicEnabled] = useState(isMicEnabled);
+  const [idleMenuOpen, setIdleMenuOpen] = useState(false);
   const [audioLevel, setAudioLevel] = useState(0.35);
   const reducedMotion = prefersReducedMotion();
   const phaseRef = useRef<OrbPhase>("idle");
+  const idleMenuOpenRef = useRef(false);
   const listenTimeoutRef = useRef<number | null>(null);
   const sessionLockRef = useRef(false);
   const finishListeningRef = useRef<() => Promise<void>>(async () => undefined);
+  const beginSessionRef = useRef<() => Promise<void>>(async () => undefined);
+  const resetToIdleRef = useRef<() => Promise<void>>(async () => undefined);
+  const stopListeningRef = useRef<() => Promise<string>>(async () => "");
 
   const voice = useVoiceSession({
     onLevel: (level) => setAudioLevel(level),
@@ -54,15 +59,6 @@ export function MindiOrb() {
       if (phaseRef.current !== "listening" || sessionLockRef.current) {
         return;
       }
-      // #region agent log
-      debugSessionLog({
-        runId: "pre-fix",
-        hypothesisId: "D",
-        location: "MindiOrb.tsx:onUtteranceComplete",
-        message: "end-of-speech detected, finishing listen",
-        data: { phase: phaseRef.current },
-      });
-      // #endregion
       if (listenTimeoutRef.current) {
         window.clearTimeout(listenTimeoutRef.current);
         listenTimeoutRef.current = null;
@@ -71,8 +67,12 @@ export function MindiOrb() {
     },
   });
 
-  const syncWindowSize = useCallback(async (nextPhase: OrbPhase) => {
-    const size = isActivePhase(nextPhase) ? ORB_ACTIVE_SIZE : ORB_IDLE_SIZE;
+  const syncWindowSize = useCallback(async (nextPhase: OrbPhase, menuOpen = false) => {
+    const size = isActivePhase(nextPhase)
+      ? ORB_ACTIVE_SIZE
+      : menuOpen
+        ? ORB_MENU_SIZE
+        : ORB_IDLE_SIZE;
     await orbSetSize(size.width, size.height);
     await orbClampPosition();
   }, []);
@@ -84,6 +84,7 @@ export function MindiOrb() {
     }
     sessionLockRef.current = false;
     phaseRef.current = "idle";
+    setIdleMenuOpen(false);
     setPhase("idle");
     setCaption(IDLE_CAPTION);
     await setOrbListening(false);
@@ -147,19 +148,6 @@ export function MindiOrb() {
   }, [finishListening]);
 
   const beginSession = useCallback(async () => {
-    // #region agent log
-    debugSessionLog({
-      runId: "post-fix",
-      hypothesisId: "E,F",
-      location: "MindiOrb.tsx:beginSession:entry",
-      message: "beginSession called",
-      data: {
-        phase: phaseRef.current,
-        sessionLock: sessionLockRef.current,
-        micEnabled,
-      },
-    });
-    // #endregion
     if (phaseRef.current !== "idle" || sessionLockRef.current) {
       return;
     }
@@ -219,19 +207,26 @@ export function MindiOrb() {
     }, LISTEN_TIMEOUT_MS);
   }, [finishListening, micEnabled, reducedMotion, resetToIdle, syncWindowSize, voice]);
 
+  useEffect(() => {
+    beginSessionRef.current = beginSession;
+  }, [beginSession]);
+
+  useEffect(() => {
+    resetToIdleRef.current = resetToIdle;
+  }, [resetToIdle]);
+
+  useEffect(() => {
+    stopListeningRef.current = voice.stopListening;
+  }, [voice.stopListening]);
+
+  useEffect(() => {
+    idleMenuOpenRef.current = idleMenuOpen;
+  }, [idleMenuOpen]);
+
   useWakeWord({
     enabled: micEnabled && phase === "idle",
     active: phase !== "idle",
     onWake: () => {
-      // #region agent log
-      debugSessionLog({
-        runId: "pre-fix",
-        hypothesisId: "A",
-        location: "MindiOrb.tsx:onWake",
-        message: "orb wake word fired beginSession",
-        data: { isTauri: isTauriRuntime() },
-      });
-      // #endregion
       void beginSession();
     },
   });
@@ -241,7 +236,7 @@ export function MindiOrb() {
   }, [phase]);
 
   useEffect(() => {
-    void syncWindowSize("idle");
+    void syncWindowSize("idle", idleMenuOpenRef.current);
     void checkAgentOnline().then((online) => setOffline(!online));
 
     const interval = window.setInterval(() => {
@@ -251,12 +246,12 @@ export function MindiOrb() {
     const cleanups: Array<() => void> = [];
     void listenOrbWake(() => {
       if (isActivePhase(phaseRef.current)) {
-        void voice.stopListening().finally(() => {
-          void resetToIdle();
+        void stopListeningRef.current().finally(() => {
+          void resetToIdleRef.current();
         });
         return;
       }
-      void beginSession();
+      void beginSessionRef.current();
     }).then((unlisten) => cleanups.push(unlisten));
     void trackOrbDragEnd(() => undefined).then((unlisten) => cleanups.push(unlisten));
     cleanups.push(listenMicToggle(setMicEnabled));
@@ -270,11 +265,17 @@ export function MindiOrb() {
         window.clearTimeout(listenTimeoutRef.current);
       }
     };
-  }, [beginSession, resetToIdle, syncWindowSize, voice]);
+  }, [syncWindowSize]);
 
   const handleDragStart = () => {
+    setIdleMenuOpen(false);
     void orbStartDrag();
   };
+
+  const handleIdleMenuOpenChange = useCallback((open: boolean) => {
+    setIdleMenuOpen(open);
+    void syncWindowSize("idle", open);
+  }, [syncWindowSize]);
 
   const handleCancel = () => {
     void voice.stopListening().finally(() => {
@@ -285,7 +286,11 @@ export function MindiOrb() {
   const active = isActivePhase(phase);
 
   return (
-    <div className={`orb-shell ${active ? "orb-shell--active" : "orb-shell--idle"}`}>
+    <div
+      className={`orb-shell ${active ? "orb-shell--active" : "orb-shell--idle"} ${
+        idleMenuOpen ? "orb-shell--menu" : ""
+      }`}
+    >
       <AnimatePresence mode="wait">
         {!active ? (
           <OrbIdle
@@ -296,6 +301,7 @@ export function MindiOrb() {
               void beginSession();
             }}
             onOpenDashboard={() => {
+              handleIdleMenuOpenChange(false);
               void showMainWindow().catch(() => {
                 setCaption("Could not open dashboard. Restart MINDI.");
                 setPhase("error");
@@ -306,6 +312,7 @@ export function MindiOrb() {
               });
             }}
             onDragStart={handleDragStart}
+            onMenuOpenChange={handleIdleMenuOpenChange}
             onQuit={() => {
               void quitApp();
             }}

@@ -1,4 +1,8 @@
 from pathlib import Path
+from collections import Counter
+import json
+import math
+import re
 import sqlite3
 from threading import Lock
 from uuid import uuid4
@@ -29,6 +33,31 @@ ALLOWED_DOCUMENT_SUFFIXES = {
     ".yml",
 }
 
+_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9'-]{1,31}")
+_SEMANTIC_ALIASES = {
+    "arrange": ("organize", "sort", "order"),
+    "arranging": ("organize", "sort", "order"),
+    "clean": ("organize", "tidy", "sort"),
+    "cleanup": ("organize", "tidy", "sort"),
+    "messy": ("organize", "tidy", "sort"),
+    "tidy": ("organize", "clean", "sort"),
+    "sort": ("organize", "arrange", "order"),
+    "sorted": ("organize", "arrange", "order"),
+    "organise": ("organize", "arrange", "sort"),
+    "organize": ("arrange", "sort", "folder"),
+    "organizes": ("organize", "arrange", "sort"),
+    "folder": ("directory", "files", "documents"),
+    "folders": ("folder", "directory", "files", "documents"),
+    "file": ("document", "folder", "download"),
+    "files": ("file", "document", "folder", "download"),
+    "document": ("file", "note", "content"),
+    "documents": ("document", "file", "note", "content"),
+    "download": ("file", "folder", "sort"),
+    "downloads": ("download", "file", "folder", "sort"),
+    "safe": ("confirmation", "blocked", "guard"),
+    "safely": ("safe", "confirmation", "guard"),
+}
+
 
 def chunk_text(text: str, chunk_size: int = 700, overlap: int = 120) -> list[str]:
     clean = " ".join(text.split())
@@ -47,6 +76,53 @@ def chunk_text(text: str, chunk_size: int = 700, overlap: int = 120) -> list[str
             break
         start += step
     return chunks
+
+
+def _normalize_token(token: str) -> str:
+    token = token.lower().strip("'")
+    if len(token) > 4 and token.endswith("ies"):
+        return token[:-3] + "y"
+    if len(token) > 3 and token.endswith("s"):
+        return token[:-1]
+    return token
+
+
+def _semantic_vector(text: str) -> dict[str, float]:
+    terms: Counter[str] = Counter()
+    for raw in _TOKEN_PATTERN.findall(text):
+        token = _normalize_token(raw)
+        if not token:
+            continue
+        terms[token] += 1.0
+        for alias in _SEMANTIC_ALIASES.get(token, ()):
+            terms[alias] += 0.45
+    return dict(terms)
+
+
+def _cosine_score(left: dict[str, float], right: dict[str, float]) -> float:
+    if not left or not right:
+        return 0.0
+    shared = set(left) & set(right)
+    dot = sum(left[key] * right[key] for key in shared)
+    if dot <= 0:
+        return 0.0
+    left_norm = math.sqrt(sum(value * value for value in left.values()))
+    right_norm = math.sqrt(sum(value * value for value in right.values()))
+    if left_norm <= 0 or right_norm <= 0:
+        return 0.0
+    return dot / (left_norm * right_norm)
+
+
+def _keyword_score(query: str, title: str, text: str) -> float:
+    q = query.lower().strip()
+    haystack = f"{title} {text}".lower()
+    if not q:
+        return 0.0
+    score = float(haystack.count(q)) * 3.0
+    for token in {_normalize_token(raw) for raw in _TOKEN_PATTERN.findall(q)}:
+        if token and token in haystack:
+            score += 1.0
+    return score
 
 
 class MemoryDB:
@@ -95,6 +171,18 @@ class MemoryDB:
                   chunk_index INTEGER NOT NULL,
                   text TEXT NOT NULL,
                   FOREIGN KEY(document_id) REFERENCES memory_documents(id)
+                );
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS memory_document_chunk_embeddings (
+                  chunk_id TEXT PRIMARY KEY,
+                  provider TEXT NOT NULL,
+                  model TEXT NOT NULL,
+                  vector_json TEXT NOT NULL,
+                  created_at TEXT NOT NULL,
+                  FOREIGN KEY(chunk_id) REFERENCES memory_document_chunks(id)
                 );
                 """
             )
@@ -209,6 +297,15 @@ class MemoryDB:
                     (document_title, imported_at, len(chunks), document_id),
                 )
                 conn.execute(
+                    """
+                    DELETE FROM memory_document_chunk_embeddings
+                    WHERE chunk_id IN (
+                      SELECT id FROM memory_document_chunks WHERE document_id = ?
+                    );
+                    """,
+                    (document_id,),
+                )
+                conn.execute(
                     "DELETE FROM memory_document_chunks WHERE document_id = ?;",
                     (document_id,),
                 )
@@ -223,12 +320,21 @@ class MemoryDB:
                 )
 
             for index, chunk in enumerate(chunks):
+                chunk_id = str(uuid4())
                 conn.execute(
                     """
                     INSERT INTO memory_document_chunks (id, document_id, chunk_index, text)
                     VALUES (?, ?, ?, ?);
                     """,
-                    (str(uuid4()), document_id, index, chunk),
+                    (chunk_id, document_id, index, chunk),
+                )
+                vector_json = json.dumps(_semantic_vector(f"{document_title} {chunk}"), sort_keys=True)
+                conn.execute(
+                    """
+                    INSERT INTO memory_document_chunk_embeddings (chunk_id, provider, model, vector_json, created_at)
+                    VALUES (?, ?, ?, ?, ?);
+                    """,
+                    (chunk_id, "local_semantic", "intfloat/multilingual-e5-small-compatible", vector_json, imported_at),
                 )
             conn.commit()
 
@@ -245,7 +351,7 @@ class MemoryDB:
         if not q:
             return []
 
-        pattern = f"%{q}%"
+        query_vector = _semantic_vector(q)
         with self._lock, self._connect() as conn:
             rows = conn.execute(
                 """
@@ -255,21 +361,30 @@ class MemoryDB:
                   c.chunk_index,
                   c.text,
                   d.source_path,
-                  d.title
+                  d.title,
+                  e.vector_json
                 FROM memory_document_chunks c
                 INNER JOIN memory_documents d ON d.id = c.document_id
-                WHERE c.text LIKE ? OR d.title LIKE ?
+                LEFT JOIN memory_document_chunk_embeddings e ON e.chunk_id = c.id
                 ORDER BY d.imported_at DESC, c.chunk_index ASC
                 LIMIT ?;
                 """,
-                (pattern, pattern, max(1, min(limit, 200))),
+                (max(1, min(limit * 50, 5000)),),
             ).fetchall()
 
-        q_low = q.lower()
         result: list[MemoryDocumentChunk] = []
         for row in rows:
             text = row["text"]
-            score = float(text.lower().count(q_low)) + (1.0 if q_low in row["title"].lower() else 0.0)
+            keyword = _keyword_score(q, row["title"], text)
+            try:
+                chunk_vector = json.loads(row["vector_json"] or "{}")
+            except json.JSONDecodeError:
+                chunk_vector = _semantic_vector(f"{row['title']} {text}")
+            semantic = _cosine_score(query_vector, chunk_vector)
+            if keyword <= 0 and semantic <= 0:
+                continue
+            retrieval_mode = "hybrid" if keyword > 0 and semantic > 0 else "semantic" if semantic > 0 else "keyword"
+            score = keyword + (semantic * 5.0)
             result.append(
                 MemoryDocumentChunk(
                     id=row["id"],
@@ -279,10 +394,11 @@ class MemoryDB:
                     text=text,
                     chunkIndex=row["chunk_index"],
                     score=score,
+                    retrievalMode=retrieval_mode,
                 )
             )
         result.sort(key=lambda item: item.score, reverse=True)
-        return result
+        return result[: max(1, min(limit, 200))]
 
     def add_perception_snapshot(
         self,
