@@ -6,6 +6,9 @@ on:
       - main
   pull_request:
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   test-linux:
     runs-on: ubuntu-latest
@@ -37,11 +40,16 @@ jobs:
           python -m pip install -e "services/agent[dev]"
           python -m pip install -e "services/ai_runtime[dev]"
 
+      - name: Verify Python environment
+        run: |
+          python --version
+          python -c "import mindi_agent; print('mindi_agent import OK')"
+
       - name: Run agent tests
-        run: pnpm test:agent
+        run: python -m pytest services/agent/tests -v --tb=short
 
       - name: Run AI runtime contract tests
-        run: pnpm test:ai-runtime
+        run: python -m pytest services/ai_runtime/tests -v --tb=short
 
       - name: Typecheck desktop frontend
         run: pnpm --dir apps/desktop build
@@ -76,11 +84,16 @@ jobs:
           python -m pip install -e "services/agent[dev]"
           python -m pip install -e "services/ai_runtime[dev]"
 
+      - name: Verify Python environment
+        run: |
+          python --version
+          python -c "import mindi_agent; print('mindi_agent import OK')"
+
       - name: Run agent tests
-        run: pnpm test:agent
+        run: python -m pytest services/agent/tests -v --tb=short
 
       - name: Run AI runtime contract tests
-        run: pnpm test:ai-runtime
+        run: python -m pytest services/ai_runtime/tests -v --tb=short
 
       - name: Typecheck desktop frontend
         run: pnpm --dir apps/desktop build
