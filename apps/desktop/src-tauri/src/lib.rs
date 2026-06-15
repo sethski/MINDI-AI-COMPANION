@@ -123,11 +123,14 @@ async fn show_main_window(app: AppHandle) -> Result<(), String> {
 
 fn write_debug_session_log(app: &AppHandle, line: &str) {
     use std::io::Write;
-    let workspace_path =
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../debug-13bb3e.log");
-    let mut paths = vec![workspace_path];
+    let workspace_root =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let mut paths = vec![
+        workspace_root.join("debug-ddb680.log"),
+        workspace_root.join(".cursor/debug-ddb680.log"),
+    ];
     if let Ok(app_data) = app.path().app_data_dir() {
-        paths.push(app_data.join("debug-e8d849.log"));
+        paths.push(app_data.join("debug-ddb680.log"));
     }
     for path in paths {
         if let Ok(mut file) = fs::OpenOptions::new()
@@ -218,12 +221,57 @@ fn save_upload_temp(app: AppHandle, data_base64: String, file_name: String) -> R
     Ok(file_path.to_string_lossy().to_string())
 }
 
+#[cfg(windows)]
+fn allow_dev_microphone(window: &WebviewWindow) {
+    let _ = window.with_webview(|platform| {
+        use webview2_com::Microsoft::Web::WebView2::Win32::{
+            ICoreWebView2Profile4, ICoreWebView2_13, COREWEBVIEW2_PERMISSION_KIND_MICROPHONE,
+            COREWEBVIEW2_PERMISSION_STATE_ALLOW,
+        };
+        use windows::core::{Interface, PCWSTR};
+
+        let controller = platform.controller();
+        unsafe {
+            let Ok(core) = controller.CoreWebView2() else {
+                return;
+            };
+            let Ok(core13) = core.cast::<ICoreWebView2_13>() else {
+                return;
+            };
+            let Ok(profile) = core13.Profile() else {
+                return;
+            };
+            let Ok(profile4) = profile.cast::<ICoreWebView2Profile4>() else {
+                return;
+            };
+
+            for origin in ["http://localhost:5173", "http://127.0.0.1:5173"] {
+                let mut wide: Vec<u16> = origin.encode_utf16().collect();
+                wide.push(0);
+                let _ = profile4.SetPermissionState(
+                    COREWEBVIEW2_PERMISSION_KIND_MICROPHONE,
+                    PCWSTR::from_raw(wide.as_ptr()),
+                    COREWEBVIEW2_PERMISSION_STATE_ALLOW,
+                    None,
+                );
+            }
+        }
+    });
+}
+
 fn configure_orb_window(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     let Some(window) = orb_window(app) else {
         return Ok(());
     };
 
     window.set_background_color(Some(tauri::window::Color(0, 0, 0, 0)))?;
+    #[cfg(all(windows, debug_assertions))]
+    allow_dev_microphone(&window);
+    #[cfg(debug_assertions)]
+    write_debug_session_log(
+        app,
+        r#"{"sessionId":"ddb680","runId":"post-remote-fix","hypothesisId":"P,C","location":"lib.rs:configure_orb_window","message":"orb window configured with mic allowlist","data":{"platform":"windows"}}"#,
+    );
 
     let saved = load_orb_position(app);
     if saved.x > 0.0 || saved.y > 0.0 {
@@ -256,21 +304,86 @@ fn quit_app(app: AppHandle) {
     app.exit(0);
 }
 
+#[tauri::command]
+fn get_agent_token(app: AppHandle) -> Result<String, String> {
+    let workspace_root =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let candidate = workspace_root.join("data/runtime/.agent-token");
+    if candidate.exists() {
+        return fs::read_to_string(&candidate)
+            .map(|s| s.trim().to_string())
+            .map_err(|e| e.to_string());
+    }
+    if let Ok(app_data) = app.path().app_data_dir() {
+        let fallback = app_data.join("data/runtime/.agent-token");
+        if fallback.exists() {
+            return fs::read_to_string(&fallback)
+                .map(|s| s.trim().to_string())
+                .map_err(|e| e.to_string());
+        }
+    }
+    Err("agent_token_not_found".to_string())
+}
+
+#[cfg(debug_assertions)]
+fn agent_port_open() -> bool {
+    use std::net::{SocketAddr, TcpStream};
+    use std::time::Duration;
+
+    let addr: SocketAddr = match "127.0.0.1:8765".parse() {
+        Ok(value) => value,
+        Err(_) => return false,
+    };
+    TcpStream::connect_timeout(&addr, Duration::from_millis(300)).is_ok()
+}
+
+#[cfg(debug_assertions)]
+fn ensure_dev_agent_running(_app: &AppHandle) {
+    use std::process::{Command, Stdio};
+
+    if agent_port_open() {
+        return;
+    }
+
+    let workspace_root =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let _ = Command::new("python")
+        .args([
+            "-m",
+            "uvicorn",
+            "mindi_agent.main:app",
+            "--reload",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "8765",
+            "--app-dir",
+            "services/agent/src",
+        ])
+        .current_dir(&workspace_root)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
-            if cfg!(debug_assertions) {
-                app.handle().plugin(
-                    tauri_plugin_log::Builder::default()
-                        .level(log::LevelFilter::Info)
-                        .build(),
-                )?;
-            }
+            #[cfg(debug_assertions)]
+            app.handle().plugin(
+                tauri_plugin_log::Builder::default()
+                    .level(log::LevelFilter::Info)
+                    .build(),
+            )?;
+            #[cfg(debug_assertions)]
+            ensure_dev_agent_running(app.handle());
             configure_orb_window(app.handle())?;
             hide_main_window_on_startup(app.handle());
             register_exit_on_close(app.handle());
+            #[cfg(debug_assertions)]
             register_debug_log_listener(app.handle());
+            #[cfg(debug_assertions)]
             write_debug_session_log(
                 app.handle(),
                 r#"{"sessionId":"e8d849","location":"lib.rs:setup","message":"tauri app started","hypothesisId":"H"}"#,
@@ -288,6 +401,7 @@ pub fn run() {
             show_main_window,
             save_upload_temp,
             quit_app,
+            get_agent_token,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
