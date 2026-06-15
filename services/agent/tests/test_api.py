@@ -156,7 +156,7 @@ def test_app_control_open_and_close_success() -> None:
         json={"scope": "app", "subject": "calc.exe", "decision": "allow"},
     )
 
-    with patch("mindi_agent.store.subprocess.Popen") as mock_open:
+    with patch("mindi_agent.automation_service.subprocess.Popen") as mock_open:
         mock_open.return_value = None
         open_response = client.post(
             "/control/apps/action",
@@ -165,7 +165,7 @@ def test_app_control_open_and_close_success() -> None:
         assert open_response.status_code == 200
         assert open_response.json()["accepted"] is True
 
-    with patch("mindi_agent.store.subprocess.run") as mock_run:
+    with patch("mindi_agent.automation_service.subprocess.run") as mock_run:
         mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0)
         close_response = client.post(
             "/control/apps/action",
@@ -978,7 +978,7 @@ def test_ops_security_scan_detects_suspicious_process_and_recover_deny_app() -> 
             )
         return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
 
-    with patch("mindi_agent.store.subprocess.run", side_effect=fake_run):
+    with patch("mindi_agent.automation_service.subprocess.run", side_effect=fake_run):
         scan = client.post("/ops/security/scan")
     assert scan.status_code == 200
     scan_body = scan.json()
@@ -1024,7 +1024,7 @@ def test_ops_security_recovery_kill_requires_confirmation() -> None:
             )
         return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
 
-    with patch("mindi_agent.store.subprocess.run", side_effect=fake_run):
+    with patch("mindi_agent.automation_service.subprocess.run", side_effect=fake_run):
         scan = client.post("/ops/security/scan")
     assert scan.status_code == 200
     events = client.get("/ops/security/events?status=open&limit=20")
@@ -1070,7 +1070,7 @@ def test_ops_automation_chain_success() -> None:
         return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
 
     with patch("mindi_agent.web_service.build_opener") as mock_build, patch(
-        "mindi_agent.store.subprocess.run",
+        "mindi_agent.automation_service.subprocess.run",
         side_effect=fake_run,
     ):
         mock_build.return_value.open.return_value = _MockUrlResponse(html)
@@ -1146,7 +1146,7 @@ def test_ops_alert_feed_and_actions() -> None:
             )
         return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
 
-    with patch("mindi_agent.store.subprocess.run", side_effect=fake_run):
+    with patch("mindi_agent.automation_service.subprocess.run", side_effect=fake_run):
         scan = client.post("/ops/security/scan")
     assert scan.status_code == 200
     assert scan.json()["accepted"] is True

@@ -1,5 +1,3 @@
-import base64
-import binascii
 import csv
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -7,15 +5,12 @@ import io
 import json
 from pathlib import Path
 import re
-import subprocess
 from threading import Event, Lock, Thread
 from time import monotonic, time
-from urllib.error import URLError
-from urllib.parse import urlparse
-from urllib.request import Request, build_opener, urlopen
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 from .agent_state import DEFAULT_AGENT_STATE_PATH, load_agent_state, save_agent_state
+from .automation_service import AutomationService
 from .file_service import FileService, category_for_suffix
 from .intelligence_service import (
     LEARNING_BLOCKED_TERMS,
@@ -29,8 +24,16 @@ from .memory_service import (
     document_retrieval_mode,
     should_attach_document_rag,
 )
+from .permission_service import (
+    PERCEPTION_CAMERA_SUBJECT,
+    PERCEPTION_SCREEN_SUBJECT,
+    PermissionService,
+)
 from .privacy_utils import SENSITIVE_TEXT_PATTERNS, redact_sensitive_text
+from .respond_service import RespondService
 from .security_service import SUSPICIOUS_PROCESS_RULES, SecurityService, parse_tasklist_csv
+from .task_service import TaskService
+from .voice_service import VoiceService
 from .web_service import WebService
 from .scheduler_utils import (
     compute_next_run,
@@ -57,7 +60,6 @@ from .schemas import (
     AiSmokeProbeResult,
     AiRuntimeServiceStatus,
     AiRuntimeStatusResponse,
-    AsrSegment,
     AsrTranscribeRequest,
     AsrTranscribeResponse,
     TtsSynthesizeRequest,
@@ -69,7 +71,6 @@ from .schemas import (
     SecurityEvent,
     AutomationChainRequest,
     AutomationChainResponse,
-    AutomationChainStepResult,
     SecurityRecoveryRequest,
     SecurityRecoveryResponse,
     SecurityScanResponse,
@@ -149,39 +150,6 @@ from .schemas import (
     now_iso,
 )
 
-PERCEPTION_SCREEN_SUBJECT = "perception.screen.capture"
-PERCEPTION_CAMERA_SUBJECT = "perception.camera.capture"
-
-
-
-_TTS_MAX_CHARS = 800
-
-_LLM_UNAVAILABLE_REPLIES: dict[str, str] = {
-    "model_path_missing": (
-        "I'm here but no AI model is configured yet. "
-        "Open the dashboard and go to Settings to set the model path."
-    ),
-    "llama_cpp_binary_missing": (
-        "I'm here but llama-cli isn't installed. "
-        "Install it and set the path under Settings > AI Runtime."
-    ),
-    "ollama_model_missing": (
-        "I'm here but the Ollama model isn't downloaded yet. "
-        "Run `ollama pull <model>` then refresh the AI runtime."
-    ),
-    "runtime_unreachable": (
-        "I'm here but the AI runtime isn't running. "
-        "Start it with `pnpm dev:ai-runtime` or check Settings."
-    ),
-    "llama_cpp_timeout": (
-        "I'm here but the model took too long. "
-        "Try a smaller model or reduce context size in Settings."
-    ),
-}
-_LLM_FALLBACK_REPLY = (
-    "I'm here but the AI model isn't ready. "
-    "Open the dashboard > Settings to configure it."
-)
 
 
 
@@ -275,6 +243,11 @@ class RuntimeStore:
         self._file_svc: FileService = FileService(self)
         self._memory_svc: MemoryService = MemoryService(self)
         self._intel_svc: IntelligenceService = IntelligenceService(self)
+        self._voice_svc: VoiceService = VoiceService(self)
+        self._task_svc: TaskService = TaskService(self)
+        self._perm_svc: PermissionService = PermissionService(self)
+        self._automation_svc: AutomationService = AutomationService(self)
+        self._respond_svc: RespondService = RespondService(self)
         snapshot = load_agent_state(self.agent_state_path)
         if snapshot is not None:
             self.tasks = snapshot.tasks
@@ -527,75 +500,10 @@ class RuntimeStore:
         )
 
     def transcribe_audio(self, request: AsrTranscribeRequest) -> AsrTranscribeResponse:
-        source_value = (request.sourceValue or "").strip()
-        if not source_value:
-            return AsrTranscribeResponse(accepted=False, reason="source_value_required")
-        if request.sourceType == "file":
-            source = Path(source_value).resolve()
-            if not source.exists() or not source.is_file():
-                return AsrTranscribeResponse(accepted=False, reason="audio_not_found")
-            if not self._is_path_allowed(source):
-                return AsrTranscribeResponse(accepted=False, reason="audio_file_not_allowed")
-            source_value = str(source)
-        elif request.sourceType == "mic":
-            if source_value.startswith("data:") or source_value.startswith("base64:"):
-                persisted = self._persist_mic_payload(source_value)
-                if persisted is None:
-                    return AsrTranscribeResponse(accepted=False, reason="mic_payload_invalid")
-                source_value = persisted
-            else:
-                source = Path(source_value).resolve()
-                if source.exists() and source.is_file():
-                    source_value = str(source)
-
-        payload = self.ai_runtime.transcribe(
-            source_type=request.sourceType,
-            source_value=source_value,
-            language_hint=request.languageHint,
-            return_timestamps=request.returnTimestamps,
-        )
-        segments_payload = payload.get("segments") or []
-        segments: list[AsrSegment] = []
-        for item in segments_payload:
-            if not isinstance(item, dict):
-                continue
-            segments.append(
-                AsrSegment(
-                    startMs=max(0, int(item.get("startMs", 0))),
-                    endMs=max(0, int(item.get("endMs", 0))),
-                    text=str(item.get("text", "")),
-                )
-            )
-        return AsrTranscribeResponse(
-            accepted=bool(payload.get("accepted", False)),
-            reason=str(payload.get("reason", "runtime_unavailable")),
-            text=payload.get("text"),
-            segments=segments,
-            provider=payload.get("provider"),
-            model=payload.get("model"),
-            degraded=bool(payload.get("degraded", not bool(payload.get("accepted", False)))),
-            fallbackReason=payload.get("fallbackReason") or (
-                str(payload.get("reason")) if not bool(payload.get("accepted", False)) else None
-            ),
-        )
+        return self._voice_svc.transcribe_audio(request)
 
     def synthesize_speech(self, request: TtsSynthesizeRequest) -> TtsSynthesizeResponse:
-        text = (request.text or "").strip()
-        if not text:
-            return TtsSynthesizeResponse(accepted=False, reason="text_required", degraded=True)
-        if len(text) > _TTS_MAX_CHARS:
-            truncated = text[:_TTS_MAX_CHARS].rsplit(" ", 1)[0]
-            text = truncated + "\u2026"
-        payload = self.ai_runtime.synthesize_tts(text=text)
-        return TtsSynthesizeResponse(
-            accepted=bool(payload.get("accepted", False)),
-            reason=str(payload.get("reason", "runtime_unavailable")),
-            audioDataUrl=payload.get("audioDataUrl"),
-            provider=payload.get("provider"),
-            model=payload.get("model"),
-            degraded=bool(payload.get("degraded", not bool(payload.get("accepted", False)))),
-            latencyMs=payload.get("latencyMs"),
-        )
+        return self._voice_svc.synthesize_speech(request)
 
     def prepare_intelligence_dataset(self, request: DatasetPrepareRequest) -> DatasetPrepareResponse:
         return self._intel_svc.prepare_intelligence_dataset(request)
@@ -611,295 +519,22 @@ class RuntimeStore:
         return IntelligenceService.normalized_risky_terms(config)
 
     def policy_decision(
-        self,
-        request: AssistantRequest,
-        config: IntelligenceTuningConfig | None = None,
+        self, request: AssistantRequest, config: IntelligenceTuningConfig | None = None
     ) -> PolicyDecision:
-        active_config = config or self._active_tuning_config()
-        text = request.text.lower()
-        risky_terms = self._normalized_risky_terms(active_config)
-        if any(term in text for term in risky_terms):
-            return PolicyDecision(
-                allowed=False,
-                tier=ActionTier.risky,
-                reason="requires_confirmation_or_unlock",
-                requiresUnlock=True,
-            )
-        return PolicyDecision(
-            allowed=True,
-            tier=ActionTier.read_only,
-            reason="safe_read_or_chat",
-            requiresUnlock=False,
-        )
+        return self._respond_svc.policy_decision(request, config=config)
 
     def _build_wake_invoke_prompt(self) -> str:
-        hub = self.snapshot()
-        open_tasks = [task for task in hub.tasks if task.status != "done"][:6]
-        task_lines = (
-            "\n".join(f"- {task.title} ({task.status})" + (f", due {task.dueAt}" if task.dueAt else "") for task in open_tasks)
-            or "- No open tasks."
-        )
-        alert_lines = (
-            "\n".join(f"- [{alert.severity}] {alert.title}: {alert.detail}" for alert in hub.alerts[:4])
-            or "- No active alerts."
-        )
-        perception = self.memory_db.latest_perception_snapshot()
-        perception_line = ""
-        if perception is not None and (perception.text or "").strip():
-            perception_line = f"Latest screen capture summary: {(perception.text or '').strip()[:400]}"
-        recent_logs = "\n".join(f"- {log.intent} ({log.result})" for log in hub.logs[:4]) or "- No recent actions."
-        return (
-            "The user just called your name MINDI, like picking up a voice call. "
-            "They did not ask a specific question — decide what is most useful right now.\n"
-            "Respond in 1-3 short spoken sentences. Greet them, surface the highest-value insight "
-            "from context below, and offer one concrete next step. Sound natural on a call.\n"
-            "Do not say you did not catch them or ask them to repeat themselves.\n\n"
-            f"Open tasks:\n{task_lines}\n\n"
-            f"Alerts:\n{alert_lines}\n\n"
-            f"Recent activity:\n{recent_logs}\n\n"
-            f"{perception_line}"
-        ).strip()
+        return self._respond_svc._build_wake_invoke_prompt()
 
     @staticmethod
     def _is_casual_chat_request(text: str) -> bool:
-        trimmed = text.strip().lower()
-        if not trimmed:
-            return False
-        normalized = re.sub(r"[^a-z0-9\s]", " ", trimmed)
-        normalized = re.sub(r"\s+", " ", normalized).strip()
-        if not normalized:
-            return False
-        casual_phrases = {
-            "hi",
-            "hello",
-            "hey",
-            "yo",
-            "sup",
-            "good morning",
-            "good afternoon",
-            "good evening",
-            "how are you",
-            "how are you doing",
-            "whats up",
-            "what s up",
-            "are you there",
-            "you there",
-            "thanks",
-            "thank you",
-            "ok",
-            "okay",
-        }
-        if normalized in casual_phrases:
-            return True
-        words = normalized.split()
-        if len(words) <= 4 and all(word in {"hi", "hello", "hey", "yo", "sup", "thanks", "thank", "you", "ok", "okay"} for word in words):
-            return True
-        action_terms = {
-            "task",
-            "note",
-            "file",
-            "document",
-            "screen",
-            "calendar",
-            "open",
-            "delete",
-            "create",
-            "import",
-            "export",
-            "summarize",
-            "search",
-            "find",
-            "scan",
-        }
-        if len(words) <= 5 and not any(word in action_terms for word in words):
-            return True
-        return False
+        return RespondService.is_casual_chat_request(text)
 
     def respond(self, request: AssistantRequest) -> AssistantResponse:
-        if not self.respond_lock.acquire(blocking=False):
-            busy_decision = PolicyDecision(
-                allowed=True,
-                tier=ActionTier.read_only,
-                reason="assistant_busy",
-                requiresUnlock=False,
-            )
-            return AssistantResponse(
-                reply="I am still working on your last message. Wait a moment, then try again.",
-                decision=busy_decision,
-                suggestedActions=["Wait", "Try again"],
-                status="busy",
-                provider="rule_local",
-                model="busy_guard",
-                degraded=True,
-                fallbackReason="assistant_busy",
-            )
-
-        try:
-            return self._respond_unlocked(request)
-        finally:
-            self.respond_lock.release()
+        return self._respond_svc.respond(request)
 
     def _respond_unlocked(self, request: AssistantRequest) -> AssistantResponse:
-        tuning = self._active_tuning_config()
-        decision = self.policy_decision(request, config=tuning)
-        result = "allowed" if decision.allowed else "blocked"
-        self.logs.insert(
-            0,
-            ActionLogItem(
-                id=str(uuid4()),
-                intent=request.text,
-                tier=decision.tier,
-                result=result,
-                reason=decision.reason,
-                createdAt=now_iso(),
-            ),
-        )
-        provider = "rule_local"
-        model = "fallback"
-        degraded = False
-        fallback_reason: str | None = None
-        citations: list[dict] = []
-        rag_trace = {"retrievalMode": "none", "confidence": 0.0, "fallbackReason": None}
-
-        if decision.allowed:
-            if request.wakeInvoke:
-                llm_prompt = self._build_wake_invoke_prompt()
-                llm_result = self.ai_runtime.generate_reply(
-                    prompt=llm_prompt,
-                    language_mode=self.intelligence_language_mode,
-                )
-                if llm_result.get("accepted"):
-                    reply = str(llm_result.get("reply") or llm_result.get("response") or "").strip()
-                    if not reply:
-                        reply = "I am here. What should we tackle first?"
-                    provider = str(llm_result.get("provider") or "llama.cpp")
-                    model = str(llm_result.get("model") or "Qwen/Qwen2.5-7B-Instruct")
-                else:
-                    reason = str(llm_result.get("reason") or "runtime_unavailable")
-                    reply = _LLM_UNAVAILABLE_REPLIES.get(reason, _LLM_FALLBACK_REPLY)
-                    provider = str(llm_result.get("provider") or "llama.cpp")
-                    model = str(llm_result.get("model") or "fallback")
-                    degraded = True
-                    fallback_reason = reason
-                suggestions = ["Open dashboard", "Review tasks", "Check status"]
-                status = "ready"
-                reply = self._style_reply(reply, decision=decision, config=tuning)
-                return AssistantResponse(
-                    reply=reply,
-                    decision=decision,
-                    suggestedActions=suggestions,
-                    status=status,
-                    provider=provider,
-                    model=model,
-                    degraded=degraded,
-                    fallbackReason=fallback_reason,
-                    citations=[],
-                    rag=RagTrace(retrievalMode="none", confidence=0.0, fallbackReason="wake_invoke"),
-                )
-
-            latest_snapshot = self.memory_db.latest_perception_snapshot()
-            lowered = (request.text or "").lower()
-            asks_about_screen = any(
-                term in lowered
-                for term in ("screen", "vision", "display", "what do you see", "what's on screen", "ocr")
-            )
-            if asks_about_screen and latest_snapshot is not None:
-                snippet = (latest_snapshot.text or "").strip()
-                summary = snippet[:220] if snippet else "No OCR text available."
-                reply = (
-                    "Latest perception snapshot available. "
-                    f"Captured at {latest_snapshot.createdAt}, blocks={latest_snapshot.blockCount}, "
-                    f"textLength={latest_snapshot.textLength}. "
-                    f"Summary: {summary}"
-                )
-                provider = "memory_snapshot"
-                model = "latest_perception_context"
-            else:
-                rag_items: list[MemoryDocumentChunk] = []
-                if not self._is_casual_chat_request(request.text):
-                    rag_items = self.memory_db.search_documents(query=request.text, limit=3)
-                if rag_items and self._should_attach_document_rag(request.text, rag_items):
-                    retrieval_mode = self._document_retrieval_mode(rag_items)
-                    confidence = self._document_retrieval_confidence(rag_items)
-                    rag_trace = {
-                        "retrievalMode": retrieval_mode,
-                        "confidence": confidence,
-                        "fallbackReason": None,
-                    }
-                    citations = [
-                        {
-                            "chunkId": item.id,
-                            "documentId": item.documentId,
-                            "sourcePath": item.sourcePath,
-                            "title": item.title,
-                            "chunkIndex": item.chunkIndex,
-                            "score": item.score,
-                            "textPreview": item.text[:240],
-                        }
-                        for item in rag_items
-                    ]
-                    context_blocks = []
-                    for index, item in enumerate(rag_items, start=1):
-                        context_blocks.append(
-                            "\n".join(
-                                [
-                                    f"Source {index}: {item.title}",
-                                    f"Path: {item.sourcePath}",
-                                    f"Excerpt: {item.text[:900]}",
-                                ]
-                            )
-                        )
-                    llm_prompt = (
-                        "Answer using the local source context when it is relevant. "
-                        "Do not invent citations. If the context is weak, say what is missing.\n\n"
-                        + "\n\n".join(context_blocks)
-                        + f"\n\n<user_turn>{request.text}</user_turn>"
-                    )
-                else:
-                    llm_prompt = f"<user_turn>{request.text}</user_turn>"
-                    rag_trace = {
-                        "retrievalMode": "none",
-                        "confidence": 0.0,
-                        "fallbackReason": "no_relevant_local_sources",
-                    }
-                llm_result = self.ai_runtime.generate_reply(
-                    prompt=llm_prompt,
-                    language_mode=self.intelligence_language_mode,
-                )
-                if llm_result.get("accepted"):
-                    reply = str(llm_result.get("reply") or llm_result.get("response") or "").strip()
-                    if not reply:
-                        reply = "I heard you, but the model returned an empty response."
-                    provider = str(llm_result.get("provider") or "llama.cpp")
-                    model = str(llm_result.get("model") or "Qwen/Qwen2.5-7B-Instruct")
-                else:
-                    reason = str(llm_result.get("reason") or "runtime_unavailable")
-                    reply = _LLM_UNAVAILABLE_REPLIES.get(reason, _LLM_FALLBACK_REPLY)
-                    provider = str(llm_result.get("provider") or "llama.cpp")
-                    model = str(llm_result.get("model") or "fallback")
-                    degraded = True
-                    fallback_reason = reason
-            suggestions = ["Create note", "Add task", "Show status"]
-            status = "ready"
-        else:
-            reply = "Blocked for safety. Confirm or unlock before risky execution."
-            suggestions = ["Explain risk", "Request confirmation", "Open safety panel"]
-            status = "blocked"
-            provider = "safety_gate"
-            model = "policy_only"
-        reply = self._style_reply(reply, decision=decision, config=tuning)
-        return AssistantResponse(
-            reply=reply,
-            decision=decision,
-            suggestedActions=suggestions,
-            status=status,
-            provider=provider,
-            model=model,
-            degraded=degraded,
-            fallbackReason=fallback_reason,
-            citations=citations,
-            rag=rag_trace,
-        )
+        return self._respond_svc._respond_unlocked(request)
 
     def _style_reply(
         self,
@@ -911,190 +546,50 @@ class RuntimeStore:
         slang_enabled: bool | None = None,
         slang_terms: list[str] | None = None,
     ) -> str:
-        text = reply
-        active_config = config or self._active_tuning_config()
-        if active_config.responseVerbosity == "brief":
-            first_sentence = text.split(". ", 1)[0].strip()
-            text = first_sentence if first_sentence.endswith(".") else f"{first_sentence}."
-        elif active_config.responseVerbosity == "detailed":
-            if decision.allowed:
-                text = f"{text} Audit trail is active for this step."
-            else:
-                text = f"{text} Safety policy is still enforced."
-        if active_config.preset == "companion":
-            text = f"{text} I can stay with you for the next step."
-        effective_language_mode = language_mode or self.intelligence_language_mode
-        effective_slang_enabled = self.intelligence_slang_enabled if slang_enabled is None else bool(slang_enabled)
-        effective_slang_terms = self.intelligence_slang_terms if slang_terms is None else slang_terms
-        if effective_language_mode == "taglish":
-            text = f"Sige. {text}"
-        elif effective_language_mode == "tagalog":
-            text = f"Naiintindihan ko. {text}"
-        if effective_slang_enabled and effective_slang_terms:
-            text = f"{text} [{effective_slang_terms[0]}]"
-        return text
+        return self._respond_svc._style_reply(
+            reply, decision=decision, config=config,
+            language_mode=language_mode, slang_enabled=slang_enabled, slang_terms=slang_terms,
+        )
 
     def add_task(self, request: CreateTaskRequest) -> TaskItem:
-        if request.idempotencyKey:
-            cached = self._idempotency_cache.get(request.idempotencyKey)
-            if cached is not None:
-                return cached
-        task = TaskItem(
-            id=str(uuid4()),
-            externalId=None,
-            title=request.title,
-            dueAt=request.dueAt,
-            recurrence=request.recurrence,
-            reminderMinutesBefore=None,
-            nextRunAt=request.dueAt,
-            status="todo",
-            source="manual",
-        )
-        self.tasks.insert(0, task)
-        if task.id in self.scheduler_alerted_due:
-            self.scheduler_alerted_due.pop(task.id, None)
-        self._persist_durable_state()
-        if request.idempotencyKey:
-            self._idempotency_cache.set(request.idempotencyKey, task)
-        return task
+        return self._task_svc.add_task(request)
 
     def update_task_status(self, task_id: str, request: TaskStatusUpdateRequest) -> TaskItem | None:
-        for task in self.tasks:
-            if task.id != task_id:
-                continue
-            task.status = request.status
-            if request.status != "done":
-                self.scheduler_alerted_due.pop(task.id, None)
-            self._persist_durable_state()
-            return task
-        return None
+        return self._task_svc.update_task_status(task_id, request)
 
     def update_task(self, task_id: str, request: TaskUpdateRequest) -> TaskItem | None:
-        for task in self.tasks:
-            if task.id != task_id:
-                continue
-            if "title" in request.model_fields_set and request.title is not None:
-                task.title = request.title
-            if "dueAt" in request.model_fields_set:
-                task.dueAt = request.dueAt
-                task.nextRunAt = request.dueAt
-                self.scheduler_alerted_due.pop(task.id, None)
-            if "recurrence" in request.model_fields_set:
-                task.recurrence = request.recurrence
-            if "status" in request.model_fields_set and request.status is not None:
-                task.status = request.status
-                if request.status != "done":
-                    self.scheduler_alerted_due.pop(task.id, None)
-            self._persist_durable_state()
-            return task
-        return None
+        return self._task_svc.update_task(task_id, request)
 
     def delete_task(self, task_id: str) -> TaskItem | None:
-        for index, task in enumerate(self.tasks):
-            if task.id != task_id:
-                continue
-            removed = self.tasks.pop(index)
-            self.scheduler_alerted_due.pop(task_id, None)
-            self._persist_durable_state()
-            return removed
-        return None
+        return self._task_svc.delete_task(task_id)
 
     def enqueue_sync(self, request: SyncQueueRequest) -> dict:
-        item = {
-            "id": str(uuid4()),
-            "type": request.type,
-            "payload": request.payload,
-            "createdAt": now_iso(),
-            "status": "queued",
-        }
-        self.sync_queue.insert(0, item)
-        return item
+        return self._task_svc.enqueue_sync(request)
 
     def list_permissions(self) -> list[PermissionGrant]:
-        return self.permission_grants
+        return self._perm_svc.list_permissions()
 
     def add_permission(self, request: AddPermissionGrantRequest) -> PermissionGrant:
-        grant = PermissionGrant(
-            id=str(uuid4()),
-            scope=request.scope,
-            subject=request.subject,
-            decision=request.decision,
-            createdAt=now_iso(),
-        )
-        self.permission_grants.insert(0, grant)
-        self.logs.insert(
-            0,
-            ActionLogItem(
-                id=str(uuid4()),
-                intent=f"permission_grant:{grant.scope}:{grant.subject}",
-                tier=ActionTier.reversible,
-                result="allowed",
-                reason=f"decision:{grant.decision}",
-                createdAt=now_iso(),
-            ),
-        )
-        self._persist_durable_state()
-        return grant
+        return self._perm_svc.add_permission(request)
 
     @staticmethod
     def _subject_matches(grant_subject: str, target_subject: str) -> bool:
-        grant_value = grant_subject.strip().lower()
-        target_value = target_subject.strip().lower()
-        if not grant_value:
-            return False
-        if grant_value == "*" or grant_value == target_value:
-            return True
-        if grant_value.endswith("*"):
-            return target_value.startswith(grant_value[:-1])
-        return False
+        return PermissionService.subject_matches(grant_subject, target_subject)
 
     def _resolve_action_permission_decision(self, subject: str) -> str:
-        normalized = subject.strip().lower()
-        if not normalized:
-            return "deny"
-        for grant in self.permission_grants:
-            if grant.scope != "action":
-                continue
-            if self._subject_matches(grant.subject, normalized):
-                return grant.decision
-        return "unset"
+        return self._perm_svc.resolve_action_permission(subject)
 
     def _is_action_allowed(self, subject: str) -> bool:
-        return self._resolve_action_permission_decision(subject) == "allow"
+        return self._perm_svc.is_action_allowed(subject)
 
     def perception_permission_status(self) -> PerceptionPermissionStatus:
-        screen_decision = self._resolve_action_permission_decision(PERCEPTION_SCREEN_SUBJECT)
-        camera_decision = self._resolve_action_permission_decision(PERCEPTION_CAMERA_SUBJECT)
-        return PerceptionPermissionStatus(
-            screenSubject=PERCEPTION_SCREEN_SUBJECT,
-            cameraSubject=PERCEPTION_CAMERA_SUBJECT,
-            screenAllowed=screen_decision == "allow",
-            cameraAllowed=camera_decision == "allow",
-            screenDecision=screen_decision,
-            cameraDecision=camera_decision,
-        )
+        return self._perm_svc.perception_permission_status()
 
     def privacy_status(self) -> PrivacyStatus:
-        return PrivacyStatus(
-            redactionEnabled=self.privacy_redaction_enabled,
-            safeStorageDefault=True,
-            sensitivePatternCount=len(SENSITIVE_TEXT_PATTERNS),
-        )
+        return self._perm_svc.privacy_status()
 
     def update_privacy(self, request: PrivacyUpdateRequest) -> PrivacyStatus:
-        self.privacy_redaction_enabled = bool(request.redactionEnabled)
-        self.logs.insert(
-            0,
-            ActionLogItem(
-                id=str(uuid4()),
-                intent="privacy_update",
-                tier=ActionTier.reversible,
-                result="allowed",
-                reason=f"redaction:{self.privacy_redaction_enabled}",
-                createdAt=now_iso(),
-            ),
-        )
-        return self.privacy_status()
+        return self._perm_svc.update_privacy(request)
 
     def intelligence_style_status(self) -> IntelligenceStyleStatus:
         return self._intel_svc.intelligence_style_status()
@@ -1187,32 +682,10 @@ class RuntimeStore:
         return self._web_svc.is_domain_allowed(hostname)
 
     def _persist_mic_payload(self, payload: str) -> str | None:
-        encoded = payload
-        if payload.startswith("data:"):
-            _, _, encoded = payload.partition(",")
-        elif payload.startswith("base64:"):
-            encoded = payload.removeprefix("base64:")
-        try:
-            raw = base64.b64decode(encoded.strip(), validate=False)
-        except (binascii.Error, ValueError):
-            return None
-        temp_dir = Path("data") / "inbox" / "orb-captures"
-        temp_dir.mkdir(parents=True, exist_ok=True)
-        file_path = temp_dir / f"capture-{uuid4()}.webm"
-        file_path.write_bytes(raw)
-        return str(file_path.resolve())
+        return self._voice_svc._persist_mic_payload(payload)
 
     def _is_path_allowed(self, path: Path) -> bool:
-        normalized = path.resolve()
-        grants = [g for g in self.permission_grants if g.scope == "folder"]
-        denies = [Path(g.subject).resolve() for g in grants if g.decision == "deny"]
-        allows = [Path(g.subject).resolve() for g in grants if g.decision == "allow"]
-
-        if any(str(normalized).startswith(str(deny)) for deny in denies):
-            return False
-        if not allows:
-            return False
-        return any(str(normalized).startswith(str(allow)) for allow in allows)
+        return self._perm_svc.is_path_allowed(path)
 
     def file_organize(self, request: FileOrganizeRequest) -> FileOrganizeResponse:
         return self._file_svc.file_organize(request)
@@ -1221,235 +694,13 @@ class RuntimeStore:
         return self._web_svc.scrape_web(request)
 
     def run_automation_chain(self, request: AutomationChainRequest) -> AutomationChainResponse:
-        chain_name = (request.name or "").strip() or "ops_chain"
-        if not request.steps:
-            return AutomationChainResponse(
-                accepted=False,
-                reason="empty_steps",
-                name=chain_name,
-                totalSteps=0,
-                completedSteps=0,
-                steps=[],
-            )
-
-        results: list[AutomationChainStepResult] = []
-        completed_steps = 0
-        failed_step_index: int | None = None
-        recovery_summary: str | None = None
-
-        for index, step in enumerate(request.steps):
-            started_at = now_iso()
-            accepted = False
-            reason = "unsupported_step"
-            recovery_hint: str | None = "Use one of: web_scrape, create_task, create_note, security_scan."
-            detail: str | None = None
-
-            if step.kind == "web_scrape":
-                if not (step.url or "").strip():
-                    reason = "url_required"
-                    recovery_hint = "Provide a valid HTTP/HTTPS URL."
-                else:
-                    scrape = self.scrape_web(
-                        WebScrapeRequest(
-                            url=(step.url or "").strip(),
-                            maxChars=3500,
-                            storeAsNote=bool(step.storeAsNote),
-                        )
-                    )
-                    accepted = scrape.accepted
-                    reason = scrape.reason
-                    detail = f"textLength={scrape.textLength}, links={len(scrape.links)}"
-                    recovery_hint = (
-                        "Allow the domain then retry."
-                        if scrape.reason == "domain_not_allowed"
-                        else "Check URL accessibility and content type."
-                    )
-            elif step.kind == "create_task":
-                title = (step.title or "").strip()
-                if not title:
-                    reason = "title_required"
-                    recovery_hint = "Provide a task title."
-                else:
-                    task = self.add_task(
-                        CreateTaskRequest(
-                            title=title,
-                            dueAt=(step.dueAt or None),
-                            recurrence=step.recurrence,
-                        )
-                    )
-                    accepted = True
-                    reason = "ok"
-                    detail = f"taskId={task.id}"
-                    recovery_hint = None
-            elif step.kind == "create_note":
-                title = (step.title or "").strip()
-                text = (step.text or "").strip()
-                if not title or not text:
-                    reason = "title_and_text_required"
-                    recovery_hint = "Provide note title and text."
-                else:
-                    note = self.add_memory_note(
-                        CreateMemoryNoteRequest(
-                            title=title,
-                            content=text,
-                            tags=["automation", "ops"],
-                        )
-                    )
-                    accepted = True
-                    reason = "ok"
-                    detail = f"noteId={note.id}"
-                    recovery_hint = None
-            elif step.kind == "security_scan":
-                scan = self.scan_security()
-                accepted = scan.accepted
-                reason = scan.reason
-                detail = f"newAlerts={scan.newAlerts}, scanned={scan.scannedProcessCount}"
-                recovery_hint = "Review open security events and apply recovery actions."
-
-            finished_at = now_iso()
-            results.append(
-                AutomationChainStepResult(
-                    index=index,
-                    kind=step.kind,
-                    accepted=accepted,
-                    reason=reason,
-                    startedAt=started_at,
-                    finishedAt=finished_at,
-                    recoveryHint=recovery_hint,
-                    detail=detail,
-                )
-            )
-
-            if accepted:
-                completed_steps += 1
-                continue
-
-            failed_step_index = index
-            recovery_summary = f"Step {index + 1} failed ({step.kind}): {reason}."
-            if not request.continueOnFailure:
-                break
-
-        accepted_chain = failed_step_index is None
-        chain_reason = "ok" if accepted_chain else "partial_failure"
-
-        self.logs.insert(
-            0,
-            ActionLogItem(
-                id=str(uuid4()),
-                intent=f"automation_chain:{chain_name}",
-                tier=ActionTier.reversible,
-                result="allowed" if accepted_chain else "blocked",
-                reason=f"{chain_reason}:completed={completed_steps}/{len(request.steps)}",
-                createdAt=now_iso(),
-            ),
-        )
-
-        return AutomationChainResponse(
-            accepted=accepted_chain,
-            reason=chain_reason,
-            name=chain_name,
-            totalSteps=len(request.steps),
-            completedSteps=completed_steps,
-            failedStepIndex=failed_step_index,
-            steps=results,
-            recoverySummary=recovery_summary,
-        )
+        return self._automation_svc.run_automation_chain(request)
 
     def alerts_feed(self, limit: int = 25) -> AlertFeedResponse:
-        severity_weight = {"critical": 3, "warning": 2, "info": 1}
-        ranked = sorted(
-            self.alerts,
-            key=lambda item: (severity_weight.get(item.severity, 0), item.createdAt),
-            reverse=True,
-        )
-        trimmed = ranked[: max(1, min(limit, 200))]
-        critical = sum(1 for item in self.alerts if item.severity == "critical")
-        warning = sum(1 for item in self.alerts if item.severity == "warning")
-        info = sum(1 for item in self.alerts if item.severity == "info")
-        return AlertFeedResponse(
-            accepted=True,
-            reason="ok",
-            total=len(self.alerts),
-            critical=critical,
-            warning=warning,
-            info=info,
-            items=trimmed,
-        )
+        return self._automation_svc.alerts_feed(limit=limit)
 
     def alerts_action(self, request: AlertActionRequest) -> AlertActionResponse:
-        alert = next((item for item in self.alerts if item.id == request.alertId), None)
-        if alert is None:
-            return AlertActionResponse(accepted=False, reason="alert_not_found")
-
-        if request.action == "dismiss":
-            self.alerts = [item for item in self.alerts if item.id != request.alertId]
-            self.logs.insert(
-                0,
-                ActionLogItem(
-                    id=str(uuid4()),
-                    intent=f"alerts_action:dismiss:{request.alertId}",
-                    tier=ActionTier.reversible,
-                    result="allowed",
-                    reason="dismissed",
-                    createdAt=now_iso(),
-                ),
-            )
-            return AlertActionResponse(accepted=True, reason="dismissed")
-
-        if request.action == "create_recovery_task":
-            task = self.add_task(
-                CreateTaskRequest(
-                    title=f"Recovery: {alert.title}",
-                    dueAt=None,
-                    recurrence=None,
-                )
-            )
-            self.logs.insert(
-                0,
-                ActionLogItem(
-                    id=str(uuid4()),
-                    intent=f"alerts_action:create_recovery_task:{request.alertId}",
-                    tier=ActionTier.reversible,
-                    result="allowed",
-                    reason=f"task:{task.id}",
-                    createdAt=now_iso(),
-                ),
-            )
-            return AlertActionResponse(
-                accepted=True,
-                reason="recovery_task_created",
-                createdTaskId=task.id,
-            )
-
-        if request.action == "export_report":
-            export_dir = Path("data/runtime/exports").resolve()
-            export_dir.mkdir(parents=True, exist_ok=True)
-            timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-            path = export_dir / f"mindi-alert-report-{timestamp}.json"
-            payload = {
-                "generatedAt": now_iso(),
-                "alert": alert.model_dump(),
-                "recentLogs": [item.model_dump() for item in self.logs[:20]],
-            }
-            path.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
-            self.logs.insert(
-                0,
-                ActionLogItem(
-                    id=str(uuid4()),
-                    intent=f"alerts_action:export_report:{request.alertId}",
-                    tier=ActionTier.reversible,
-                    result="allowed",
-                    reason=str(path),
-                    createdAt=now_iso(),
-                ),
-            )
-            return AlertActionResponse(
-                accepted=True,
-                reason="report_exported",
-                reportPath=str(path),
-            )
-
-        return AlertActionResponse(accepted=False, reason="unsupported_action")
+        return self._automation_svc.alerts_action(request)
 
     @staticmethod
     def _parse_tasklist_csv(stdout: str) -> list[tuple[str, int | None]]:
@@ -1486,81 +737,7 @@ class RuntimeStore:
         return self._security_svc.recover_security_event(request)
 
     def control_app(self, request: AppControlRequest) -> AppControlResponse:
-        app_id = request.appId.strip()
-        if not app_id:
-            return AppControlResponse(
-                accepted=False,
-                reason="app_id_required",
-                tier=ActionTier.read_only,
-                requiresConfirmation=False,
-            )
-
-        if not self._is_app_allowed(app_id):
-            return AppControlResponse(
-                accepted=False,
-                reason="app_not_allowlisted",
-                tier=ActionTier.risky,
-                requiresConfirmation=False,
-            )
-
-        tier = ActionTier.reversible
-        requires_confirmation = False
-        if request.action == "close":
-            tier = ActionTier.risky
-            if not request.confirm:
-                return AppControlResponse(
-                    accepted=False,
-                    reason="confirmation_required_for_close",
-                    tier=tier,
-                    requiresConfirmation=True,
-                )
-            requires_confirmation = True
-
-        try:
-            if request.action == "open":
-                subprocess.Popen(
-                    ["cmd", "/c", "start", "", app_id],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-                reason = "opened"
-            elif request.action == "close":
-                subprocess.run(
-                    ["taskkill", "/IM", app_id, "/T"],
-                    check=False,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-                reason = "close_requested"
-            else:
-                # Windows focus control is layered for now; this is a readiness hook.
-                reason = "focus_requested"
-        except Exception as exc:
-            return AppControlResponse(
-                accepted=False,
-                reason=f"app_control_failed:{exc.__class__.__name__}",
-                tier=tier,
-                requiresConfirmation=requires_confirmation,
-            )
-
-        self.logs.insert(
-            0,
-            ActionLogItem(
-                id=str(uuid4()),
-                intent=f"app_control:{request.action}:{app_id}",
-                tier=tier,
-                result="allowed",
-                reason=reason,
-                createdAt=now_iso(),
-            ),
-        )
-
-        return AppControlResponse(
-            accepted=True,
-            reason=reason,
-            tier=tier,
-            requiresConfirmation=requires_confirmation,
-        )
+        return self._automation_svc.control_app(request)
 
     def add_memory_note(self, request: CreateMemoryNoteRequest) -> MemoryNote:
         return self._memory_svc.add_memory_note(request)
