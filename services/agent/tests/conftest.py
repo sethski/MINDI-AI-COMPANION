@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+import mindi_agent.main as _agent_main
 from mindi_agent.main import store
 from mindi_agent.memory_db import MemoryDB
 
@@ -32,6 +33,12 @@ _DEFAULT_TEST_CONFIG = {
     "experimentalAsr": True,
     "experimentalOcr": True,
 }
+
+
+@pytest.fixture(autouse=True)
+def _disable_agent_auth(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Set startup_token to '' so the auth middleware skips validation in tests."""
+    monkeypatch.setattr(_agent_main, "startup_token", "")
 
 
 @pytest.fixture(autouse=True)

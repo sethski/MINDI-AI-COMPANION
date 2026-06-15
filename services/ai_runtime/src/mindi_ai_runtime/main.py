@@ -5,8 +5,11 @@ import json
 from pathlib import Path
 import shutil
 import subprocess
+import threading
 from time import time
 from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 from fastapi import FastAPI
 from pydantic import BaseModel
@@ -17,6 +20,8 @@ class RuntimeConfig(BaseModel):
     llmLanguagePackPath: str = ""
     asrModelPath: str = ""
     ocrModelPath: str = ""
+    ttsModelPath: str = ""
+    ttsCommand: str = "piper"
     llmCommand: str = "llama-cli"
     llmContextSize: int = 4096
     llmMaxTokens: int = 256
@@ -53,7 +58,12 @@ class OcrExtractRequest(BaseModel):
     path: str
 
 
+class TtsSynthesizeRequest(BaseModel):
+    text: str
+
+
 RUNTIME_CONFIG_PATH = Path(__file__).resolve().parents[4] / "data" / "runtime" / "ai_runtime_config.json"
+DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434"
 
 
 def _load_persisted_runtime_config() -> RuntimeConfig:
@@ -76,6 +86,7 @@ def _persist_runtime_config(config: RuntimeConfig) -> None:
 
 app = FastAPI(title="MINDI AI Runtime", version="0.1.0")
 runtime_config = _load_persisted_runtime_config()
+_model_state_lock = threading.Lock()
 asr_runtime_error: str | None = None
 asr_model_ref: str | None = None
 asr_model: Any | None = None
@@ -134,6 +145,20 @@ def _resolve_language_pack_path() -> Path | None:
     return Path(raw_path).expanduser()
 
 
+def _resolve_tts_model_path() -> Path | None:
+    raw_path = runtime_config.ttsModelPath.strip()
+    if not raw_path:
+        return None
+    path = Path(raw_path).expanduser()
+    if path.is_file() and path.suffix.lower() == ".onnx":
+        return path
+    if path.is_dir():
+        onnx_files = sorted(path.glob("*.onnx"))
+        if onnx_files:
+            return onnx_files[0]
+    return None
+
+
 def _resolve_ocr_model_ref() -> str:
     model_path = runtime_config.ocrModelPath.strip()
     if model_path:
@@ -149,6 +174,14 @@ def _resolve_ocr_python_executable() -> Path | None:
 
 
 def _llm_runtime_error(model_path: Path | None) -> str | None:
+    if runtime_config.llmProvider == "ollama":
+        model = runtime_config.llmModel.strip()
+        if not model:
+            return "ollama_model_missing"
+        ok, payload = _ollama_model_available(model)
+        if ok:
+            return None
+        return str(payload.get("reason", "ollama_unreachable"))
     if model_path is None:
         return "model_path_missing"
     if not model_path.exists() or not model_path.is_file():
@@ -160,14 +193,68 @@ def _llm_runtime_error(model_path: Path | None) -> str | None:
     return None
 
 
+def _ollama_base_url() -> str:
+    return DEFAULT_OLLAMA_URL
+
+
+def _ollama_request(*, path: str, payload: dict | None = None, timeout: float = 30.0) -> tuple[bool, dict]:
+    url = f"{_ollama_base_url().rstrip('/')}{path}"
+    raw = b""
+    if payload is not None:
+        raw = json.dumps(payload, ensure_ascii=True).encode("utf-8")
+    request = Request(
+        url=url,
+        method="POST" if payload is not None else "GET",
+        data=raw if payload is not None else None,
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urlopen(request, timeout=timeout) as response:
+            body = response.read().decode("utf-8")
+        parsed = json.loads(body) if body else {}
+        if isinstance(parsed, dict):
+            return True, parsed
+    except HTTPError as exc:
+        try:
+            body = exc.read().decode("utf-8")
+            parsed = json.loads(body) if body else {}
+            if isinstance(parsed, dict):
+                return False, parsed
+        except Exception:
+            pass
+        return False, {"reason": f"ollama_http_error:{exc.code}"}
+    except (URLError, TimeoutError):
+        return False, {"reason": "ollama_unreachable"}
+    except Exception:
+        return False, {"reason": "ollama_request_failed"}
+    return False, {"reason": "ollama_invalid_response"}
+
+
+def _ollama_model_available(model: str) -> tuple[bool, dict]:
+    ok, payload = _ollama_request(path="/api/tags", timeout=5.0)
+    if not ok:
+        return False, payload
+    models = payload.get("models")
+    if not isinstance(models, list):
+        return False, {"reason": "ollama_invalid_tags_response"}
+    target = model.strip().lower()
+    for item in models:
+        if not isinstance(item, dict):
+            continue
+        names = {
+            str(item.get("name", "")).strip().lower(),
+            str(item.get("model", "")).strip().lower(),
+        }
+        if target in names:
+            return True, {"reason": "ok"}
+    return False, {"reason": "ollama_model_missing"}
+
+
 def _asr_runtime_error(asr_path: Path | None) -> str | None:
-    global asr_runtime_error
     # No local path configured: fall back to the HuggingFace model ref
     # (e.g. Qwen/Qwen3-ASR-1.7B). Readiness then tracks the real load path:
     # the qwen_asr dependency must be importable, otherwise the load fails.
     if asr_path is None:
-        if asr_runtime_error is not None:
-            return asr_runtime_error
         if importlib.util.find_spec("qwen_asr") is None:
             return "qwen_asr_dependency_missing"
         return None
@@ -175,8 +262,6 @@ def _asr_runtime_error(asr_path: Path | None) -> str | None:
         return "model_path_missing"
     if not asr_path.is_dir() and not asr_path.is_file():
         return "model_path_missing"
-    if asr_runtime_error is not None:
-        return asr_runtime_error
     return None
 
 
@@ -276,18 +361,68 @@ def _language_pack_prompt_hint() -> str:
     return f"Use practical Filipino/Taglish phrasing when relevant. Preferred terms: {', '.join(terms)}.\n"
 
 
+_LLAMA_BANNER_PREFIXES = (
+    "Loading model",
+    "build      :",
+    "model      :",
+    "modalities :",
+    "available commands:",
+    "/exit",
+    "/regen",
+    "/clear",
+    "/read ",
+    "/glob ",
+)
+
+
 def _clean_llama_output(text: str) -> str:
     if not text:
         return ""
     cleaned = text.replace("\r", "").strip()
-    for marker in ("<|assistant|>", "assistant\n"):
-        if marker in cleaned:
-            cleaned = cleaned.split(marker, maxsplit=1)[-1].strip()
+    if "<|assistant|>" in cleaned:
+        cleaned = cleaned.split("<|assistant|>", maxsplit=1)[-1].strip()
+
+    if "> <|system|>" in cleaned or "available commands:" in cleaned:
+        reply_lines: list[str] = []
+        seen_user_block = False
+        for line in cleaned.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("User request:"):
+                seen_user_block = True
+                continue
+            if "<|user|>" in stripped:
+                seen_user_block = True
+                trailing = stripped.split("<|user|>", maxsplit=1)[-1].strip()
+                if trailing and not trailing.startswith("<|"):
+                    reply_lines.append(trailing)
+                continue
+            if not seen_user_block:
+                continue
+            if stripped.startswith(
+                ("Source ", "Path:", "Excerpt:", "Answer using", "<|system|>", "<|user|>", "> <|")
+            ):
+                continue
+            if stripped in {">", ""}:
+                continue
+            if any(stripped.startswith(prefix) for prefix in _LLAMA_BANNER_PREFIXES):
+                continue
+            reply_lines.append(stripped)
+        if reply_lines:
+            cleaned = "\n".join(reply_lines).strip()
+
     for split_marker in ("\n\n[ Prompt:", "\n[ Prompt:", "\nExiting..."):
         if split_marker in cleaned:
             cleaned = cleaned.split(split_marker, maxsplit=1)[0].strip()
-    lines = [line for line in cleaned.split("\n") if line.strip() not in {">", ""}]
-    return "\n".join(lines).strip()
+
+    filtered: list[str] = []
+    for line in cleaned.split("\n"):
+        stripped = line.strip()
+        if stripped in {">", ""}:
+            continue
+        if any(stripped.startswith(prefix) for prefix in _LLAMA_BANNER_PREFIXES):
+            continue
+        filtered.append(stripped)
+    return "\n".join(filtered).strip()
 
 
 def _run_llama_cpp(prompt: str) -> tuple[bool, dict]:
@@ -316,6 +451,7 @@ def _run_llama_cpp(prompt: str) -> tuple[bool, dict]:
     command.extend(["-ngl", "0"])
     # Non-interactive one-shot generation; without this llama-cli waits for stdin and hangs.
     command.append("--single-turn")
+    command.append("--simple-io")
 
     try:
         completed = subprocess.run(
@@ -341,6 +477,34 @@ def _run_llama_cpp(prompt: str) -> tuple[bool, dict]:
     if not output_text:
         return False, {"reason": "llama_cpp_empty_output"}
     return True, {"reply": output_text}
+
+
+def _run_ollama(prompt: str) -> tuple[bool, dict]:
+    payload = {
+        "model": runtime_config.llmModel.strip(),
+        "prompt": prompt,
+        "stream": False,
+        "options": {
+            "num_ctx": max(256, int(runtime_config.llmContextSize)),
+            "temperature": float(runtime_config.llmTemperature),
+            "num_predict": max(1, int(runtime_config.llmMaxTokens)),
+        },
+    }
+    if int(runtime_config.llmThreads) > 0:
+        payload["options"]["num_thread"] = int(runtime_config.llmThreads)
+    ok, result = _ollama_request(path="/api/generate", payload=payload, timeout=420.0)
+    if not ok:
+        return False, {"reason": result.get("reason", "ollama_request_failed"), "detail": result.get("error")}
+    reply = _extract_generated_text(result.get("response"))
+    if not reply:
+        return False, {"reason": "ollama_empty_output"}
+    return True, {"reply": reply}
+
+
+def _run_llm(prompt: str) -> tuple[bool, dict]:
+    if runtime_config.llmProvider == "ollama":
+        return _run_ollama(prompt)
+    return _run_llama_cpp(prompt)
 
 
 def _load_qwen_asr_model() -> tuple[bool, dict]:
@@ -550,7 +714,9 @@ def _feature_status() -> dict:
             "enabled": True,
             "ready": llm_runtime_error is None,
             "experimental": False,
-            "pathConfigured": bool(runtime_config.llmModelPath.strip()),
+            "pathConfigured": bool(runtime_config.llmModel.strip())
+            if runtime_config.llmProvider == "ollama"
+            else bool(runtime_config.llmModelPath.strip()),
             "provider": runtime_config.llmProvider,
             "model": runtime_config.llmModel,
             "modelPath": runtime_config.llmModelPath,
@@ -612,21 +778,22 @@ def runtime_status() -> dict:
 def runtime_update_config(payload: RuntimeConfig) -> dict:
     global runtime_config, asr_runtime_error, asr_model_ref, asr_model, ocr_runtime_error, ocr_model_ref, ocr_pipe
     global language_pack_runtime_error, language_pack_ref, language_pack_payload
-    runtime_config = payload
-    _persist_runtime_config(runtime_config)
-    # Reset ASR cache to force reload after config changes.
-    asr_runtime_error = None
-    asr_model_ref = None
-    asr_model = None
-    ocr_runtime_error = None
-    ocr_model_ref = None
-    ocr_pipe = None
-    language_pack_runtime_error = None
-    language_pack_ref = None
-    language_pack_payload = None
-    for telemetry in feature_telemetry.values():
-        telemetry["lastLatencyMs"] = None
-        telemetry["lastFailureReason"] = None
+    with _model_state_lock:
+        runtime_config = payload
+        _persist_runtime_config(runtime_config)
+        # Reset model caches atomically so in-flight requests see a consistent nil state.
+        asr_runtime_error = None
+        asr_model_ref = None
+        asr_model = None
+        ocr_runtime_error = None
+        ocr_model_ref = None
+        ocr_pipe = None
+        language_pack_runtime_error = None
+        language_pack_ref = None
+        language_pack_payload = None
+        for telemetry in feature_telemetry.values():
+            telemetry["lastLatencyMs"] = None
+            telemetry["lastFailureReason"] = None
     return runtime_status()
 
 
@@ -652,7 +819,7 @@ def llm_generate(payload: LlmGenerateRequest) -> dict:
             "model": runtime_config.llmModel,
         }
     prompt = _build_llm_prompt(prompt=text, language_mode=payload.languageMode)
-    ok, result = _run_llama_cpp(prompt)
+    ok, result = _run_llm(prompt)
     if not ok:
         latency_ms = int((time() - started) * 1000)
         _record_feature_failure("llm", str(result.get("reason", "llm_runtime_error")), latency_ms)
@@ -721,13 +888,22 @@ def asr_transcribe(payload: AsrTranscribeRequest) -> dict:
             "degraded": True,
         }
 
-    assert asr_model is not None
+    current_asr = asr_model
+    if current_asr is None:
+        _record_feature_failure("asr", "asr_model_not_ready")
+        return {
+            "accepted": False,
+            "reason": "asr_model_not_ready",
+            "provider": runtime_config.asrProvider,
+            "model": runtime_config.asrModel,
+            "degraded": True,
+        }
     language_hint = payload.languageHint if payload.languageHint is not None else runtime_config.asrLanguageHint
     return_timestamps = (
         payload.returnTimestamps if payload.returnTimestamps is not None else runtime_config.asrReturnTimestamps
     )
     try:
-        results = asr_model.transcribe(
+        results = current_asr.transcribe(
             audio=audio_input,
             language=language_hint,
             return_time_stamps=bool(return_timestamps),
@@ -735,7 +911,7 @@ def asr_transcribe(payload: AsrTranscribeRequest) -> dict:
     except ValueError:
         # Retry without forced-align timestamps when aligner is not configured.
         try:
-            results = asr_model.transcribe(
+            results = current_asr.transcribe(
                 audio=audio_input,
                 language=language_hint,
                 return_time_stamps=False,
@@ -796,6 +972,11 @@ def asr_transcribe(payload: AsrTranscribeRequest) -> dict:
     }
 
 
+_ALLOWED_OCR_EXTENSIONS = {
+    ".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tiff", ".tif", ".pdf",
+}
+
+
 @app.post("/ocr/extract")
 def ocr_extract(payload: OcrExtractRequest) -> dict:
     started = time()
@@ -810,6 +991,8 @@ def ocr_extract(payload: OcrExtractRequest) -> dict:
             "degraded": True,
         }
     source = Path(payload.path).resolve()
+    if source.suffix.lower() not in _ALLOWED_OCR_EXTENSIONS:
+        return {"accepted": False, "reason": "unsupported_file_type", "degraded": True}
     if not source.exists() or not source.is_file():
         _record_feature_failure("ocr", "image_not_found")
         return {"accepted": False, "reason": "image_not_found"}
@@ -841,7 +1024,16 @@ def ocr_extract(payload: OcrExtractRequest) -> dict:
                 "model": runtime_config.ocrModel,
                 "degraded": True,
             }
-        assert ocr_pipe is not None
+        current_ocr = ocr_pipe
+        if current_ocr is None:
+            _record_feature_failure("ocr", "ocr_model_not_ready")
+            return {
+                "accepted": False,
+                "reason": "ocr_model_not_ready",
+                "provider": runtime_config.ocrProvider,
+                "model": runtime_config.ocrModel,
+                "degraded": True,
+            }
         try:
             messages = [
                 {
@@ -852,7 +1044,7 @@ def ocr_extract(payload: OcrExtractRequest) -> dict:
                     ],
                 }
             ]
-            result = ocr_pipe(text=messages, return_full_text=False, max_new_tokens=1024)
+            result = current_ocr(text=messages, return_full_text=False, max_new_tokens=1024)
         except Exception as exc:
             _record_feature_failure("ocr", "ocr_inference_failed", int((time() - started) * 1000))
             return {
@@ -885,3 +1077,73 @@ def ocr_extract(payload: OcrExtractRequest) -> dict:
         "degraded": False,
         "latencyMs": latency_ms,
     }
+
+
+@app.post("/tts/synthesize")
+def tts_synthesize(payload: TtsSynthesizeRequest) -> dict:
+    import base64
+    import tempfile
+
+    started = time()
+    text = payload.text.strip()
+    if not text:
+        return {"accepted": False, "reason": "text_required", "degraded": True}
+
+    command = runtime_config.ttsCommand.strip() or "piper"
+    command_path = Path(command).expanduser()
+    if command_path.is_file():
+        executable = str(command_path)
+    else:
+        resolved = shutil.which(command)
+        if resolved is None:
+            return {
+                "accepted": False,
+                "reason": "piper_binary_missing",
+                "provider": "piper",
+                "degraded": True,
+            }
+        executable = resolved
+
+    model_path = _resolve_tts_model_path()
+    if model_path is None:
+        return {
+            "accepted": False,
+            "reason": "tts_model_path_missing",
+            "provider": "piper",
+            "degraded": True,
+        }
+
+    config_path = model_path.with_name(f"{model_path.stem}.onnx.json")
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+        output_path = Path(tmp.name)
+
+    try:
+        args = [executable, "-m", str(model_path), "-f", str(output_path)]
+        if config_path.is_file():
+            args.extend(["-c", str(config_path)])
+        subprocess.run(
+            args,
+            input=text.encode("utf-8"),
+            check=True,
+            timeout=60,
+        )
+        audio_bytes = output_path.read_bytes()
+        if not audio_bytes:
+            return {"accepted": False, "reason": "tts_empty_audio", "provider": "piper", "degraded": True}
+        data_url = "data:audio/wav;base64," + base64.b64encode(audio_bytes).decode("ascii")
+        latency_ms = int((time() - started) * 1000)
+        return {
+            "accepted": True,
+            "reason": "ok",
+            "audioDataUrl": data_url,
+            "provider": "piper",
+            "model": model_path.name,
+            "degraded": False,
+            "latencyMs": latency_ms,
+        }
+    except subprocess.TimeoutExpired:
+        return {"accepted": False, "reason": "tts_timeout", "provider": "piper", "degraded": True}
+    except subprocess.CalledProcessError:
+        return {"accepted": False, "reason": "tts_synthesis_failed", "provider": "piper", "degraded": True}
+    finally:
+        output_path.unlink(missing_ok=True)

@@ -27,6 +27,7 @@ export interface AssistantRequest {
   mode?: "chat" | "action";
   tab?: MindiTabId;
   conversation?: ChatMessage[];
+  wakeInvoke?: boolean;
 }
 
 export interface AssistantResponse {
@@ -95,6 +96,7 @@ export interface CreateTaskRequest {
   title: string;
   dueAt?: string;
   recurrence?: "daily" | "weekly";
+  idempotencyKey?: string;
 }
 
 export interface TaskStatusUpdateRequest {
@@ -226,6 +228,7 @@ export interface CreateMemoryNoteRequest {
   title: string;
   content: string;
   tags?: string[];
+  idempotencyKey?: string;
 }
 
 export interface MemorySearchResponse {

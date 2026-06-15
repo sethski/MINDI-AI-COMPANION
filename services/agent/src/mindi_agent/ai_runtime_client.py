@@ -22,6 +22,8 @@ class LocalAiRuntimeClient:
             "llmLanguagePackPath": "",
             "asrModelPath": "",
             "ocrModelPath": "",
+            "ttsModelPath": "",
+            "ttsCommand": "piper",
             "ocrPythonExecutable": "",
             "llmCommand": "llama-cli",
             "llmContextSize": 4096,
@@ -91,13 +93,17 @@ class LocalAiRuntimeClient:
 
     def _feature_defaults(self) -> dict:
         cfg = self._config
+        llm_provider = str(cfg.get("llmProvider", "llama.cpp"))
+        llm_configured = bool(str(cfg.get("llmModel", "")).strip()) if llm_provider == "ollama" else bool(
+            str(cfg.get("llmModelPath", "")).strip()
+        )
         return {
             "llm": {
                 "enabled": True,
                 "ready": False,
                 "experimental": False,
-                "pathConfigured": bool(str(cfg.get("llmModelPath", "")).strip()),
-                "provider": str(cfg.get("llmProvider", "llama.cpp")),
+                "pathConfigured": llm_configured,
+                "provider": llm_provider,
                 "model": str(cfg.get("llmModel", "Qwen/Qwen2.5-7B-Instruct")),
                 "lastError": "runtime_unreachable",
                 "lastLatencyMs": None,
@@ -255,6 +261,23 @@ class LocalAiRuntimeClient:
                 "segments": [],
                 "provider": str(self._config.get("asrProvider", "huggingface_local")),
                 "model": str(self._config.get("asrModel", "Qwen/Qwen3-ASR-1.7B")),
+                "degraded": True,
+            }
+        return payload
+
+    def synthesize_tts(self, *, text: str) -> dict:
+        ok, payload = self._request(
+            "POST",
+            "/tts/synthesize",
+            payload={"text": text},
+            timeout=90.0,
+        )
+        if not ok:
+            return {
+                "accepted": False,
+                "reason": payload.get("reason", "runtime_unavailable"),
+                "audioDataUrl": None,
+                "provider": "piper",
                 "degraded": True,
             }
         return payload

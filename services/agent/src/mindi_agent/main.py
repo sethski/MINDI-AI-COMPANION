@@ -1,10 +1,18 @@
-from fastapi import FastAPI, HTTPException, Query
+import asyncio
+import secrets
+from contextlib import asynccontextmanager
+from pathlib import Path
+
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from .schemas import (
     AiRuntimeConfigUpdateRequest,
     AiRuntimeSmokeRequest,
     AsrTranscribeRequest,
+    DebugSessionLogRequest,
+    TtsSynthesizeRequest,
     AppControlRequest,
     DatasetPrepareRequest,
     AddPermissionGrantRequest,
@@ -37,7 +45,48 @@ from .schemas import (
 )
 from .store import RuntimeStore
 
-app = FastAPI(title="MINDI Local Agent", version="0.1.0")
+_TOKEN_PATH = Path("data/runtime/.agent-token")
+
+
+def _load_or_create_token() -> str:
+    _TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
+    if _TOKEN_PATH.exists():
+        existing = _TOKEN_PATH.read_text(encoding="utf-8").strip()
+        if len(existing) == 64:
+            return existing
+    token = secrets.token_hex(32)
+    _TOKEN_PATH.write_text(token, encoding="utf-8")
+    try:
+        _TOKEN_PATH.chmod(0o600)
+    except Exception:
+        pass
+    return token
+
+
+startup_token = _load_or_create_token()
+
+
+async def _sync_ai_runtime_config() -> None:
+    for _ in range(12):
+        ok, payload = await asyncio.to_thread(
+            store.ai_runtime.push_config_to_runtime,
+            timeout=2.0,
+        )
+        if ok:
+            features = payload.get("features", {}) if isinstance(payload, dict) else {}
+            llm = features.get("llm", {}) if isinstance(features, dict) else {}
+            if llm.get("ready"):
+                return
+        await asyncio.sleep(0.5)
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    asyncio.create_task(_sync_ai_runtime_config())
+    yield
+
+
+app = FastAPI(title="MINDI Local Agent", version="0.1.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -52,21 +101,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+@app.middleware("http")
+async def _auth_guard(request: Request, call_next):
+    if not startup_token or request.url.path == "/health" or request.method == "OPTIONS":
+        return await call_next(request)
+    if request.headers.get("Authorization") != f"Bearer {startup_token}":
+        return JSONResponse({"detail": "unauthorized"}, status_code=401)
+    return await call_next(request)
+
+
 store = RuntimeStore()
-
-
-@app.on_event("startup")
-def sync_ai_runtime_config() -> None:
-    import time
-
-    for _ in range(12):
-        ok, payload = store.ai_runtime.push_config_to_runtime(timeout=2.0)
-        if ok:
-            features = payload.get("features", {}) if isinstance(payload, dict) else {}
-            llm = features.get("llm", {}) if isinstance(features, dict) else {}
-            if llm.get("ready"):
-                return
-        time.sleep(0.5)
 
 
 @app.get("/health")
@@ -80,8 +125,8 @@ def hub_snapshot():
 
 
 @app.post("/assistant/respond")
-def assistant_respond(payload: AssistantRequest):
-    return store.respond(payload)
+async def assistant_respond(payload: AssistantRequest):
+    return await asyncio.to_thread(store.respond, payload)
 
 
 @app.get("/ops/ai/status")
@@ -95,8 +140,13 @@ def ops_ai_config(payload: AiRuntimeConfigUpdateRequest):
 
 
 @app.post("/ops/asr/transcribe")
-def ops_asr_transcribe(payload: AsrTranscribeRequest):
-    return store.transcribe_audio(payload)
+async def ops_asr_transcribe(payload: AsrTranscribeRequest):
+    return await asyncio.to_thread(store.transcribe_audio, payload)
+
+
+@app.post("/ops/tts/synthesize")
+async def ops_tts_synthesize(payload: TtsSynthesizeRequest):
+    return await asyncio.to_thread(store.synthesize_speech, payload)
 
 
 @app.post("/ops/orb/listening")
@@ -104,9 +154,14 @@ def ops_orb_listening(payload: OrbListeningRequest):
     return store.set_orb_listening(payload)
 
 
+@app.post("/ops/debug/session-log")
+def ops_debug_session_log(payload: DebugSessionLogRequest):
+    return store.append_debug_session_log(payload.model_dump(exclude_none=True))
+
+
 @app.post("/ops/ai/smoke")
-def ops_ai_smoke(payload: AiRuntimeSmokeRequest):
-    return store.ai_runtime_smoke(payload)
+async def ops_ai_smoke(payload: AiRuntimeSmokeRequest):
+    return await asyncio.to_thread(store.ai_runtime_smoke, payload)
 
 
 @app.get("/tasks")
@@ -164,8 +219,8 @@ def add_permission(payload: AddPermissionGrantRequest):
 
 
 @app.post("/control/file-organize")
-def control_file_organize(payload: FileOrganizeRequest):
-    return store.file_organize(payload)
+async def control_file_organize(payload: FileOrganizeRequest):
+    return await asyncio.to_thread(store.file_organize, payload)
 
 
 @app.get("/control/apps/allowlist")
@@ -174,8 +229,8 @@ def control_apps_allowlist():
 
 
 @app.post("/control/apps/action")
-def control_apps_action(payload: AppControlRequest):
-    return store.control_app(payload)
+async def control_apps_action(payload: AppControlRequest):
+    return await asyncio.to_thread(store.control_app, payload)
 
 
 @app.get("/memory/notes")
@@ -194,8 +249,8 @@ def memory_search(q: str = Query(default="", alias="query"), limit: int = Query(
 
 
 @app.post("/memory/documents/import")
-def memory_document_import(payload: DocumentImportRequest):
-    return store.import_document(payload)
+async def memory_document_import(payload: DocumentImportRequest):
+    return await asyncio.to_thread(store.import_document, payload)
 
 
 @app.get("/memory/documents/search")
@@ -207,13 +262,13 @@ def memory_document_search(
 
 
 @app.post("/memory/ocr/import")
-def memory_ocr_import(payload: OcrImportRequest):
-    return store.import_ocr_document(payload)
+async def memory_ocr_import(payload: OcrImportRequest):
+    return await asyncio.to_thread(store.import_ocr_document, payload)
 
 
 @app.post("/perception/screen/analyze")
-def perception_screen_analyze(payload: PerceptionAnalyzeRequest):
-    return store.analyze_screen(payload)
+async def perception_screen_analyze(payload: PerceptionAnalyzeRequest):
+    return await asyncio.to_thread(store.analyze_screen, payload)
 
 
 @app.get("/perception/permissions")
@@ -240,8 +295,8 @@ def memory_auto_index_status():
 
 
 @app.post("/memory/auto-index/scan")
-def memory_auto_index_scan():
-    return store.auto_index_scan_once()
+async def memory_auto_index_scan():
+    return await asyncio.to_thread(store.auto_index_scan_once)
 
 
 @app.get("/ops/scheduler/status")
@@ -250,8 +305,8 @@ def ops_scheduler_status():
 
 
 @app.post("/ops/scheduler/scan")
-def ops_scheduler_scan():
-    return store.scheduler_scan_once()
+async def ops_scheduler_scan():
+    return await asyncio.to_thread(store.scheduler_scan_once)
 
 
 @app.post("/ops/scheduler/next-run")
@@ -265,8 +320,8 @@ def ops_scheduler_parse_time(payload: TaskTimeParseRequest):
 
 
 @app.post("/ops/web/scrape")
-def ops_web_scrape(payload: WebScrapeRequest):
-    return store.scrape_web(payload)
+async def ops_web_scrape(payload: WebScrapeRequest):
+    return await asyncio.to_thread(store.scrape_web, payload)
 
 
 @app.get("/ops/security/events")
@@ -278,18 +333,18 @@ def ops_security_events(
 
 
 @app.post("/ops/security/scan")
-def ops_security_scan():
-    return store.scan_security()
+async def ops_security_scan():
+    return await asyncio.to_thread(store.scan_security)
 
 
 @app.post("/ops/security/recover")
-def ops_security_recover(payload: SecurityRecoveryRequest):
-    return store.recover_security_event(payload)
+async def ops_security_recover(payload: SecurityRecoveryRequest):
+    return await asyncio.to_thread(store.recover_security_event, payload)
 
 
 @app.post("/ops/automation/run")
-def ops_automation_run(payload: AutomationChainRequest):
-    return store.run_automation_chain(payload)
+async def ops_automation_run(payload: AutomationChainRequest):
+    return await asyncio.to_thread(store.run_automation_chain, payload)
 
 
 @app.get("/ops/alerts/feed")
@@ -338,13 +393,13 @@ def ops_intelligence_tuning_discard():
 
 
 @app.post("/ops/intelligence/eval/run")
-def ops_intelligence_eval_run(payload: IntelligenceEvalRunRequest | None = None):
-    return store.run_intelligence_eval(payload)
+async def ops_intelligence_eval_run(payload: IntelligenceEvalRunRequest | None = None):
+    return await asyncio.to_thread(store.run_intelligence_eval, payload)
 
 
 @app.post("/ops/intelligence/tuning/apply")
-def ops_intelligence_tuning_apply():
-    return store.apply_intelligence_tuning()
+async def ops_intelligence_tuning_apply():
+    return await asyncio.to_thread(store.apply_intelligence_tuning)
 
 
 @app.get("/ops/intelligence/learning/status")
@@ -358,13 +413,13 @@ def ops_intelligence_learning_source(payload: IntelligenceLearningSourceRequest)
 
 
 @app.post("/ops/intelligence/learning/run")
-def ops_intelligence_learning_run():
-    return store.run_intelligence_learning()
+async def ops_intelligence_learning_run():
+    return await asyncio.to_thread(store.run_intelligence_learning)
 
 
 @app.post("/ops/intelligence/learning/apply")
-def ops_intelligence_learning_apply(payload: IntelligenceLearningApplyRequest):
-    return store.apply_intelligence_learning(payload)
+async def ops_intelligence_learning_apply(payload: IntelligenceLearningApplyRequest):
+    return await asyncio.to_thread(store.apply_intelligence_learning, payload)
 
 
 @app.get("/ops/intelligence/eval/history")
@@ -378,20 +433,20 @@ def ops_intelligence_adaptation_status():
 
 
 @app.post("/ops/intelligence/adaptation/export")
-def ops_intelligence_adaptation_export() -> IntelligenceAdaptationExportResponse:
-    return store.export_intelligence_adaptation()
+async def ops_intelligence_adaptation_export() -> IntelligenceAdaptationExportResponse:
+    return await asyncio.to_thread(store.export_intelligence_adaptation)
 
 
 @app.post("/ops/intelligence/dataset/prepare")
-def ops_intelligence_dataset_prepare(payload: DatasetPrepareRequest):
-    return store.prepare_intelligence_dataset(payload)
+async def ops_intelligence_dataset_prepare(payload: DatasetPrepareRequest):
+    return await asyncio.to_thread(store.prepare_intelligence_dataset, payload)
 
 
 @app.post("/calendar/export")
-def calendar_export(payload: CalendarExportRequest):
-    return store.export_calendar(payload)
+async def calendar_export(payload: CalendarExportRequest):
+    return await asyncio.to_thread(store.export_calendar, payload)
 
 
 @app.post("/calendar/import")
-def calendar_import(payload: CalendarImportRequest):
-    return store.import_calendar(payload)
+async def calendar_import(payload: CalendarImportRequest):
+    return await asyncio.to_thread(store.import_calendar, payload)

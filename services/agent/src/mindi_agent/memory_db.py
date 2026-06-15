@@ -34,6 +34,7 @@ ALLOWED_DOCUMENT_SUFFIXES = {
 }
 
 _TOKEN_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9'-]{1,31}")
+_MIN_RAG_SCORE = 0.3
 _SEMANTIC_ALIASES = {
     "arrange": ("organize", "sort", "order"),
     "arranging": ("organize", "sort", "order"),
@@ -385,6 +386,8 @@ class MemoryDB:
                 continue
             retrieval_mode = "hybrid" if keyword > 0 and semantic > 0 else "semantic" if semantic > 0 else "keyword"
             score = keyword + (semantic * 5.0)
+            if score < _MIN_RAG_SCORE:
+                continue
             result.append(
                 MemoryDocumentChunk(
                     id=row["id"],

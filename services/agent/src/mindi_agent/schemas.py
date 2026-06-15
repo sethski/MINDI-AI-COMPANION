@@ -30,6 +30,7 @@ class AssistantRequest(BaseModel):
     mode: Literal["chat", "action"] = "chat"
     tab: str | None = None
     conversation: list[ChatMessage] | None = None
+    wakeInvoke: bool = False
 
 
 class RagCitation(BaseModel):
@@ -110,6 +111,7 @@ class CreateTaskRequest(BaseModel):
     title: str
     dueAt: str | None = None
     recurrence: Literal["daily", "weekly"] | None = None
+    idempotencyKey: str | None = None
 
 
 class TaskStatusUpdateRequest(BaseModel):
@@ -188,6 +190,7 @@ class CreateMemoryNoteRequest(BaseModel):
     title: str
     content: str
     tags: list[str] = Field(default_factory=list)
+    idempotencyKey: str | None = None
 
 
 class MemorySearchResponse(BaseModel):
@@ -307,6 +310,8 @@ class AiRuntimeConfig(BaseModel):
     llmLanguagePackPath: str = ""
     asrModelPath: str = ""
     ocrModelPath: str = ""
+    ttsModelPath: str = ""
+    ttsCommand: str = "piper"
     ocrPythonExecutable: str = ""
     llmCommand: str = "llama-cli"
     llmContextSize: int = 4096
@@ -339,6 +344,8 @@ class AiRuntimeConfigUpdateRequest(BaseModel):
     llmLanguagePackPath: str | None = None
     asrModelPath: str | None = None
     ocrModelPath: str | None = None
+    ttsModelPath: str | None = None
+    ttsCommand: str | None = None
     ocrPythonExecutable: str | None = None
     llmCommand: str | None = None
     llmContextSize: int | None = None
@@ -381,6 +388,30 @@ class AsrTranscribeResponse(BaseModel):
     model: str | None = None
     degraded: bool = False
     fallbackReason: str | None = None
+
+
+class DebugSessionLogRequest(BaseModel):
+    sessionId: str | None = None
+    location: str | None = None
+    message: str | None = None
+    timestamp: int | None = None
+    runId: str | None = None
+    hypothesisId: str | None = None
+    data: dict[str, object] | None = None
+
+
+class TtsSynthesizeRequest(BaseModel):
+    text: str
+
+
+class TtsSynthesizeResponse(BaseModel):
+    accepted: bool
+    reason: str
+    audioDataUrl: str | None = None
+    provider: str | None = None
+    model: str | None = None
+    degraded: bool = False
+    latencyMs: int | None = None
 
 
 class OrbListeningRequest(BaseModel):
