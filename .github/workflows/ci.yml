@@ -42,12 +42,17 @@ jobs:
       - name: Verify conftest import chain
         run: |
           python -c "
-          import mindi_agent.main as _agent_main
-          from mindi_agent.main import store
-          from mindi_agent.memory_db import MemoryDB
-          print('conftest import chain OK')
-          print('store type:', type(store).__name__)
-          print('has ai_runtime:', hasattr(store, 'ai_runtime'))
+          import sys, traceback
+          try:
+              import mindi_agent.main as _agent_main
+              from mindi_agent.main import store
+              from mindi_agent.memory_db import MemoryDB
+              print('conftest import chain OK; store type:', type(store).__name__)
+          except Exception as e:
+              tb = traceback.format_exc().replace(chr(10), ' | ')
+              print(f'::error::Import failed: {type(e).__name__}: {e}')
+              print(f'::error::Traceback: {tb}')
+              sys.exit(1)
           "
 
       - name: Collect tests (dry-run)
@@ -96,7 +101,19 @@ jobs:
 
       - name: Verify conftest import chain
         run: |
-          python -c "import mindi_agent.main as _agent_main; from mindi_agent.main import store; from mindi_agent.memory_db import MemoryDB; print('conftest chain OK'); print('store type:', type(store).__name__)"
+          python -c "
+          import sys, traceback
+          try:
+              import mindi_agent.main as _agent_main
+              from mindi_agent.main import store
+              from mindi_agent.memory_db import MemoryDB
+              print('conftest import chain OK; store type:', type(store).__name__)
+          except Exception as e:
+              tb = traceback.format_exc().replace(chr(10), ' | ')
+              print(f'::error::Import failed: {type(e).__name__}: {e}')
+              print(f'::error::Traceback: {tb}')
+              sys.exit(1)
+          "
 
       - name: Collect tests (dry-run)
         run: python -m pytest services/agent/tests --collect-only -q
