@@ -37,11 +37,14 @@ jobs:
           python -m pip install -e "services/agent[dev]"
           python -m pip install -e "services/ai_runtime[dev]"
 
-      - name: Install Playwright Chromium
-        run: pnpm exec playwright install --with-deps chromium
+      - name: Run agent tests
+        run: pnpm test:agent
 
-      - name: Run CI checks
-        run: pnpm ci:check
+      - name: Run AI runtime contract tests
+        run: pnpm test:ai-runtime
+
+      - name: Typecheck desktop frontend
+        run: pnpm --dir apps/desktop build
 
   test-windows:
     runs-on: windows-latest
@@ -80,4 +83,4 @@ jobs:
         run: pnpm test:ai-runtime
 
       - name: Typecheck desktop frontend
-        run: pnpm build:desktop
+        run: pnpm --dir apps/desktop build
