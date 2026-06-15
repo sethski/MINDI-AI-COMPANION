@@ -9,9 +9,21 @@ __pycache__/
 *.pyo
 *.pyd
 *.sqlite3
+*.db
 *.log
 apps/desktop/src-tauri/target/
+
+# Runtime data, secrets, and local databases
 data/runtime/
+data/inbox/
+services/agent/data/
+.agent-token
+
+# Binary capture files
+*.webm
+*.mp4
+*.mp3
+
 *.egg-info/
 playwright-report/
 test-results/
