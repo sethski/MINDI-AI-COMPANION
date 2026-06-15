@@ -315,7 +315,7 @@ def test_ocr_import_success_with_mock(tmp_path: Path) -> None:
         json={"scope": "folder", "subject": str(tmp_path), "decision": "allow"},
     )
 
-    with patch("mindi_agent.store.extract_text_for_ocr") as mock_ocr:
+    with patch("mindi_agent.memory_service.extract_text_for_ocr") as mock_ocr:
         mock_ocr.return_value = ("invoice total 4200", "image_ocr")
         response = client.post("/memory/ocr/import", json={"path": str(image)})
         assert response.status_code == 200
@@ -352,7 +352,7 @@ def test_ocr_import_prefers_runtime_backend_when_available(tmp_path: Path) -> No
             "degraded": False,
         },
     ):
-        with patch("mindi_agent.store.extract_text_for_ocr", side_effect=AssertionError("fallback should not run")):
+        with patch("mindi_agent.memory_service.extract_text_for_ocr", side_effect=AssertionError("fallback should not run")):
             response = client.post("/memory/ocr/import", json={"path": str(image)})
 
     assert response.status_code == 200
@@ -385,7 +385,7 @@ def test_ocr_import_falls_back_with_explicit_runtime_reason(tmp_path: Path) -> N
             "degraded": True,
         },
     ):
-        with patch("mindi_agent.store.extract_text_for_ocr") as mock_ocr:
+        with patch("mindi_agent.memory_service.extract_text_for_ocr") as mock_ocr:
             mock_ocr.return_value = ("fallback text", "image_ocr")
             response = client.post("/memory/ocr/import", json={"path": str(image)})
 
@@ -916,8 +916,8 @@ def test_ops_web_scrape_success_and_store_note() -> None:
         json={"scope": "domain", "subject": "example.com", "decision": "allow"},
     )
 
-    with patch("mindi_agent.store.urlopen") as mock_urlopen:
-        mock_urlopen.return_value = _MockUrlResponse(html)
+    with patch("mindi_agent.web_service.build_opener") as mock_build:
+        mock_build.return_value.open.return_value = _MockUrlResponse(html)
         response = client.post(
             "/ops/web/scrape",
             json={"url": "https://example.com/security", "maxChars": 800, "storeAsNote": True},
@@ -1069,11 +1069,11 @@ def test_ops_automation_chain_success() -> None:
             )
         return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
 
-    with patch("mindi_agent.store.urlopen") as mock_urlopen, patch(
+    with patch("mindi_agent.web_service.build_opener") as mock_build, patch(
         "mindi_agent.store.subprocess.run",
         side_effect=fake_run,
     ):
-        mock_urlopen.return_value = _MockUrlResponse(html)
+        mock_build.return_value.open.return_value = _MockUrlResponse(html)
         response = client.post(
             "/ops/automation/run",
             json={
@@ -1227,8 +1227,8 @@ def test_ops_web_scrape_storage_redaction_applies_to_note() -> None:
         json={"scope": "domain", "subject": "example.com", "decision": "allow"},
     )
 
-    with patch("mindi_agent.store.urlopen") as mock_urlopen:
-        mock_urlopen.return_value = _MockUrlResponse(html)
+    with patch("mindi_agent.web_service.build_opener") as mock_build:
+        mock_build.return_value.open.return_value = _MockUrlResponse(html)
         response = client.post(
             "/ops/web/scrape",
             json={"url": "https://example.com/private", "storeAsNote": True},
@@ -1261,7 +1261,7 @@ def test_perception_storage_redaction_applies_to_snapshot() -> None:
     encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
     data_url = f"data:image/png;base64,{encoded}"
 
-    with patch("mindi_agent.store.extract_text_for_ocr") as mock_ocr:
+    with patch("mindi_agent.memory_service.extract_text_for_ocr") as mock_ocr:
         mock_ocr.return_value = (f"{marker} email admin@example.com", "image_ocr")
         analyzed = client.post(
             "/perception/screen/analyze",
@@ -1376,7 +1376,8 @@ def test_intelligence_tuning_apply_requires_eval_gate() -> None:
     assistant = client.post("/assistant/respond", json={"text": "summarize my notes"})
     assert assistant.status_code == 200
     reply = assistant.json()["reply"]
-    assert reply.startswith("Status: ")
+    assert reply
+    assert not reply.startswith("Status: ")
 
     reset = client.post(
         "/ops/intelligence/tuning/stage",
@@ -1768,7 +1769,7 @@ def test_perception_screen_analyze_success(tmp_path: Path) -> None:
         json={"scope": "action", "subject": "perception.screen.capture", "decision": "allow"},
     )
 
-    with patch("mindi_agent.store.extract_text_for_ocr") as mock_ocr:
+    with patch("mindi_agent.memory_service.extract_text_for_ocr") as mock_ocr:
         mock_ocr.return_value = ("open settings panel", "image_ocr")
         response = client.post(
             "/perception/screen/analyze",
@@ -1802,7 +1803,7 @@ def test_perception_screen_analyze_allows_blocks_when_ocr_fails(tmp_path: Path) 
         json={"scope": "action", "subject": "perception.screen.capture", "decision": "allow"},
     )
 
-    with patch("mindi_agent.store.extract_text_for_ocr") as mock_ocr:
+    with patch("mindi_agent.memory_service.extract_text_for_ocr") as mock_ocr:
         mock_ocr.side_effect = ValueError("tesseract_not_installed")
         response = client.post(
             "/perception/screen/analyze",
@@ -1846,7 +1847,7 @@ def test_perception_screen_analyze_prefers_runtime_ocr_backend(tmp_path: Path) -
             "degraded": False,
         },
     ):
-        with patch("mindi_agent.store.extract_text_for_ocr", side_effect=AssertionError("fallback should not run")):
+        with patch("mindi_agent.memory_service.extract_text_for_ocr", side_effect=AssertionError("fallback should not run")):
             response = client.post(
                 "/perception/screen/analyze",
                 json={"path": str(image_path), "includeOcr": True, "maxBlocks": 10},
@@ -1892,7 +1893,7 @@ def test_perception_screen_analyze_runtime_ocr_failure_keeps_blocks(tmp_path: Pa
             "degraded": True,
         },
     ):
-        with patch("mindi_agent.store.extract_text_for_ocr") as mock_ocr:
+        with patch("mindi_agent.memory_service.extract_text_for_ocr") as mock_ocr:
             mock_ocr.return_value = ("fallback screen text", "image_ocr")
             response = client.post(
                 "/perception/screen/analyze",
@@ -1948,7 +1949,7 @@ def test_perception_screen_analyze_inline_data_url() -> None:
         json={"scope": "action", "subject": "perception.screen.capture", "decision": "allow"},
     )
 
-    with patch("mindi_agent.store.extract_text_for_ocr") as mock_ocr:
+    with patch("mindi_agent.memory_service.extract_text_for_ocr") as mock_ocr:
         mock_ocr.return_value = ("quick panel", "image_ocr")
         response = client.post(
             "/perception/screen/analyze",
@@ -1980,7 +1981,7 @@ def test_perception_snapshot_memory_bridge_list_and_search() -> None:
         json={"scope": "action", "subject": "perception.screen.capture", "decision": "allow"},
     )
 
-    with patch("mindi_agent.store.extract_text_for_ocr") as mock_ocr:
+    with patch("mindi_agent.memory_service.extract_text_for_ocr") as mock_ocr:
         mock_ocr.return_value = (f"screen says {marker}", "image_ocr")
         analyzed = client.post(
             "/perception/screen/analyze",
@@ -2019,7 +2020,7 @@ def test_assistant_uses_latest_perception_snapshot_context() -> None:
         json={"scope": "action", "subject": "perception.screen.capture", "decision": "allow"},
     )
 
-    with patch("mindi_agent.store.extract_text_for_ocr") as mock_ocr:
+    with patch("mindi_agent.memory_service.extract_text_for_ocr") as mock_ocr:
         mock_ocr.return_value = (f"latest ui text {marker}", "image_ocr")
         analyzed = client.post(
             "/perception/screen/analyze",
@@ -2120,6 +2121,57 @@ def test_assistant_response_runtime_failure_falls_back() -> None:
     assert body["fallbackReason"] == "llama_cpp_timeout"
     assert body["provider"] == "llama.cpp"
     assert body["model"] == "Qwen/Qwen2.5-7B-Instruct"
+
+
+def test_assistant_greeting_skips_document_rag() -> None:
+    with patch.object(
+        store.memory_db,
+        "search_documents",
+        return_value=[],
+    ) as search_mock, patch.object(
+        store.ai_runtime,
+        "generate_reply",
+        return_value={
+            "accepted": True,
+            "reply": "Hey. Good to see you.",
+            "provider": "ollama",
+            "model": "qwen2.5:0.5b",
+            "latencyMs": 12,
+        },
+    ) as generate_mock:
+        response = client.post("/assistant/respond", json={"text": "hi"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["provider"] == "ollama"
+    assert body["rag"]["retrievalMode"] == "none"
+    search_mock.assert_not_called()
+    assert generate_mock.call_args.kwargs["prompt"] == "<user_turn>hi</user_turn>"
+
+
+def test_short_chat_with_docs_does_not_attach_rag() -> None:
+    with patch.object(
+        store.memory_db,
+        "search_documents",
+        return_value=[],
+    ) as search_mock, patch.object(
+        store.ai_runtime,
+        "generate_reply",
+        return_value={
+            "accepted": True,
+            "reply": "Hey. I'm here.",
+            "provider": "ollama",
+            "model": "qwen2.5:0.5b",
+            "latencyMs": 12,
+        },
+    ) as generate_mock:
+        response = client.post("/assistant/respond", json={"text": "how are you"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["rag"]["retrievalMode"] == "none"
+    search_mock.assert_not_called()
+    assert generate_mock.call_args.kwargs["prompt"] == "<user_turn>how are you</user_turn>"
 
 
 def test_ai_runtime_config_update_roundtrip() -> None:

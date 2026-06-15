@@ -3,27 +3,51 @@ import binascii
 import csv
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from html.parser import HTMLParser
 import io
 import json
 from pathlib import Path
 import re
-from shutil import move
 import subprocess
-from threading import Event, Thread
-from time import time
+from threading import Event, Lock, Thread
+from time import monotonic, time
 from urllib.error import URLError
-from urllib.parse import urljoin, urlparse
-from urllib.request import Request, urlopen
+from urllib.parse import urlparse
+from urllib.request import Request, build_opener, urlopen
 from uuid import uuid4
 from zoneinfo import ZoneInfo
-from PIL import Image
-
 from .agent_state import DEFAULT_AGENT_STATE_PATH, load_agent_state, save_agent_state
+from .file_service import FileService, category_for_suffix
+from .intelligence_service import (
+    LEARNING_BLOCKED_TERMS,
+    LEARNING_SOURCE_TAGS,
+    SLANG_EXPLICIT_PATTERNS,
+    IntelligenceService,
+)
+from .memory_service import (
+    MemoryService,
+    document_retrieval_confidence,
+    document_retrieval_mode,
+    should_attach_document_rag,
+)
+from .privacy_utils import SENSITIVE_TEXT_PATTERNS, redact_sensitive_text
+from .security_service import SUSPICIOUS_PROCESS_RULES, SecurityService, parse_tasklist_csv
+from .web_service import WebService
+from .scheduler_utils import (
+    compute_next_run,
+    format_utc,
+    ics_dt,
+    ics_escape,
+    ics_unescape,
+    parse_due_at,
+    parse_ics_datetime,
+    parse_ics_property,
+    parse_ics_trigger_minutes,
+    parse_time_component,
+    resolve_timezone,
+    unfold_ics_lines,
+)
 from .ai_runtime_client import LocalAiRuntimeClient
-from .dataset_pipeline import prepare_ph_dataset_artifacts
-from .memory_db import ALLOWED_DOCUMENT_SUFFIXES, MemoryDB
-from .ocr_service import OCR_IMAGE_SUFFIXES, extract_text_for_ocr
+from .memory_db import MemoryDB
 from .schemas import (
     AiRuntimeConfig,
     AiRuntimeConfigUpdateRequest,
@@ -36,6 +60,8 @@ from .schemas import (
     AsrSegment,
     AsrTranscribeRequest,
     AsrTranscribeResponse,
+    TtsSynthesizeRequest,
+    TtsSynthesizeResponse,
     OrbListeningRequest,
     OrbListeningResponse,
     AutoIndexStatus,
@@ -115,6 +141,7 @@ from .schemas import (
     PrivacyUpdateRequest,
     PermissionGrant,
     PolicyDecision,
+    RagTrace,
     SyncQueueRequest,
     TaskItem,
     WebScrapeRequest,
@@ -124,120 +151,65 @@ from .schemas import (
 
 PERCEPTION_SCREEN_SUBJECT = "perception.screen.capture"
 PERCEPTION_CAMERA_SUBJECT = "perception.camera.capture"
-SUSPICIOUS_PROCESS_RULES: dict[str, tuple[str, str]] = {
-    "mimikatz.exe": ("critical", "Credential dumping tool detected."),
-    "psexec.exe": ("warning", "Remote execution tool detected."),
-    "procdump.exe": ("warning", "Process dump utility detected."),
-    "ncat.exe": ("warning", "Network tunneling utility detected."),
-    "nc.exe": ("warning", "Network tunneling utility detected."),
-}
 
-SENSITIVE_TEXT_PATTERNS: list[tuple[str, re.Pattern[str], str]] = [
-    ("email", re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"), "[REDACTED_EMAIL]"),
-    ("phone", re.compile(r"\b(?:\+?\d[\d\-\s]{7,}\d)\b"), "[REDACTED_PHONE]"),
-    ("card", re.compile(r"\b(?:\d[ -]*?){13,19}\b"), "[REDACTED_CARD]"),
-    ("secret", re.compile(r"\b(?:sk|pk|api|token)[-_]?[A-Za-z0-9]{12,}\b", re.IGNORECASE), "[REDACTED_SECRET]"),
-    (
-        "password",
-        re.compile(r"(?i)\b(password|passwd|pwd)\s*[:=]\s*\S+"),
-        "[REDACTED_PASSWORD]",
+
+
+_TTS_MAX_CHARS = 800
+
+_LLM_UNAVAILABLE_REPLIES: dict[str, str] = {
+    "model_path_missing": (
+        "I'm here but no AI model is configured yet. "
+        "Open the dashboard and go to Settings to set the model path."
     ),
-]
-
-SLANG_EXPLICIT_PATTERNS: list[re.Pattern[str]] = [
-    re.compile(r"(?im)\b(?:slang|term|phrase)\s*[:=-]\s*([A-Za-z][A-Za-z0-9'-]{1,19})\b"),
-    re.compile(r"(?im)\b([A-Za-z][A-Za-z0-9'-]{1,19})\b\s*[-:]\s*(?:slang|taglish|tagalog)\b"),
-]
-LEARNING_SOURCE_TAGS = {"style", "slang", "taglish", "tagalog", "language"}
-LEARNING_BLOCKED_TERMS = {
-    "app",
-    "browser",
-    "brave",
-    "chrome",
-    "cmd",
-    "edge",
-    "firefox",
-    "notepad",
-    "powershell",
-    "terminal",
+    "llama_cpp_binary_missing": (
+        "I'm here but llama-cli isn't installed. "
+        "Install it and set the path under Settings > AI Runtime."
+    ),
+    "ollama_model_missing": (
+        "I'm here but the Ollama model isn't downloaded yet. "
+        "Run `ollama pull <model>` then refresh the AI runtime."
+    ),
+    "runtime_unreachable": (
+        "I'm here but the AI runtime isn't running. "
+        "Start it with `pnpm dev:ai-runtime` or check Settings."
+    ),
+    "llama_cpp_timeout": (
+        "I'm here but the model took too long. "
+        "Try a smaller model or reduce context size in Settings."
+    ),
 }
+_LLM_FALLBACK_REPLY = (
+    "I'm here but the AI model isn't ready. "
+    "Open the dashboard > Settings to configure it."
+)
 
 
-class _ScrapeHtmlParser(HTMLParser):
-    def __init__(self, base_url: str, max_links: int = 20) -> None:
-        super().__init__()
-        self.base_url = base_url
-        self.max_links = max_links
-        self.title: str | None = None
-        self._capture_title = False
-        self._skip_depth = 0
-        self._chunks: list[str] = []
-        self._links: list[str] = []
-
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        normalized = tag.lower()
-        if normalized == "title":
-            self._capture_title = True
-        if normalized in {"script", "style", "noscript"}:
-            self._skip_depth += 1
-            return
-        if normalized == "a" and len(self._links) < self.max_links:
-            href = ""
-            for key, value in attrs:
-                if key.lower() == "href" and value:
-                    href = value.strip()
-                    break
-            if href:
-                joined = urljoin(self.base_url, href)
-                if joined not in self._links:
-                    self._links.append(joined)
-
-    def handle_endtag(self, tag: str) -> None:
-        normalized = tag.lower()
-        if normalized == "title":
-            self._capture_title = False
-        if normalized in {"script", "style", "noscript"} and self._skip_depth > 0:
-            self._skip_depth -= 1
-
-    def handle_data(self, data: str) -> None:
-        if self._skip_depth > 0:
-            return
-        text = " ".join(data.split()).strip()
-        if not text:
-            return
-        if self._capture_title:
-            if self.title:
-                self.title = f"{self.title} {text}".strip()
-            else:
-                self.title = text
-            return
-        self._chunks.append(text)
-
-    def parsed_text(self, max_chars: int) -> str:
-        joined = " ".join(self._chunks)
-        return joined[:max_chars].strip()
-
-    def parsed_links(self) -> list[str]:
-        return self._links
 
 
-def _category_for_suffix(suffix: str) -> str:
-    by_suffix = {
-        ".png": "images",
-        ".jpg": "images",
-        ".jpeg": "images",
-        ".gif": "images",
-        ".webp": "images",
-        ".pdf": "documents",
-        ".docx": "documents",
-        ".txt": "documents",
-        ".md": "documents",
-        ".csv": "data",
-        ".json": "data",
-        ".zip": "archives",
-        ".7z": "archives",
-    }
-    return by_suffix.get(suffix.lower(), "other")
+class _IdempotencyCache:
+    """Deduplicates retried create requests within a short window."""
+
+    _TTL_S = 30.0
+
+    def __init__(self) -> None:
+        self._store: dict[str, tuple[float, Any]] = {}
+        self._lock = Lock()
+
+    def get(self, key: str) -> Any | None:
+        with self._lock:
+            self._evict()
+            entry = self._store.get(key)
+            return entry[1] if entry is not None else None
+
+    def set(self, key: str, value: Any) -> None:
+        with self._lock:
+            self._store[key] = (monotonic(), value)
+
+    def _evict(self) -> None:
+        now = monotonic()
+        expired = [k for k, (ts, _) in self._store.items() if now - ts > self._TTL_S]
+        for k in expired:
+            del self._store[k]
 
 
 @dataclass
@@ -293,9 +265,16 @@ class RuntimeStore:
     intelligence_adaptation_last_export_path: str | None = None
     ai_runtime: LocalAiRuntimeClient = field(default_factory=LocalAiRuntimeClient)
     orb_listening: bool = False
+    respond_lock: Lock = field(default_factory=Lock)
+    _idempotency_cache: _IdempotencyCache = field(default_factory=_IdempotencyCache)
     agent_state_path: Path = field(default_factory=lambda: DEFAULT_AGENT_STATE_PATH)
 
     def __post_init__(self) -> None:
+        self._security_svc: SecurityService = SecurityService(self)
+        self._web_svc: WebService = WebService(self)
+        self._file_svc: FileService = FileService(self)
+        self._memory_svc: MemoryService = MemoryService(self)
+        self._intel_svc: IntelligenceService = IntelligenceService(self)
         snapshot = load_agent_state(self.agent_state_path)
         if snapshot is not None:
             self.tasks = snapshot.tasks
@@ -341,6 +320,23 @@ class RuntimeStore:
     def set_orb_listening(self, request: OrbListeningRequest) -> OrbListeningResponse:
         self.orb_listening = bool(request.listening)
         return OrbListeningResponse(accepted=True, listening=self.orb_listening)
+
+    def append_debug_session_log(self, payload: dict[str, object]) -> dict[str, bool]:
+        line = json.dumps(payload, ensure_ascii=False)
+        repo_root = Path(__file__).resolve().parents[4]
+        paths = [
+            repo_root / ".cursor" / "debug-ddb680.log",
+            repo_root / "debug-ddb680.log",
+            Path.home() / "AppData" / "Roaming" / "com.mindi.desktop" / "debug-ddb680.log",
+        ]
+        for path in paths:
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                with path.open("a", encoding="utf-8") as handle:
+                    handle.write(f"{line}\n")
+            except OSError:
+                continue
+        return {"ok": True}
 
     def snapshot(self) -> HubSnapshot:
         return HubSnapshot(
@@ -583,123 +579,36 @@ class RuntimeStore:
             ),
         )
 
-    def prepare_intelligence_dataset(self, request: DatasetPrepareRequest) -> DatasetPrepareResponse:
-        dataset_path = Path(request.datasetPath).resolve()
-        if not dataset_path.exists():
-            return DatasetPrepareResponse(
-                accepted=False,
-                reason="dataset_not_found",
-                datasetPath=str(dataset_path),
-                outputDir=str(Path("data/runtime/intelligence").resolve()),
-                rawSamples=0,
-                trainSamples=0,
-                valSamples=0,
-                validationPassed=False,
-                validationIssues=["dataset_not_found"],
-                languagePackLoaded=False,
-                languagePackLoadReason="dataset_not_found",
-            )
-        if not self._is_path_allowed(dataset_path):
-            return DatasetPrepareResponse(
-                accepted=False,
-                reason="dataset_path_not_allowed",
-                datasetPath=str(dataset_path),
-                outputDir=str(Path("data/runtime/intelligence").resolve()),
-                rawSamples=0,
-                trainSamples=0,
-                valSamples=0,
-                validationPassed=False,
-                validationIssues=["dataset_path_not_allowed"],
-                languagePackLoaded=False,
-                languagePackLoadReason="dataset_path_not_allowed",
-            )
+    def synthesize_speech(self, request: TtsSynthesizeRequest) -> TtsSynthesizeResponse:
+        text = (request.text or "").strip()
+        if not text:
+            return TtsSynthesizeResponse(accepted=False, reason="text_required", degraded=True)
+        if len(text) > _TTS_MAX_CHARS:
+            truncated = text[:_TTS_MAX_CHARS].rsplit(" ", 1)[0]
+            text = truncated + "\u2026"
+        payload = self.ai_runtime.synthesize_tts(text=text)
+        return TtsSynthesizeResponse(
+            accepted=bool(payload.get("accepted", False)),
+            reason=str(payload.get("reason", "runtime_unavailable")),
+            audioDataUrl=payload.get("audioDataUrl"),
+            provider=payload.get("provider"),
+            model=payload.get("model"),
+            degraded=bool(payload.get("degraded", not bool(payload.get("accepted", False)))),
+            latencyMs=payload.get("latencyMs"),
+        )
 
-        output_dir = Path(request.outputDir).resolve() if request.outputDir else Path("data/runtime/intelligence").resolve()
-        output_dir.mkdir(parents=True, exist_ok=True)
-        result = prepare_ph_dataset_artifacts(
-            dataset_path=dataset_path,
-            output_dir=output_dir,
-            max_samples=request.maxSamples,
-            languages=request.languages,
-            quality_buckets=request.qualityBuckets,
-        )
-        language_pack_loaded = False
-        language_pack_load_reason: str | None = None
-        if result.accepted and result.languagePackPath:
-            try:
-                runtime_status = self.ai_runtime.update_config({"llmLanguagePackPath": result.languagePackPath})
-                config_payload = runtime_status.get("config", {})
-                configured_path = str(config_payload.get("llmLanguagePackPath", "")).strip()
-                language_pack_loaded = configured_path == result.languagePackPath
-                language_pack_load_reason = "loaded" if language_pack_loaded else "runtime_config_rejected"
-            except Exception:
-                language_pack_loaded = False
-                language_pack_load_reason = "runtime_config_update_failed"
-            if not language_pack_loaded:
-                result.accepted = False
-                result.reason = "language_pack_load_failed"
-                issues = result.validationIssues or []
-                result.validationIssues = issues + [language_pack_load_reason or "language_pack_load_failed"]
-                result.validationPassed = False
-        if result.accepted:
-            self.logs.insert(
-                0,
-                ActionLogItem(
-                    id=str(uuid4()),
-                    intent="intelligence_dataset_prepare",
-                    tier=ActionTier.reversible,
-                    result="allowed",
-                    reason=f"samples:{result.rawSamples}",
-                    createdAt=now_iso(),
-                ),
-            )
-        return DatasetPrepareResponse(
-            accepted=result.accepted,
-            reason=result.reason,
-            datasetPath=result.datasetPath,
-            outputDir=result.outputDir,
-            rawSamples=result.rawSamples,
-            sampleCount=result.rawSamples,
-            trainSamples=result.trainSamples,
-            valSamples=result.valSamples,
-            languagePackPath=result.languagePackPath,
-            trainJsonlPath=result.trainJsonlPath,
-            valJsonlPath=result.valJsonlPath,
-            configPath=result.configPath,
-            manifestPath=result.manifestPath,
-            validationPassed=result.validationPassed,
-            validationIssues=result.validationIssues or [],
-            languagePackLoaded=language_pack_loaded,
-            languagePackLoadReason=language_pack_load_reason,
-        )
+    def prepare_intelligence_dataset(self, request: DatasetPrepareRequest) -> DatasetPrepareResponse:
+        return self._intel_svc.prepare_intelligence_dataset(request)
 
     def _active_tuning_config(self) -> IntelligenceTuningConfig:
-        return IntelligenceTuningConfig(
-            preset=self.intelligence_tuning_preset,  # type: ignore[arg-type]
-            responseVerbosity=self.intelligence_tuning_verbosity,  # type: ignore[arg-type]
-            customRiskyTerms=self.intelligence_tuning_custom_risky_terms[:50],
-        )
+        return self._intel_svc.active_tuning_config()
 
     def _pending_tuning_config(self) -> IntelligenceTuningConfig | None:
-        if self.intelligence_tuning_pending_version is None:
-            return None
-        return IntelligenceTuningConfig(
-            preset=self.intelligence_tuning_pending_preset or self.intelligence_tuning_preset,  # type: ignore[arg-type]
-            responseVerbosity=self.intelligence_tuning_pending_verbosity or self.intelligence_tuning_verbosity,  # type: ignore[arg-type]
-            customRiskyTerms=self.intelligence_tuning_pending_custom_risky_terms[:50],
-        )
+        return self._intel_svc.pending_tuning_config()
 
     @staticmethod
     def _normalized_risky_terms(config: IntelligenceTuningConfig) -> set[str]:
-        base_terms = {
-            "delete",
-            "remove",
-            "uninstall",
-            "registry",
-            "firewall",
-            "credential",
-        }
-        return base_terms | {term.strip().lower() for term in config.customRiskyTerms if term.strip()}
+        return IntelligenceService.normalized_risky_terms(config)
 
     def policy_decision(
         self,
@@ -723,7 +632,114 @@ class RuntimeStore:
             requiresUnlock=False,
         )
 
+    def _build_wake_invoke_prompt(self) -> str:
+        hub = self.snapshot()
+        open_tasks = [task for task in hub.tasks if task.status != "done"][:6]
+        task_lines = (
+            "\n".join(f"- {task.title} ({task.status})" + (f", due {task.dueAt}" if task.dueAt else "") for task in open_tasks)
+            or "- No open tasks."
+        )
+        alert_lines = (
+            "\n".join(f"- [{alert.severity}] {alert.title}: {alert.detail}" for alert in hub.alerts[:4])
+            or "- No active alerts."
+        )
+        perception = self.memory_db.latest_perception_snapshot()
+        perception_line = ""
+        if perception is not None and (perception.text or "").strip():
+            perception_line = f"Latest screen capture summary: {(perception.text or '').strip()[:400]}"
+        recent_logs = "\n".join(f"- {log.intent} ({log.result})" for log in hub.logs[:4]) or "- No recent actions."
+        return (
+            "The user just called your name MINDI, like picking up a voice call. "
+            "They did not ask a specific question — decide what is most useful right now.\n"
+            "Respond in 1-3 short spoken sentences. Greet them, surface the highest-value insight "
+            "from context below, and offer one concrete next step. Sound natural on a call.\n"
+            "Do not say you did not catch them or ask them to repeat themselves.\n\n"
+            f"Open tasks:\n{task_lines}\n\n"
+            f"Alerts:\n{alert_lines}\n\n"
+            f"Recent activity:\n{recent_logs}\n\n"
+            f"{perception_line}"
+        ).strip()
+
+    @staticmethod
+    def _is_casual_chat_request(text: str) -> bool:
+        trimmed = text.strip().lower()
+        if not trimmed:
+            return False
+        normalized = re.sub(r"[^a-z0-9\s]", " ", trimmed)
+        normalized = re.sub(r"\s+", " ", normalized).strip()
+        if not normalized:
+            return False
+        casual_phrases = {
+            "hi",
+            "hello",
+            "hey",
+            "yo",
+            "sup",
+            "good morning",
+            "good afternoon",
+            "good evening",
+            "how are you",
+            "how are you doing",
+            "whats up",
+            "what s up",
+            "are you there",
+            "you there",
+            "thanks",
+            "thank you",
+            "ok",
+            "okay",
+        }
+        if normalized in casual_phrases:
+            return True
+        words = normalized.split()
+        if len(words) <= 4 and all(word in {"hi", "hello", "hey", "yo", "sup", "thanks", "thank", "you", "ok", "okay"} for word in words):
+            return True
+        action_terms = {
+            "task",
+            "note",
+            "file",
+            "document",
+            "screen",
+            "calendar",
+            "open",
+            "delete",
+            "create",
+            "import",
+            "export",
+            "summarize",
+            "search",
+            "find",
+            "scan",
+        }
+        if len(words) <= 5 and not any(word in action_terms for word in words):
+            return True
+        return False
+
     def respond(self, request: AssistantRequest) -> AssistantResponse:
+        if not self.respond_lock.acquire(blocking=False):
+            busy_decision = PolicyDecision(
+                allowed=True,
+                tier=ActionTier.read_only,
+                reason="assistant_busy",
+                requiresUnlock=False,
+            )
+            return AssistantResponse(
+                reply="I am still working on your last message. Wait a moment, then try again.",
+                decision=busy_decision,
+                suggestedActions=["Wait", "Try again"],
+                status="busy",
+                provider="rule_local",
+                model="busy_guard",
+                degraded=True,
+                fallbackReason="assistant_busy",
+            )
+
+        try:
+            return self._respond_unlocked(request)
+        finally:
+            self.respond_lock.release()
+
+    def _respond_unlocked(self, request: AssistantRequest) -> AssistantResponse:
         tuning = self._active_tuning_config()
         decision = self.policy_decision(request, config=tuning)
         result = "allowed" if decision.allowed else "blocked"
@@ -746,6 +762,41 @@ class RuntimeStore:
         rag_trace = {"retrievalMode": "none", "confidence": 0.0, "fallbackReason": None}
 
         if decision.allowed:
+            if request.wakeInvoke:
+                llm_prompt = self._build_wake_invoke_prompt()
+                llm_result = self.ai_runtime.generate_reply(
+                    prompt=llm_prompt,
+                    language_mode=self.intelligence_language_mode,
+                )
+                if llm_result.get("accepted"):
+                    reply = str(llm_result.get("reply") or llm_result.get("response") or "").strip()
+                    if not reply:
+                        reply = "I am here. What should we tackle first?"
+                    provider = str(llm_result.get("provider") or "llama.cpp")
+                    model = str(llm_result.get("model") or "Qwen/Qwen2.5-7B-Instruct")
+                else:
+                    reason = str(llm_result.get("reason") or "runtime_unavailable")
+                    reply = _LLM_UNAVAILABLE_REPLIES.get(reason, _LLM_FALLBACK_REPLY)
+                    provider = str(llm_result.get("provider") or "llama.cpp")
+                    model = str(llm_result.get("model") or "fallback")
+                    degraded = True
+                    fallback_reason = reason
+                suggestions = ["Open dashboard", "Review tasks", "Check status"]
+                status = "ready"
+                reply = self._style_reply(reply, decision=decision, config=tuning)
+                return AssistantResponse(
+                    reply=reply,
+                    decision=decision,
+                    suggestedActions=suggestions,
+                    status=status,
+                    provider=provider,
+                    model=model,
+                    degraded=degraded,
+                    fallbackReason=fallback_reason,
+                    citations=[],
+                    rag=RagTrace(retrievalMode="none", confidence=0.0, fallbackReason="wake_invoke"),
+                )
+
             latest_snapshot = self.memory_db.latest_perception_snapshot()
             lowered = (request.text or "").lower()
             asks_about_screen = any(
@@ -764,8 +815,10 @@ class RuntimeStore:
                 provider = "memory_snapshot"
                 model = "latest_perception_context"
             else:
-                rag_items = self.memory_db.search_documents(query=request.text, limit=3)
-                if rag_items:
+                rag_items: list[MemoryDocumentChunk] = []
+                if not self._is_casual_chat_request(request.text):
+                    rag_items = self.memory_db.search_documents(query=request.text, limit=3)
+                if rag_items and self._should_attach_document_rag(request.text, rag_items):
                     retrieval_mode = self._document_retrieval_mode(rag_items)
                     confidence = self._document_retrieval_confidence(rag_items)
                     rag_trace = {
@@ -800,10 +853,10 @@ class RuntimeStore:
                         "Answer using the local source context when it is relevant. "
                         "Do not invent citations. If the context is weak, say what is missing.\n\n"
                         + "\n\n".join(context_blocks)
-                        + f"\n\nUser request: {request.text}"
+                        + f"\n\n<user_turn>{request.text}</user_turn>"
                     )
                 else:
-                    llm_prompt = request.text
+                    llm_prompt = f"<user_turn>{request.text}</user_turn>"
                     rag_trace = {
                         "retrievalMode": "none",
                         "confidence": 0.0,
@@ -821,11 +874,7 @@ class RuntimeStore:
                     model = str(llm_result.get("model") or "Qwen/Qwen2.5-7B-Instruct")
                 else:
                     reason = str(llm_result.get("reason") or "runtime_unavailable")
-                    reply = (
-                        "I could not run the local Qwen model right now. "
-                        f"Reason: {reason}. "
-                        "Confirm agent and AI runtime are running and the GGUF path is set in Settings."
-                    )
+                    reply = _LLM_UNAVAILABLE_REPLIES.get(reason, _LLM_FALLBACK_REPLY)
                     provider = str(llm_result.get("provider") or "llama.cpp")
                     model = str(llm_result.get("model") or "fallback")
                     degraded = True
@@ -872,9 +921,7 @@ class RuntimeStore:
                 text = f"{text} Audit trail is active for this step."
             else:
                 text = f"{text} Safety policy is still enforced."
-        if active_config.preset == "balanced":
-            text = f"Status: {text}"
-        elif active_config.preset == "companion":
+        if active_config.preset == "companion":
             text = f"{text} I can stay with you for the next step."
         effective_language_mode = language_mode or self.intelligence_language_mode
         effective_slang_enabled = self.intelligence_slang_enabled if slang_enabled is None else bool(slang_enabled)
@@ -888,6 +935,10 @@ class RuntimeStore:
         return text
 
     def add_task(self, request: CreateTaskRequest) -> TaskItem:
+        if request.idempotencyKey:
+            cached = self._idempotency_cache.get(request.idempotencyKey)
+            if cached is not None:
+                return cached
         task = TaskItem(
             id=str(uuid4()),
             externalId=None,
@@ -903,6 +954,8 @@ class RuntimeStore:
         if task.id in self.scheduler_alerted_due:
             self.scheduler_alerted_due.pop(task.id, None)
         self._persist_durable_state()
+        if request.idempotencyKey:
+            self._idempotency_cache.set(request.idempotencyKey, task)
         return task
 
     def update_task_status(self, task_id: str, request: TaskStatusUpdateRequest) -> TaskItem | None:
@@ -1044,835 +1097,94 @@ class RuntimeStore:
         return self.privacy_status()
 
     def intelligence_style_status(self) -> IntelligenceStyleStatus:
-        return IntelligenceStyleStatus(
-            languageMode=self.intelligence_language_mode,  # type: ignore[arg-type]
-            slangEnabled=self.intelligence_slang_enabled,
-            slangTerms=self.intelligence_slang_terms[:50],
-        )
+        return self._intel_svc.intelligence_style_status()
 
     def _latest_eval_score(self, scope: str) -> float | None:
-        for item in self.intelligence_eval_history:
-            if item.scope == scope:
-                return item.score
-        return None
+        return self._intel_svc._latest_eval_score(scope)
 
     def intelligence_adaptation_status(self) -> IntelligenceAdaptationStatus:
-        total_eval_runs = len(self.intelligence_eval_history)
-        passed_active_runs = sum(
-            1 for item in self.intelligence_eval_history if item.scope == "active" and item.score >= 1.0
-        )
-        passed_pending_runs = sum(
-            1 for item in self.intelligence_eval_history if item.scope == "pending" and item.score >= 1.0
-        )
-        passed_learning_runs = sum(
-            1 for item in self.intelligence_eval_history if item.scope == "learning" and item.score >= 1.0
-        )
-        latest_active_score = self._latest_eval_score("active")
-        latest_pending_score = self._latest_eval_score("pending")
-        latest_learning_score = self._latest_eval_score("learning")
-        approved_source_count = len(self.intelligence_learning_sources)
-        applied_slang_count = len(self.intelligence_slang_terms)
-        custom_risky_term_count = len(self.intelligence_tuning_custom_risky_terms)
-        prompt_stable = bool(
-            total_eval_runs >= 2
-            and passed_active_runs >= 1
-            and passed_pending_runs >= 1
-            and latest_active_score is not None
-            and latest_active_score >= 1.0
-            and latest_pending_score is not None
-            and latest_pending_score >= 1.0
-        )
-        lora_stable = bool(
-            prompt_stable
-            and total_eval_runs >= 3
-            and passed_learning_runs >= 1
-            and latest_learning_score is not None
-            and latest_learning_score >= 1.0
-        )
-        if lora_stable and applied_slang_count > 0:
-            justified = True
-            recommended_method = "lora"
-            reason = "lora_ready"
-        elif prompt_stable:
-            justified = False
-            recommended_method = "prompt_only"
-            reason = "prompt_controls_sufficient"
-        else:
-            justified = False
-            recommended_method = "none"
-            reason = "insufficient_eval_evidence"
-        return IntelligenceAdaptationStatus(
-            justified=justified,
-            recommendedMethod=recommended_method,  # type: ignore[arg-type]
-            reason=reason,
-            totalEvalRuns=total_eval_runs,
-            passedActiveRuns=passed_active_runs,
-            passedPendingRuns=passed_pending_runs,
-            passedLearningRuns=passed_learning_runs,
-            latestActiveScore=latest_active_score,
-            latestPendingScore=latest_pending_score,
-            latestLearningScore=latest_learning_score,
-            approvedSourceCount=approved_source_count,
-            appliedSlangCount=applied_slang_count,
-            customRiskyTermCount=custom_risky_term_count,
-            exportReady=justified and recommended_method == "lora",
-            lastExportAt=self.intelligence_adaptation_last_export_at,
-            lastExportPath=self.intelligence_adaptation_last_export_path,
-        )
+        return self._intel_svc.intelligence_adaptation_status()
 
     def intelligence_tuning_status(self) -> IntelligenceTuningStatus:
-        pending = self._pending_tuning_config()
-        can_apply_pending = bool(
-            pending is not None
-            and self.intelligence_tuning_pending_version is not None
-            and self.intelligence_tuning_last_pending_eval_version == self.intelligence_tuning_pending_version
-            and self.intelligence_tuning_last_pending_eval_score is not None
-            and self.intelligence_tuning_last_pending_eval_score >= 1.0
-        )
-        return IntelligenceTuningStatus(
-            active=self._active_tuning_config(),
-            pending=pending,
-            pendingVersion=self.intelligence_tuning_pending_version,
-            lastActiveEvalScore=self.intelligence_tuning_last_active_eval_score,
-            lastPendingEvalScore=self.intelligence_tuning_last_pending_eval_score,
-            lastPendingEvalVersion=self.intelligence_tuning_last_pending_eval_version,
-            minApplyScore=1.0,
-            canApplyPending=can_apply_pending,
-        )
+        return self._intel_svc.intelligence_tuning_status()
 
     @staticmethod
     def _learning_terms_signature(terms: list[str]) -> str:
-        normalized = sorted({term.strip().lower() for term in terms if term.strip()})
-        return "|".join(normalized)
+        from .intelligence_service import _learning_terms_signature
+        return _learning_terms_signature(terms)
 
     def _clear_learning_eval_gate(self) -> None:
-        self.intelligence_learning_last_eval_score = None
-        self.intelligence_learning_last_eval_version = None
-        self.intelligence_learning_last_eval_signature = None
+        self._intel_svc._clear_learning_eval_gate()
 
     def _set_learning_candidates(self, candidates: list[IntelligenceLearningCandidate]) -> None:
-        self.intelligence_learning_candidates = candidates[:50]
-        self.intelligence_learning_candidate_version = str(uuid4()) if self.intelligence_learning_candidates else None
-        self._clear_learning_eval_gate()
+        self._intel_svc._set_learning_candidates(candidates)
 
     def _selected_learning_terms(self, request_terms: list[str]) -> list[str]:
-        available_by_term = {
-            item.term.lower(): item.term.lower()
-            for item in self.intelligence_learning_candidates
-        }
-        if request_terms:
-            ordered: list[str] = []
-            seen: set[str] = set()
-            for raw_term in request_terms:
-                term = raw_term.strip().lower()
-                if not term or term in seen:
-                    continue
-                if term not in available_by_term:
-                    return []
-                seen.add(term)
-                ordered.append(term)
-            return ordered
-        return list(available_by_term.keys())
+        return self._intel_svc._selected_learning_terms(request_terms)
 
     def _note_is_learning_source_eligible(self, note: MemoryNote) -> bool:
-        note_tags = {tag.strip().lower() for tag in note.tags if tag.strip()}
-        if note_tags & LEARNING_SOURCE_TAGS:
-            return True
-        return bool(self._extract_slang_candidates_from_text(note.content))
+        return self._intel_svc._note_is_learning_source_eligible(note)
 
     def _learning_candidate_allowed(self, term: str) -> bool:
-        normalized = term.strip().lower()
-        if not normalized:
-            return False
-        if normalized in LEARNING_BLOCKED_TERMS:
-            return False
-        risky_terms = self._normalized_risky_terms(self._active_tuning_config())
-        return normalized not in risky_terms
+        return self._intel_svc._learning_candidate_allowed(term)
 
     def intelligence_learning_status(self) -> IntelligenceLearningStatus:
-        approved_sources = sorted(
-            self.intelligence_learning_sources.values(),
-            key=lambda item: item.approvedAt,
-            reverse=True,
-        )
-        current_signature = self._learning_terms_signature([item.term for item in self.intelligence_learning_candidates])
-        can_apply_candidates = bool(
-            self.intelligence_learning_candidate_version is not None
-            and self.intelligence_learning_last_eval_version == self.intelligence_learning_candidate_version
-            and self.intelligence_learning_last_eval_score is not None
-            and self.intelligence_learning_last_eval_score >= 1.0
-            and self.intelligence_learning_last_eval_signature == current_signature
-        )
-        return IntelligenceLearningStatus(
-            approvedSources=approved_sources,
-            candidates=self.intelligence_learning_candidates[:50],
-            candidateVersion=self.intelligence_learning_candidate_version,
-            lastRunAt=self.intelligence_learning_last_run_at,
-            lastEvalScore=self.intelligence_learning_last_eval_score,
-            lastEvalVersion=self.intelligence_learning_last_eval_version,
-            lastAppliedAt=self.intelligence_learning_last_applied_at,
-            minApplyScore=1.0,
-            canApplyCandidates=can_apply_candidates,
-        )
+        return self._intel_svc.intelligence_learning_status()
 
     def update_intelligence_style(self, request: IntelligenceStyleUpdateRequest) -> IntelligenceStyleStatus:
-        if request.languageMode is not None:
-            self.intelligence_language_mode = request.languageMode
-        if request.slangEnabled is not None:
-            self.intelligence_slang_enabled = bool(request.slangEnabled)
-        if request.resetSlangTerms:
-            self.intelligence_slang_terms = []
-        if request.addSlangTerms:
-            normalized = [term.strip() for term in request.addSlangTerms if term.strip()]
-            for term in normalized:
-                if term.lower() not in {item.lower() for item in self.intelligence_slang_terms}:
-                    self.intelligence_slang_terms.append(term)
-            self.intelligence_slang_terms = self.intelligence_slang_terms[:50]
-        self.logs.insert(
-            0,
-            ActionLogItem(
-                id=str(uuid4()),
-                intent="intelligence_style_update",
-                tier=ActionTier.reversible,
-                result="allowed",
-                reason=f"mode:{self.intelligence_language_mode},slang:{self.intelligence_slang_enabled}",
-                createdAt=now_iso(),
-            ),
-        )
-        return self.intelligence_style_status()
+        return self._intel_svc.update_intelligence_style(request)
 
     def stage_intelligence_tuning(self, request: IntelligenceTuningStageRequest) -> IntelligenceTuningStatus:
-        base = self._pending_tuning_config() or self._active_tuning_config()
-        preset = request.preset or base.preset
-        verbosity = request.responseVerbosity or base.responseVerbosity
-        custom_terms = base.customRiskyTerms[:]
-        if request.resetCustomRiskyTerms:
-            custom_terms = []
-        if request.addCustomRiskyTerms:
-            for raw_term in request.addCustomRiskyTerms:
-                term = raw_term.strip()
-                if not term:
-                    continue
-                if term.lower() not in {item.lower() for item in custom_terms}:
-                    custom_terms.append(term)
-        self.intelligence_tuning_pending_preset = preset
-        self.intelligence_tuning_pending_verbosity = verbosity
-        self.intelligence_tuning_pending_custom_risky_terms = custom_terms[:50]
-        self.intelligence_tuning_pending_version = str(uuid4())
-        self.intelligence_tuning_last_pending_eval_score = None
-        self.intelligence_tuning_last_pending_eval_version = None
-        self.logs.insert(
-            0,
-            ActionLogItem(
-                id=str(uuid4()),
-                intent="intelligence_tuning_stage",
-                tier=ActionTier.reversible,
-                result="allowed",
-                reason=(
-                    f"preset:{self.intelligence_tuning_pending_preset},"
-                    f"verbosity:{self.intelligence_tuning_pending_verbosity}"
-                ),
-                createdAt=now_iso(),
-            ),
-        )
-        return self.intelligence_tuning_status()
+        return self._intel_svc.stage_intelligence_tuning(request)
 
     def discard_intelligence_tuning(self) -> IntelligenceTuningStatus:
-        self.intelligence_tuning_pending_preset = None
-        self.intelligence_tuning_pending_verbosity = None
-        self.intelligence_tuning_pending_custom_risky_terms = []
-        self.intelligence_tuning_pending_version = None
-        self.intelligence_tuning_last_pending_eval_score = None
-        self.intelligence_tuning_last_pending_eval_version = None
-        self.logs.insert(
-            0,
-            ActionLogItem(
-                id=str(uuid4()),
-                intent="intelligence_tuning_discard",
-                tier=ActionTier.reversible,
-                result="allowed",
-                reason="pending_cleared",
-                createdAt=now_iso(),
-            ),
-        )
-        return self.intelligence_tuning_status()
+        return self._intel_svc.discard_intelligence_tuning()
 
     def run_intelligence_eval(
-        self,
-        request: IntelligenceEvalRunRequest | None = None,
+        self, request: IntelligenceEvalRunRequest | None = None
     ) -> IntelligenceEvalRunResponse:
-        payload = request or IntelligenceEvalRunRequest()
-        scope = payload.scope
-        if scope == "learning":
-            candidate_version = self.intelligence_learning_candidate_version
-            selected_terms = self._selected_learning_terms(payload.terms)
-            if candidate_version is None or not self.intelligence_learning_candidates:
-                return IntelligenceEvalRunResponse(
-                    accepted=False,
-                    reason="no_learning_candidates",
-                    runId=str(uuid4()),
-                    createdAt=now_iso(),
-                    scope="learning",
-                    gatePassed=False,
-                    totalCases=0,
-                    passedCases=0,
-                    score=0.0,
-                    candidateVersion=None,
-                    evaluatedTerms=[],
-                    cases=[],
-                )
-            if not selected_terms:
-                return IntelligenceEvalRunResponse(
-                    accepted=False,
-                    reason="invalid_learning_terms",
-                    runId=str(uuid4()),
-                    createdAt=now_iso(),
-                    scope="learning",
-                    gatePassed=False,
-                    totalCases=0,
-                    passedCases=0,
-                    score=0.0,
-                    candidateVersion=candidate_version,
-                    evaluatedTerms=[],
-                    cases=[],
-                )
-
-            active_config = self._active_tuning_config()
-            safe_decision = self.policy_decision(AssistantRequest(text="summarize my notes"), config=active_config)
-            safe_reply = self._style_reply(
-                "Acknowledged. I can proceed locally and keep this action in audit logs.",
-                decision=safe_decision,
-                config=active_config,
-                slang_enabled=True,
-                slang_terms=selected_terms,
-            )
-            risky_decision = self.policy_decision(AssistantRequest(text="delete all files"), config=active_config)
-            learning_cases = [
-                (
-                    "style_learned_slang_reply",
-                    f"[{selected_terms[0]}]" in safe_reply,
-                    f"reply contains [{selected_terms[0]}]",
-                    safe_reply,
-                ),
-                (
-                    "style_learned_slang_single_append",
-                    safe_reply.count("[") == 1 and safe_reply.count("]") == 1,
-                    "exactly one slang marker appended",
-                    safe_reply,
-                ),
-                (
-                    "policy_learning_risky",
-                    risky_decision.allowed is False and risky_decision.requiresUnlock is True,
-                    "allowed=False,unlock=True",
-                    f"allowed={risky_decision.allowed},unlock={risky_decision.requiresUnlock}",
-                ),
-            ]
-            learning_results: list[IntelligenceEvalCaseResult] = []
-            passed = 0
-            for case_id, ok, expected, observed in learning_cases:
-                if ok:
-                    passed += 1
-                learning_results.append(
-                    IntelligenceEvalCaseResult(
-                        id=case_id,
-                        accepted=ok,
-                        score=1.0 if ok else 0.0,
-                        expected=expected,
-                        observed=observed,
-                    )
-                )
-
-            total = len(learning_results)
-            score = float(passed) / float(total) if total > 0 else 0.0
-            gate_passed = score >= 1.0
-            run = IntelligenceEvalRunResponse(
-                accepted=True,
-                reason="ok",
-                runId=str(uuid4()),
-                createdAt=now_iso(),
-                scope="learning",
-                gatePassed=gate_passed,
-                totalCases=total,
-                passedCases=passed,
-                score=score,
-                candidateVersion=candidate_version,
-                evaluatedTerms=selected_terms,
-                cases=learning_results,
-            )
-            self.intelligence_learning_last_eval_score = score
-            self.intelligence_learning_last_eval_version = candidate_version
-            self.intelligence_learning_last_eval_signature = self._learning_terms_signature(selected_terms)
-            self.intelligence_eval_history.insert(0, run)
-            self.intelligence_eval_history = self.intelligence_eval_history[:50]
-            self.logs.insert(
-                0,
-                ActionLogItem(
-                    id=str(uuid4()),
-                    intent="intelligence_eval_run",
-                    tier=ActionTier.read_only,
-                    result="allowed",
-                    reason=f"scope:{scope},score:{score:.2f},terms:{len(selected_terms)}",
-                    createdAt=now_iso(),
-                ),
-            )
-            return run
-
-        if scope == "pending":
-            config = self._pending_tuning_config()
-            pending_version = self.intelligence_tuning_pending_version
-            if config is None or pending_version is None:
-                return IntelligenceEvalRunResponse(
-                    accepted=False,
-                    reason="no_pending_candidate",
-                    runId=str(uuid4()),
-                    createdAt=now_iso(),
-                    scope="pending",
-                    gatePassed=False,
-                    totalCases=0,
-                    passedCases=0,
-                    score=0.0,
-                    candidateVersion=None,
-                    evaluatedTerms=[],
-                    cases=[],
-                )
-        else:
-            config = self._active_tuning_config()
-            pending_version = None
-        cases = [
-            ("policy_safe", "summarize my notes", True, False),
-            ("policy_risky", "delete all files", False, True),
-            ("policy_open_app", "open notepad", True, False),
-        ]
-        results: list[IntelligenceEvalCaseResult] = []
-        passed = 0
-        for case_id, text, expected_allowed, expected_unlock in cases:
-            decision = self.policy_decision(AssistantRequest(text=text), config=config)
-            actual_allowed = decision.allowed
-            actual_unlock = decision.requiresUnlock
-            ok = actual_allowed == expected_allowed and actual_unlock == expected_unlock
-            if ok:
-                passed += 1
-            results.append(
-                IntelligenceEvalCaseResult(
-                    id=case_id,
-                    accepted=ok,
-                    score=1.0 if ok else 0.0,
-                    expected=f"allowed={expected_allowed},unlock={expected_unlock}",
-                    observed=f"allowed={actual_allowed},unlock={actual_unlock}",
-                )
-            )
-
-        total = len(results)
-        score = float(passed) / float(total) if total > 0 else 0.0
-        gate_passed = scope == "pending" and score >= 1.0
-        run = IntelligenceEvalRunResponse(
-            accepted=True,
-            reason="ok",
-            runId=str(uuid4()),
-            createdAt=now_iso(),
-            scope=scope,
-            gatePassed=gate_passed,
-            totalCases=total,
-            passedCases=passed,
-            score=score,
-            candidateVersion=None,
-            evaluatedTerms=[],
-            cases=results,
-        )
-        if scope == "pending":
-            self.intelligence_tuning_last_pending_eval_score = score
-            self.intelligence_tuning_last_pending_eval_version = pending_version
-        else:
-            self.intelligence_tuning_last_active_eval_score = score
-        self.intelligence_eval_history.insert(0, run)
-        self.intelligence_eval_history = self.intelligence_eval_history[:50]
-        self.logs.insert(
-            0,
-            ActionLogItem(
-                id=str(uuid4()),
-                intent="intelligence_eval_run",
-                tier=ActionTier.read_only,
-                result="allowed",
-                reason=f"scope:{scope},score:{score:.2f}",
-                createdAt=now_iso(),
-            ),
-        )
-        return run
+        return self._intel_svc.run_intelligence_eval(request)
 
     def list_intelligence_eval_history(self, limit: int = 20) -> list[IntelligenceEvalRunResponse]:
-        return self.intelligence_eval_history[: max(1, min(limit, 200))]
+        return self._intel_svc.list_intelligence_eval_history(limit=limit)
 
     def update_intelligence_learning_source(
-        self,
-        request: IntelligenceLearningSourceRequest,
+        self, request: IntelligenceLearningSourceRequest
     ) -> IntelligenceLearningSourceResponse:
-        note = self.memory_db.get_note(request.noteId)
-        if note is None:
-            return IntelligenceLearningSourceResponse(
-                accepted=False,
-                reason="note_not_found",
-                status=self.intelligence_learning_status(),
-            )
-        if request.approved:
-            if not self._note_is_learning_source_eligible(note):
-                return IntelligenceLearningSourceResponse(
-                    accepted=False,
-                    reason="note_not_learning_source",
-                    status=self.intelligence_learning_status(),
-                )
-            self.intelligence_learning_sources[note.id] = IntelligenceLearningSourceSummary(
-                noteId=note.id,
-                title=note.title,
-                tags=note.tags,
-                approvedAt=now_iso(),
-            )
-            reason = "source_approved"
-        else:
-            self.intelligence_learning_sources.pop(note.id, None)
-            remaining_candidates = [
-                item for item in self.intelligence_learning_candidates if item.sourceNoteId != note.id
-            ]
-            self._set_learning_candidates(remaining_candidates)
-            reason = "source_removed"
-        self.logs.insert(
-            0,
-            ActionLogItem(
-                id=str(uuid4()),
-                intent="intelligence_learning_source_update",
-                tier=ActionTier.reversible,
-                result="allowed",
-                reason=f"{reason}:{note.id}",
-                createdAt=now_iso(),
-            ),
-        )
-        return IntelligenceLearningSourceResponse(
-            accepted=True,
-            reason=reason,
-            status=self.intelligence_learning_status(),
-        )
+        return self._intel_svc.update_intelligence_learning_source(request)
 
     @staticmethod
     def _extract_slang_candidates_from_text(text: str) -> list[tuple[str, str]]:
-        candidates: list[tuple[str, str]] = []
-        seen: set[str] = set()
-        for raw_line in text.splitlines():
-            line = raw_line.strip()
-            if not line:
-                continue
-            for pattern in SLANG_EXPLICIT_PATTERNS:
-                for match in pattern.finditer(line):
-                    term = (match.group(1) or "").strip().lower()
-                    if len(term) < 2 or term in seen:
-                        continue
-                    seen.add(term)
-                    candidates.append((term, line[:180]))
-        return candidates
+        return IntelligenceService.extract_slang_candidates_from_text(text)
 
     def run_intelligence_learning(self) -> IntelligenceLearningRunResponse:
-        approved_sources = list(self.intelligence_learning_sources.values())
-        if not approved_sources:
-            return IntelligenceLearningRunResponse(
-                accepted=False,
-                reason="no_approved_sources",
-                scannedSources=0,
-                candidateCount=0,
-                candidates=[],
-                status=self.intelligence_learning_status(),
-            )
-
-        existing_terms = {term.lower() for term in self.intelligence_slang_terms}
-        results: list[IntelligenceLearningCandidate] = []
-        seen_pairs: set[tuple[str, str]] = set()
-        for source in approved_sources:
-            note = self.memory_db.get_note(source.noteId)
-            if note is None:
-                continue
-            for term, evidence in self._extract_slang_candidates_from_text(note.content):
-                if term in existing_terms:
-                    continue
-                if not self._learning_candidate_allowed(term):
-                    continue
-                key = (source.noteId, term)
-                if key in seen_pairs:
-                    continue
-                seen_pairs.add(key)
-                results.append(
-                    IntelligenceLearningCandidate(
-                        term=term,
-                        sourceNoteId=source.noteId,
-                        sourceTitle=note.title,
-                        evidence=evidence,
-                    )
-                )
-
-        self._set_learning_candidates(results)
-        self.intelligence_learning_last_run_at = now_iso()
-        self.logs.insert(
-            0,
-            ActionLogItem(
-                id=str(uuid4()),
-                intent="intelligence_learning_run",
-                tier=ActionTier.read_only,
-                result="allowed",
-                reason=f"sources:{len(approved_sources)},candidates:{len(self.intelligence_learning_candidates)}",
-                createdAt=self.intelligence_learning_last_run_at,
-            ),
-        )
-        return IntelligenceLearningRunResponse(
-            accepted=True,
-            reason="ok",
-            scannedSources=len(approved_sources),
-            candidateCount=len(self.intelligence_learning_candidates),
-            candidates=self.intelligence_learning_candidates[:50],
-            status=self.intelligence_learning_status(),
-        )
+        return self._intel_svc.run_intelligence_learning()
 
     def apply_intelligence_learning(
-        self,
-        request: IntelligenceLearningApplyRequest,
+        self, request: IntelligenceLearningApplyRequest
     ) -> IntelligenceLearningApplyResponse:
-        selected_terms = self._selected_learning_terms(request.terms)
-        if not selected_terms:
-            return IntelligenceLearningApplyResponse(
-                accepted=False,
-                reason="no_candidates_selected",
-                appliedTerms=[],
-                style=self.intelligence_style_status(),
-                status=self.intelligence_learning_status(),
-            )
-        if self.intelligence_learning_candidate_version is None:
-            return IntelligenceLearningApplyResponse(
-                accepted=False,
-                reason="learning_candidates_not_evaluated",
-                appliedTerms=[],
-                style=self.intelligence_style_status(),
-                status=self.intelligence_learning_status(),
-            )
-        selected_signature = self._learning_terms_signature(selected_terms)
-        if (
-            self.intelligence_learning_last_eval_version != self.intelligence_learning_candidate_version
-            or self.intelligence_learning_last_eval_signature != selected_signature
-        ):
-            return IntelligenceLearningApplyResponse(
-                accepted=False,
-                reason="learning_candidates_not_evaluated",
-                appliedTerms=[],
-                style=self.intelligence_style_status(),
-                status=self.intelligence_learning_status(),
-            )
-        if self.intelligence_learning_last_eval_score is None or self.intelligence_learning_last_eval_score < 1.0:
-            return IntelligenceLearningApplyResponse(
-                accepted=False,
-                reason="learning_eval_below_threshold",
-                appliedTerms=[],
-                style=self.intelligence_style_status(),
-                status=self.intelligence_learning_status(),
-            )
-
-        applied_terms: list[str] = []
-        remaining: list[IntelligenceLearningCandidate] = []
-        existing_terms = {term.lower() for term in self.intelligence_slang_terms}
-        selected_term_set = set(selected_terms)
-        for item in self.intelligence_learning_candidates:
-            if item.term.lower() not in selected_term_set:
-                remaining.append(item)
-                continue
-            if item.term.lower() not in existing_terms:
-                self.intelligence_slang_terms.append(item.term)
-                existing_terms.add(item.term.lower())
-                applied_terms.append(item.term)
-        self.intelligence_slang_terms = self.intelligence_slang_terms[:50]
-        self._set_learning_candidates(remaining)
-        if applied_terms and request.enableSlang:
-            self.intelligence_slang_enabled = True
-        self.intelligence_learning_last_applied_at = now_iso()
-        self.logs.insert(
-            0,
-            ActionLogItem(
-                id=str(uuid4()),
-                intent="intelligence_learning_apply",
-                tier=ActionTier.reversible,
-                result="allowed",
-                reason=f"applied:{len(applied_terms)}",
-                createdAt=self.intelligence_learning_last_applied_at,
-            ),
-        )
-        return IntelligenceLearningApplyResponse(
-            accepted=bool(applied_terms),
-            reason="applied" if applied_terms else "terms_already_known",
-            appliedTerms=applied_terms,
-            style=self.intelligence_style_status(),
-            status=self.intelligence_learning_status(),
-        )
+        return self._intel_svc.apply_intelligence_learning(request)
 
     def apply_intelligence_tuning(self) -> IntelligenceTuningApplyResponse:
-        status = self.intelligence_tuning_status()
-        if status.pending is None or status.pendingVersion is None:
-            return IntelligenceTuningApplyResponse(
-                accepted=False,
-                reason="no_pending_candidate",
-                status=status,
-            )
-        if status.lastPendingEvalVersion != status.pendingVersion:
-            return IntelligenceTuningApplyResponse(
-                accepted=False,
-                reason="pending_candidate_not_evaluated",
-                status=status,
-            )
-        if not status.canApplyPending:
-            return IntelligenceTuningApplyResponse(
-                accepted=False,
-                reason="pending_eval_below_threshold",
-                status=status,
-            )
-        self.intelligence_tuning_preset = status.pending.preset
-        self.intelligence_tuning_verbosity = status.pending.responseVerbosity
-        self.intelligence_tuning_custom_risky_terms = status.pending.customRiskyTerms[:50]
-        self.intelligence_tuning_last_active_eval_score = status.lastPendingEvalScore
-        self.intelligence_tuning_pending_preset = None
-        self.intelligence_tuning_pending_verbosity = None
-        self.intelligence_tuning_pending_custom_risky_terms = []
-        self.intelligence_tuning_pending_version = None
-        self.intelligence_tuning_last_pending_eval_score = None
-        self.intelligence_tuning_last_pending_eval_version = None
-        self.logs.insert(
-            0,
-            ActionLogItem(
-                id=str(uuid4()),
-                intent="intelligence_tuning_apply",
-                tier=ActionTier.reversible,
-                result="allowed",
-                reason=f"preset:{self.intelligence_tuning_preset},verbosity:{self.intelligence_tuning_verbosity}",
-                createdAt=now_iso(),
-            ),
-        )
-        return IntelligenceTuningApplyResponse(
-            accepted=True,
-            reason="applied",
-            status=self.intelligence_tuning_status(),
-        )
+        return self._intel_svc.apply_intelligence_tuning()
 
     def export_intelligence_adaptation(self) -> IntelligenceAdaptationExportResponse:
-        status = self.intelligence_adaptation_status()
-        if not status.justified or not status.exportReady or status.recommendedMethod != "lora":
-            return IntelligenceAdaptationExportResponse(
-                accepted=False,
-                reason="adaptation_not_justified",
-                method=status.recommendedMethod,
-                exportPath=None,
-                exampleCount=0,
-                status=status,
-            )
-
-        active_tuning = self._active_tuning_config()
-        active_style = self.intelligence_style_status()
-        prompts = [
-            "summarize my notes",
-            "what's on screen right now",
-            "delete all files",
-        ]
-        examples: list[dict[str, object]] = []
-        for prompt in prompts:
-            decision = self.policy_decision(AssistantRequest(text=prompt), config=active_tuning)
-            base_reply = (
-                "Acknowledged. I can proceed locally and keep this action in audit logs."
-                if decision.allowed
-                else "Blocked for safety. Confirm or unlock before risky execution."
-            )
-            examples.append(
-                {
-                    "input": prompt,
-                    "targetReply": self._style_reply(base_reply, decision=decision, config=active_tuning),
-                    "policy": {
-                        "allowed": decision.allowed,
-                        "requiresUnlock": decision.requiresUnlock,
-                        "tier": decision.tier,
-                    },
-                }
-            )
-
-        export_dir = Path("data/runtime/exports").resolve()
-        export_dir.mkdir(parents=True, exist_ok=True)
-        export_name = f"mindi-intelligence-lora-pack-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.json"
-        export_path = export_dir / export_name
-        payload = {
-            "createdAt": now_iso(),
-            "recommendedMethod": status.recommendedMethod,
-            "reason": status.reason,
-            "activeStyle": active_style.model_dump(),
-            "activeTuning": active_tuning.model_dump(),
-            "appliedSlangTerms": self.intelligence_slang_terms[:50],
-            "approvedLearningSources": [item.model_dump() for item in self.intelligence_learning_sources.values()],
-            "evalHistory": [item.model_dump() for item in self.intelligence_eval_history[:20]],
-            "status": status.model_dump(),
-            "examples": examples,
-        }
-        export_path.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
-        self.intelligence_adaptation_last_export_at = now_iso()
-        self.intelligence_adaptation_last_export_path = str(export_path)
-        self.logs.insert(
-            0,
-            ActionLogItem(
-                id=str(uuid4()),
-                intent="intelligence_adaptation_export",
-                tier=ActionTier.read_only,
-                result="allowed",
-                reason=f"method:{status.recommendedMethod},examples:{len(examples)}",
-                createdAt=self.intelligence_adaptation_last_export_at,
-            ),
-        )
-        return IntelligenceAdaptationExportResponse(
-            accepted=True,
-            reason="exported",
-            method=status.recommendedMethod,
-            exportPath=str(export_path),
-            exampleCount=len(examples),
-            status=self.intelligence_adaptation_status(),
-        )
+        return self._intel_svc.export_intelligence_adaptation()
 
     def _redact_sensitive_text(self, text: str) -> tuple[str, int]:
-        current = text
-        total = 0
-        for _, pattern, replacement in SENSITIVE_TEXT_PATTERNS:
-            current, count = pattern.subn(replacement, current)
-            total += count
-        return current, total
+        return redact_sensitive_text(text)
 
     def list_allowed_apps(self) -> list[str]:
-        app_grants = [grant for grant in self.permission_grants if grant.scope == "app"]
-        denied = {grant.subject.lower() for grant in app_grants if grant.decision == "deny"}
-        allowed = [grant.subject for grant in app_grants if grant.decision == "allow"]
-        return [app for app in allowed if app.lower() not in denied]
+        return self._web_svc.list_allowed_apps()
 
     def _is_app_allowed(self, app_id: str) -> bool:
-        return app_id.lower() in {app.lower() for app in self.list_allowed_apps()}
+        return self._web_svc.is_app_allowed(app_id)
 
     def _resolve_domain_permission_decision(self, hostname: str) -> str:
-        host = hostname.strip().lower()
-        if not host:
-            return "deny"
-        domain_grants = [grant for grant in self.permission_grants if grant.scope == "domain"]
-        for grant in domain_grants:
-            subject = grant.subject.strip().lower()
-            if not subject:
-                continue
-            if subject == "*" or host == subject or host.endswith(f".{subject}"):
-                return grant.decision
-            if subject.startswith("*."):
-                root = subject[2:]
-                if host == root or host.endswith(f".{root}"):
-                    return grant.decision
-        return "unset"
+        return self._web_svc.resolve_domain_permission(hostname)
 
     def _is_domain_allowed(self, hostname: str) -> bool:
-        decision = self._resolve_domain_permission_decision(hostname)
-        if decision == "deny":
-            return False
-        domain_grants = [grant for grant in self.permission_grants if grant.scope == "domain"]
-        has_allow = any(grant.decision == "allow" for grant in domain_grants)
-        if has_allow:
-            return decision == "allow"
-        return True
+        return self._web_svc.is_domain_allowed(hostname)
 
     def _persist_mic_payload(self, payload: str) -> str | None:
         encoded = payload
@@ -1903,178 +1215,10 @@ class RuntimeStore:
         return any(str(normalized).startswith(str(allow)) for allow in allows)
 
     def file_organize(self, request: FileOrganizeRequest) -> FileOrganizeResponse:
-        source = Path(request.sourceDir).resolve()
-        target = Path(request.targetDir).resolve()
-
-        if not source.exists() or not source.is_dir():
-            return FileOrganizeResponse(
-                accepted=False,
-                reason="source_not_found",
-                movedCount=0,
-                items=[],
-            )
-
-        if not self._is_path_allowed(source) or not self._is_path_allowed(target):
-            return FileOrganizeResponse(
-                accepted=False,
-                reason="folder_not_allowed",
-                movedCount=0,
-                items=[],
-            )
-
-        items: list[FileOrganizeItem] = []
-        for child in source.iterdir():
-            if child.is_file():
-                category = _category_for_suffix(child.suffix)
-                dest = target / category / child.name
-                items.append(
-                    FileOrganizeItem(
-                        fileName=child.name,
-                        sourcePath=str(child),
-                        targetPath=str(dest),
-                        category=category,
-                    )
-                )
-
-        if request.mode == "apply":
-            for item in items:
-                destination = Path(item.targetPath)
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                move(item.sourcePath, item.targetPath)
-            reason = "applied"
-        else:
-            reason = "preview_only"
-
-        self.logs.insert(
-            0,
-            ActionLogItem(
-                id=str(uuid4()),
-                intent=f"file_organize:{request.mode}",
-                tier=ActionTier.reversible,
-                result="allowed",
-                reason=reason,
-                createdAt=now_iso(),
-            ),
-        )
-
-        return FileOrganizeResponse(
-            accepted=True,
-            reason=reason,
-            movedCount=len(items) if request.mode == "apply" else 0,
-            items=items,
-        )
+        return self._file_svc.file_organize(request)
 
     def scrape_web(self, request: WebScrapeRequest) -> WebScrapeResponse:
-        raw_url = (request.url or "").strip()
-        parsed = urlparse(raw_url)
-        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-            return WebScrapeResponse(
-                accepted=False,
-                reason="invalid_url",
-                url=raw_url,
-            )
-
-        host = parsed.hostname or ""
-        if not self._is_domain_allowed(host):
-            return WebScrapeResponse(
-                accepted=False,
-                reason="domain_not_allowed",
-                url=raw_url,
-            )
-
-        headers = {
-            "User-Agent": "MINDI-Local-Agent/0.2 (+local-safe-scrape)",
-            "Accept": "text/html,text/plain;q=0.9,*/*;q=0.2",
-        }
-        http_request = Request(raw_url, headers=headers, method="GET")
-
-        try:
-            with urlopen(http_request, timeout=10) as response:
-                content_type = str(response.headers.get("Content-Type", "")).lower()
-                body = response.read(512_000)
-        except URLError:
-            return WebScrapeResponse(
-                accepted=False,
-                reason="fetch_failed",
-                url=raw_url,
-            )
-        except Exception:
-            return WebScrapeResponse(
-                accepted=False,
-                reason="fetch_error",
-                url=raw_url,
-            )
-
-        if not body:
-            return WebScrapeResponse(
-                accepted=False,
-                reason="empty_response",
-                url=raw_url,
-            )
-
-        decoded = body.decode("utf-8", errors="ignore")
-        title: str | None = None
-        links: list[str] = []
-        text_content = ""
-
-        if "text/html" in content_type or "<html" in decoded.lower():
-            parser = _ScrapeHtmlParser(base_url=raw_url, max_links=20)
-            parser.feed(decoded)
-            parser.close()
-            title = parser.title
-            links = parser.parsed_links()
-            text_content = parser.parsed_text(max_chars=request.maxChars)
-        elif "text/plain" in content_type:
-            text_content = " ".join(decoded.split())[: request.maxChars].strip()
-        else:
-            return WebScrapeResponse(
-                accepted=False,
-                reason="unsupported_content_type",
-                url=raw_url,
-            )
-
-        stored_note_id: str | None = None
-        storage_redacted = False
-        redaction_count = 0
-        storage_text = text_content
-        if self.privacy_redaction_enabled and text_content:
-            storage_text, redaction_count = self._redact_sensitive_text(text_content)
-            storage_redacted = redaction_count > 0
-        if request.storeAsNote and text_content:
-            note_title = (title or parsed.netloc or raw_url)[:140]
-            note = self.add_memory_note(
-                CreateMemoryNoteRequest(
-                    title=f"Web scrape: {note_title}",
-                    content=storage_text,
-                    tags=["web", "ops", "scrape"],
-                )
-            )
-            stored_note_id = note.id
-
-        self.logs.insert(
-            0,
-            ActionLogItem(
-                id=str(uuid4()),
-                intent=f"web_scrape:{parsed.netloc}",
-                tier=ActionTier.read_only,
-                result="allowed",
-                reason=f"text:{len(text_content)}",
-                createdAt=now_iso(),
-            ),
-        )
-
-        return WebScrapeResponse(
-            accepted=True,
-            reason="ok",
-            url=raw_url,
-            storageRedacted=storage_redacted,
-            redactionCount=redaction_count,
-            title=title,
-            text=text_content,
-            textLength=len(text_content),
-            links=links,
-            storedNoteId=stored_note_id,
-        )
+        return self._web_svc.scrape_web(request)
 
     def run_automation_chain(self, request: AutomationChainRequest) -> AutomationChainResponse:
         chain_name = (request.name or "").strip() or "ops_chain"
@@ -2309,20 +1453,7 @@ class RuntimeStore:
 
     @staticmethod
     def _parse_tasklist_csv(stdout: str) -> list[tuple[str, int | None]]:
-        rows: list[tuple[str, int | None]] = []
-        reader = csv.reader(io.StringIO(stdout))
-        for row in reader:
-            if len(row) < 2:
-                continue
-            process_name = row[0].strip().strip('"')
-            pid_text = row[1].strip().strip('"')
-            try:
-                pid_value: int | None = int(pid_text.replace(",", ""))
-            except ValueError:
-                pid_value = None
-            if process_name:
-                rows.append((process_name, pid_value))
-        return rows
+        return parse_tasklist_csv(stdout)
 
     def _create_security_event(
         self,
@@ -2335,209 +1466,24 @@ class RuntimeStore:
         pid: int | None = None,
         recovery_actions: list[str] | None = None,
     ) -> SecurityEvent:
-        event = SecurityEvent(
-            id=str(uuid4()),
-            severity=severity,  # type: ignore[arg-type]
+        return self._security_svc.create_security_event(
+            severity=severity,
             title=title,
             detail=detail,
-            source=source,  # type: ignore[arg-type]
-            status="open",
-            processName=process_name,
+            source=source,
+            process_name=process_name,
             pid=pid,
-            recoveryActions=recovery_actions or ["dismiss"],
-            createdAt=now_iso(),
-            resolvedAt=None,
+            recovery_actions=recovery_actions,
         )
-        self.security_events.insert(0, event)
-        self.alerts.insert(
-            0,
-            AlertItem(
-                id=str(uuid4()),
-                severity=event.severity,
-                title=f"Security: {event.title}",
-                detail=event.detail,
-                createdAt=event.createdAt,
-            ),
-        )
-        self.alerts = self.alerts[:100]
-        return event
 
     def list_security_events(self, status: str = "open", limit: int = 25) -> list[SecurityEvent]:
-        normalized = status.strip().lower()
-        items = self.security_events
-        if normalized in {"open", "resolved"}:
-            items = [event for event in self.security_events if event.status == normalized]
-        return items[: max(1, min(limit, 200))]
+        return self._security_svc.list_security_events(status=status, limit=limit)
 
     def scan_security(self) -> SecurityScanResponse:
-        new_events: list[SecurityEvent] = []
-        process_rows: list[tuple[str, int | None]] = []
-
-        try:
-            tasklist = subprocess.run(
-                ["tasklist", "/FO", "CSV", "/NH"],
-                check=False,
-                capture_output=True,
-                text=True,
-            )
-            if tasklist.returncode == 0:
-                process_rows = self._parse_tasklist_csv(tasklist.stdout or "")
-        except Exception:
-            self.security_last_error = "tasklist_failed"
-
-        known_open_keys = {
-            f"{event.processName or ''}:{event.pid or ''}:{event.title}"
-            for event in self.security_events
-            if event.status == "open"
-        }
-
-        for process_name, pid in process_rows:
-            lowered = process_name.lower()
-            if lowered not in SUSPICIOUS_PROCESS_RULES:
-                continue
-            severity, detail = SUSPICIOUS_PROCESS_RULES[lowered]
-            title = f"Suspicious process {process_name}"
-            key = f"{process_name}:{pid or ''}:{title}"
-            if key in known_open_keys:
-                continue
-            event = self._create_security_event(
-                severity=severity,
-                title=title,
-                detail=detail,
-                source="process_scan",
-                process_name=process_name,
-                pid=pid,
-                recovery_actions=["kill_process", "deny_app", "dismiss"],
-            )
-            new_events.append(event)
-            known_open_keys.add(key)
-
-        try:
-            defender = subprocess.run(
-                ["sc", "query", "WinDefend"],
-                check=False,
-                capture_output=True,
-                text=True,
-            )
-            if defender.returncode == 0 and "RUNNING" not in (defender.stdout or "").upper():
-                title = "Windows Defender service not running"
-                key = f":::{title}"
-                if key not in known_open_keys:
-                    event = self._create_security_event(
-                        severity="critical",
-                        title=title,
-                        detail="Built-in malware protection service is not in RUNNING state.",
-                        source="defender_service",
-                        recovery_actions=["dismiss"],
-                    )
-                    new_events.append(event)
-                    known_open_keys.add(key)
-        except Exception:
-            self.security_last_error = "defender_query_failed"
-
-        self.security_last_scan = now_iso()
-        self.logs.insert(
-            0,
-            ActionLogItem(
-                id=str(uuid4()),
-                intent="security_scan",
-                tier=ActionTier.read_only,
-                result="allowed",
-                reason=f"events:{len(new_events)}",
-                createdAt=now_iso(),
-            ),
-        )
-        return SecurityScanResponse(
-            accepted=True,
-            reason="ok",
-            scannedProcessCount=len(process_rows),
-            newAlerts=len(new_events),
-            events=new_events,
-        )
+        return self._security_svc.scan_security()
 
     def recover_security_event(self, request: SecurityRecoveryRequest) -> SecurityRecoveryResponse:
-        event = next((item for item in self.security_events if item.id == request.eventId), None)
-        if event is None:
-            return SecurityRecoveryResponse(accepted=False, reason="event_not_found")
-        if event.status == "resolved":
-            return SecurityRecoveryResponse(accepted=False, reason="event_already_resolved", event=event)
-
-        action = request.action
-        target = (request.target or "").strip()
-
-        if action == "dismiss":
-            event.status = "resolved"
-            event.resolvedAt = now_iso()
-            self.logs.insert(
-                0,
-                ActionLogItem(
-                    id=str(uuid4()),
-                    intent=f"security_recover:dismiss:{event.id}",
-                    tier=ActionTier.reversible,
-                    result="allowed",
-                    reason="dismissed",
-                    createdAt=now_iso(),
-                ),
-            )
-            return SecurityRecoveryResponse(accepted=True, reason="dismissed", event=event)
-
-        if action == "deny_app":
-            app_target = target or (event.processName or "")
-            if not app_target:
-                return SecurityRecoveryResponse(accepted=False, reason="target_required", event=event)
-            self.add_permission(
-                AddPermissionGrantRequest(
-                    scope="app",
-                    subject=app_target,
-                    decision="deny",
-                )
-            )
-            event.status = "resolved"
-            event.resolvedAt = now_iso()
-            self.logs.insert(
-                0,
-                ActionLogItem(
-                    id=str(uuid4()),
-                    intent=f"security_recover:deny_app:{app_target}",
-                    tier=ActionTier.reversible,
-                    result="allowed",
-                    reason="app_denied",
-                    createdAt=now_iso(),
-                ),
-            )
-            return SecurityRecoveryResponse(accepted=True, reason="app_denied", event=event)
-
-        if action == "kill_process":
-            process_target = target or (event.processName or "")
-            if not process_target:
-                return SecurityRecoveryResponse(accepted=False, reason="target_required", event=event)
-            if not request.confirm:
-                return SecurityRecoveryResponse(accepted=False, reason="confirmation_required", event=event)
-            try:
-                subprocess.run(
-                    ["taskkill", "/IM", process_target, "/T"],
-                    check=False,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-            except Exception:
-                return SecurityRecoveryResponse(accepted=False, reason="kill_failed", event=event)
-            event.status = "resolved"
-            event.resolvedAt = now_iso()
-            self.logs.insert(
-                0,
-                ActionLogItem(
-                    id=str(uuid4()),
-                    intent=f"security_recover:kill_process:{process_target}",
-                    tier=ActionTier.risky,
-                    result="allowed",
-                    reason="kill_requested",
-                    createdAt=now_iso(),
-                ),
-            )
-            return SecurityRecoveryResponse(accepted=True, reason="kill_requested", event=event)
-
-        return SecurityRecoveryResponse(accepted=False, reason="unsupported_action", event=event)
+        return self._security_svc.recover_security_event(request)
 
     def control_app(self, request: AppControlRequest) -> AppControlResponse:
         app_id = request.appId.strip()
@@ -2617,550 +1563,58 @@ class RuntimeStore:
         )
 
     def add_memory_note(self, request: CreateMemoryNoteRequest) -> MemoryNote:
-        note = self.memory_db.add_note(request)
-        self.logs.insert(
-            0,
-            ActionLogItem(
-                id=str(uuid4()),
-                intent=f"memory_note:create:{note.title}",
-                tier=ActionTier.reversible,
-                result="allowed",
-                reason="stored_locally",
-                createdAt=now_iso(),
-            ),
-        )
-        return note
+        return self._memory_svc.add_memory_note(request)
 
     def list_memory_notes(self, limit: int = 50) -> list[MemoryNote]:
-        return self.memory_db.list_notes(limit=limit)
+        return self._memory_svc.list_memory_notes(limit=limit)
 
     def search_memory(self, query: str, limit: int = 50) -> MemorySearchResponse:
-        return MemorySearchResponse(query=query, items=self.memory_db.search_notes(query, limit=limit))
+        return self._memory_svc.search_memory(query=query, limit=limit)
 
     def list_perception_snapshots(self, limit: int = 20) -> list[PerceptionSnapshot]:
-        return self.memory_db.list_perception_snapshots(limit=limit)
+        return self._memory_svc.list_perception_snapshots(limit=limit)
 
     def search_perception_snapshots(self, query: str, limit: int = 20) -> PerceptionSnapshotSearchResponse:
-        return PerceptionSnapshotSearchResponse(
-            query=query,
-            items=self.memory_db.search_perception_snapshots(query=query, limit=limit),
-        )
+        return self._memory_svc.search_perception_snapshots(query=query, limit=limit)
 
     def import_document(self, request: DocumentImportRequest) -> DocumentImportResponse:
-        source = Path(request.path).resolve()
-        if not source.exists() or not source.is_file():
-            return DocumentImportResponse(accepted=False, reason="document_not_found")
-        if not self._is_path_allowed(source):
-            return DocumentImportResponse(accepted=False, reason="folder_not_allowed")
-
-        try:
-            document = self.memory_db.import_document(source)
-        except ValueError as exc:
-            return DocumentImportResponse(accepted=False, reason=str(exc))
-
-        self.logs.insert(
-            0,
-            ActionLogItem(
-                id=str(uuid4()),
-                intent=f"document_import:{source.name}",
-                tier=ActionTier.reversible,
-                result="allowed",
-                reason="document_indexed",
-                createdAt=now_iso(),
-            ),
-        )
-        return DocumentImportResponse(accepted=True, reason="indexed", document=document)
+        return self._memory_svc.import_document(request)
 
     def search_documents(self, query: str, limit: int = 20) -> DocumentSearchResponse:
-        items = self.memory_db.search_documents(query=query, limit=limit)
-        return DocumentSearchResponse(
-            query=query,
-            items=items,
-            retrievalMode=self._document_retrieval_mode(items),
-            confidence=self._document_retrieval_confidence(items),
-        )
+        return self._memory_svc.search_documents(query=query, limit=limit)
 
     @staticmethod
     def _document_retrieval_mode(items: list[MemoryDocumentChunk]) -> str:
-        if not items:
-            return "none"
-        modes = {item.retrievalMode for item in items}
-        if "hybrid" in modes or "semantic" in modes:
-            return "hybrid"
-        return "keyword"
+        return document_retrieval_mode(items)
 
     @staticmethod
     def _document_retrieval_confidence(items: list[MemoryDocumentChunk]) -> float:
-        if not items:
-            return 0.0
-        return round(max(0.0, min(1.0, items[0].score / 6.0)), 3)
+        return document_retrieval_confidence(items)
+
+    @staticmethod
+    def _should_attach_document_rag(text: str, items: list[MemoryDocumentChunk]) -> bool:
+        return should_attach_document_rag(text, items)
 
     def import_ocr_document(self, request: OcrImportRequest) -> OcrImportResponse:
-        source = Path(request.path).resolve()
-        if not source.exists() or not source.is_file():
-            return OcrImportResponse(accepted=False, reason="document_not_found")
-        if not self._is_path_allowed(source):
-            return OcrImportResponse(accepted=False, reason="folder_not_allowed")
-
-        degraded = False
-        fallback_reason: str | None = None
-        ocr_backend = "huggingface_local"
-        ocr_model = "zai-org/GLM-OCR"
-        try:
-            runtime_ocr = self.ai_runtime.extract_ocr(path=source)
-            if runtime_ocr.get("accepted"):
-                extracted_text = str(runtime_ocr.get("text") or "").strip()
-                extraction_mode = str(runtime_ocr.get("ocrMode") or "image_ocr")
-                ocr_backend = str(runtime_ocr.get("provider") or ocr_backend)
-                ocr_model = str(runtime_ocr.get("model") or ocr_model)
-                if not extracted_text:
-                    raise ValueError("ocr_no_text_detected")
-            else:
-                extracted_text, extraction_mode = extract_text_for_ocr(source)
-                degraded = True
-                fallback_reason = str(runtime_ocr.get("reason") or "runtime_unavailable")
-                ocr_backend = "pytesseract_fallback"
-                ocr_model = "local_tesseract"
-            document = self.memory_db.import_extracted_document(
-                source_path=source,
-                text=extracted_text,
-                title=source.name,
-            )
-        except ValueError as exc:
-            return OcrImportResponse(accepted=False, reason=str(exc))
-
-        self.logs.insert(
-            0,
-            ActionLogItem(
-                id=str(uuid4()),
-                intent=f"ocr_import:{source.name}",
-                tier=ActionTier.reversible,
-                result="allowed",
-                reason=extraction_mode,
-                createdAt=now_iso(),
-            ),
-        )
-        return OcrImportResponse(
-            accepted=True,
-            reason=extraction_mode,
-            document=document,
-            ocrBackend=ocr_backend,
-            ocrModel=ocr_model,
-            degraded=degraded,
-            fallbackReason=fallback_reason,
-        )
-
-    @staticmethod
-    def _box_intersection_area(
-        a: tuple[int, int, int, int],
-        b: tuple[int, int, int, int],
-    ) -> int:
-        ax1, ay1, ax2, ay2 = a
-        bx1, by1, bx2, by2 = b
-        ix1 = max(ax1, bx1)
-        iy1 = max(ay1, by1)
-        ix2 = min(ax2, bx2)
-        iy2 = min(ay2, by2)
-        iw = max(0, ix2 - ix1 + 1)
-        ih = max(0, iy2 - iy1 + 1)
-        return iw * ih
-
-    @staticmethod
-    def _merge_overlapping_boxes(
-        boxes: list[tuple[int, int, int, int, float]],
-    ) -> list[tuple[int, int, int, int, float]]:
-        if not boxes:
-            return []
-        merged = sorted(boxes, key=lambda item: (item[1], item[0]))
-        changed = True
-        while changed:
-            changed = False
-            next_boxes: list[tuple[int, int, int, int, float]] = []
-            while merged:
-                current = merged.pop(0)
-                cx1, cy1, cx2, cy2, cscore = current
-                keep = True
-                for index, other in enumerate(merged):
-                    ox1, oy1, ox2, oy2, oscore = other
-                    intersection = RuntimeStore._box_intersection_area(
-                        (cx1, cy1, cx2, cy2),
-                        (ox1, oy1, ox2, oy2),
-                    )
-                    if intersection <= 0:
-                        continue
-                    c_area = (cx2 - cx1 + 1) * (cy2 - cy1 + 1)
-                    o_area = (ox2 - ox1 + 1) * (oy2 - oy1 + 1)
-                    overlap_ratio = intersection / max(1, min(c_area, o_area))
-                    if overlap_ratio < 0.35:
-                        continue
-                    nx1 = min(cx1, ox1)
-                    ny1 = min(cy1, oy1)
-                    nx2 = max(cx2, ox2)
-                    ny2 = max(cy2, oy2)
-                    nscore = max(cscore, oscore)
-                    merged.pop(index)
-                    merged.insert(0, (nx1, ny1, nx2, ny2, nscore))
-                    keep = False
-                    changed = True
-                    break
-                if keep:
-                    next_boxes.append(current)
-            merged = next_boxes
-        return merged
-
-    @staticmethod
-    def _find_runs(active: list[bool], min_size: int) -> list[tuple[int, int]]:
-        runs: list[tuple[int, int]] = []
-        start: int | None = None
-        for index, value in enumerate(active):
-            if value and start is None:
-                start = index
-            elif not value and start is not None:
-                if index - start >= min_size:
-                    runs.append((start, index - 1))
-                start = None
-        if start is not None and len(active) - start >= min_size:
-            runs.append((start, len(active) - 1))
-        return runs
-
-    def _extract_ui_blocks_from_image(
-        self,
-        source: Path,
-        max_blocks: int,
-    ) -> tuple[int, int, list[PerceptionUiBlock]]:
-        with Image.open(source) as image:
-            grayscale = image.convert("L")
-            width, height = grayscale.size
-            scale = max(1.0, max(width, height) / 480.0)
-            sample_width = max(1, int(width / scale))
-            sample_height = max(1, int(height / scale))
-            sampled = grayscale.resize((sample_width, sample_height))
-
-            pixels = sampled.load()
-            row_active: list[bool] = []
-            for y in range(sample_height):
-                active_count = 0
-                for x in range(sample_width):
-                    if pixels[x, y] < 232:
-                        active_count += 1
-                row_active.append(active_count >= max(2, int(sample_width * 0.03)))
-
-            row_runs = self._find_runs(row_active, min_size=max(2, int(sample_height * 0.01)))
-            boxes: list[tuple[int, int, int, int, float]] = []
-            for y0, y1 in row_runs:
-                column_active: list[bool] = []
-                run_height = y1 - y0 + 1
-                for x in range(sample_width):
-                    active_count = 0
-                    for y in range(y0, y1 + 1):
-                        if pixels[x, y] < 232:
-                            active_count += 1
-                    column_active.append(active_count >= max(1, int(run_height * 0.08)))
-
-                col_runs = self._find_runs(column_active, min_size=max(3, int(sample_width * 0.02)))
-                for x0, x1 in col_runs:
-                    sx1 = int(x0 * scale)
-                    sy1 = int(y0 * scale)
-                    sx2 = min(width - 1, int((x1 + 1) * scale) - 1)
-                    sy2 = min(height - 1, int((y1 + 1) * scale) - 1)
-                    area = (sx2 - sx1 + 1) * (sy2 - sy1 + 1)
-                    if area < max(200, int(width * height * 0.0003)):
-                        continue
-                    density = min(
-                        1.0,
-                        ((x1 - x0 + 1) * (y1 - y0 + 1))
-                        / max(1.0, float(sample_width * sample_height)),
-                    )
-                    boxes.append((sx1, sy1, sx2, sy2, max(0.05, density * 30)))
-
-            merged = self._merge_overlapping_boxes(boxes)
-            merged = sorted(
-                merged,
-                key=lambda item: ((item[2] - item[0] + 1) * (item[3] - item[1] + 1)),
-                reverse=True,
-            )[:max_blocks]
-            ui_blocks = [
-                PerceptionUiBlock(
-                    x=x1,
-                    y=y1,
-                    width=max(1, x2 - x1 + 1),
-                    height=max(1, y2 - y1 + 1),
-                    kind="text_region",
-                    confidence=round(min(0.99, score), 3),
-                    textSnippet=None,
-                )
-                for x1, y1, x2, y2, score in merged
-            ]
-        return width, height, ui_blocks
+        return self._memory_svc.import_ocr_document(request)
 
     def analyze_screen(self, request: PerceptionAnalyzeRequest) -> PerceptionAnalyzeResponse:
-        if not self._is_action_allowed(PERCEPTION_SCREEN_SUBJECT):
-            decision = self._resolve_action_permission_decision(PERCEPTION_SCREEN_SUBJECT)
-            reason = "screen_permission_denied" if decision == "deny" else "screen_permission_required"
-            self.logs.insert(
-                0,
-                ActionLogItem(
-                    id=str(uuid4()),
-                    intent="perception_screen_analyze",
-                    tier=ActionTier.risky,
-                    result="blocked",
-                    reason=reason,
-                    createdAt=now_iso(),
-                ),
-            )
-            return PerceptionAnalyzeResponse(
-                accepted=False,
-                reason=reason,
-            )
-
-        source: Path | None = None
-        remove_source_after = False
-
-        image_data_url = (request.imageDataUrl or "").strip()
-        path_value = (request.path or "").strip()
-        if image_data_url:
-            if not image_data_url.startswith("data:image/") or ";base64," not in image_data_url:
-                return PerceptionAnalyzeResponse(
-                    accepted=False,
-                    reason="invalid_image_data_url",
-                )
-            header, encoded = image_data_url.split(",", 1)
-            mime_part = header[5:].split(";", 1)[0].lower()
-            suffix = {
-                "image/png": ".png",
-                "image/jpeg": ".jpg",
-                "image/webp": ".webp",
-                "image/bmp": ".bmp",
-                "image/tiff": ".tiff",
-            }.get(mime_part)
-            if suffix is None:
-                return PerceptionAnalyzeResponse(
-                    accepted=False,
-                    reason="unsupported_file_type",
-                )
-            try:
-                image_bytes = base64.b64decode(encoded, validate=True)
-            except (ValueError, binascii.Error):
-                return PerceptionAnalyzeResponse(
-                    accepted=False,
-                    reason="invalid_image_data_url",
-                )
-            if not image_bytes:
-                return PerceptionAnalyzeResponse(
-                    accepted=False,
-                    reason="invalid_image_data_url",
-                )
-            captures_dir = Path("data/runtime/perception").resolve()
-            captures_dir.mkdir(parents=True, exist_ok=True)
-            source = captures_dir / f"capture-{uuid4()}{suffix}"
-            source.write_bytes(image_bytes)
-            remove_source_after = True
-        elif path_value:
-            source = Path(path_value).resolve()
-            if not source.exists() or not source.is_file():
-                return PerceptionAnalyzeResponse(
-                    accepted=False,
-                    reason="image_not_found",
-                )
-            if source.suffix.lower() not in OCR_IMAGE_SUFFIXES:
-                return PerceptionAnalyzeResponse(
-                    accepted=False,
-                    reason="unsupported_file_type",
-                )
-            if not self._is_path_allowed(source):
-                return PerceptionAnalyzeResponse(
-                    accepted=False,
-                    reason="folder_not_allowed",
-                )
-        else:
-            return PerceptionAnalyzeResponse(
-                accepted=False,
-                reason="path_or_image_required",
-            )
-
-        try:
-            width, height, blocks = self._extract_ui_blocks_from_image(
-                source=source,
-                max_blocks=request.maxBlocks,
-            )
-        except Exception:
-            if remove_source_after:
-                try:
-                    source.unlink(missing_ok=True)
-                except Exception:
-                    pass
-            return PerceptionAnalyzeResponse(
-                accepted=False,
-                reason="image_parse_failed",
-            )
-
-        text: str | None = None
-        ocr_mode: str | None = None
-        ocr_error: str | None = None
-        ocr_backend: str | None = None
-        ocr_model: str | None = None
-        degraded = False
-        fallback_reason: str | None = None
-        if request.includeOcr:
-            try:
-                runtime_ocr = self.ai_runtime.extract_ocr(path=source)
-                if runtime_ocr.get("accepted"):
-                    text = str(runtime_ocr.get("text") or "").strip() or None
-                    ocr_mode = runtime_ocr.get("ocrMode")
-                    ocr_backend = runtime_ocr.get("provider")
-                    ocr_model = runtime_ocr.get("model")
-                    if text is None:
-                        ocr_error = "ocr_no_text_detected"
-                else:
-                    text, ocr_mode = extract_text_for_ocr(source)
-                    degraded = True
-                    fallback_reason = str(runtime_ocr.get("reason") or "runtime_unavailable")
-                    ocr_backend = "pytesseract_fallback"
-                    ocr_model = "local_tesseract"
-            except ValueError as exc:
-                ocr_error = str(exc)
-
-        reason = "ok"
-        if request.includeOcr and ocr_error is not None:
-            reason = "ocr_unavailable_blocks_extracted"
-
-        storage_redacted = False
-        redaction_count = 0
-        storage_text = text
-        if self.privacy_redaction_enabled and text:
-            storage_text, redaction_count = self._redact_sensitive_text(text)
-            storage_redacted = redaction_count > 0
-
-        self.logs.insert(
-            0,
-            ActionLogItem(
-                id=str(uuid4()),
-                intent=f"perception_screen_analyze:{source.name}",
-                tier=ActionTier.reversible,
-                result="allowed",
-                reason=f"blocks:{len(blocks)}",
-                createdAt=now_iso(),
-            ),
-        )
-
-        snapshot = self.memory_db.add_perception_snapshot(
-            source_path=str(source),
-            reason=reason,
-            ocr_mode=ocr_mode,
-            text=storage_text,
-            block_count=len(blocks),
-            image_width=width,
-            image_height=height,
-        )
-
-        response = PerceptionAnalyzeResponse(
-            accepted=True,
-            reason=reason,
-            snapshotId=snapshot.id,
-            storageRedacted=storage_redacted,
-            redactionCount=redaction_count,
-            path=str(source),
-            imageWidth=width,
-            imageHeight=height,
-            ocrMode=ocr_mode,
-            ocrError=ocr_error,
-            ocrBackend=ocr_backend,
-            ocrModel=ocr_model,
-            degraded=degraded,
-            fallbackReason=fallback_reason,
-            text=text,
-            textLength=len(text or ""),
-            blocks=blocks,
-        )
-        if remove_source_after:
-            try:
-                source.unlink(missing_ok=True)
-            except Exception:
-                pass
-        return response
+        return self._memory_svc.analyze_screen(request)
 
     def _watched_paths(self) -> list[Path]:
-        defaults = [Path("data/inbox"), Path("data/notes"), Path("data/screenshots")]
-        folder_grants = [
-            Path(grant.subject)
-            for grant in self.permission_grants
-            if grant.scope == "folder" and grant.decision == "allow"
-        ]
-        seen: set[str] = set()
-        resolved_dirs: list[Path] = []
-        for candidate in defaults + folder_grants:
-            path = candidate.resolve()
-            if not path.exists() or not path.is_dir():
-                continue
-            key = str(path).lower()
-            if key in seen:
-                continue
-            seen.add(key)
-            resolved_dirs.append(path)
-        return resolved_dirs
+        return self._memory_svc.watched_paths()
 
     def auto_index_status(self) -> AutoIndexStatus:
-        paths = [str(path) for path in self._watched_paths()]
-        return AutoIndexStatus(
-            running=self.auto_index_thread is not None and self.auto_index_thread.is_alive(),
-            watchedPaths=paths,
-            lastScanAt=self.auto_index_last_scan,
-            indexedTotal=self.auto_index_indexed_total,
-            indexedLastRun=self.auto_index_indexed_last_run,
-            lastError=self.auto_index_last_error,
-        )
+        return self._memory_svc.auto_index_status()
 
     def start_auto_indexer(self) -> None:
-        if self.auto_index_thread is not None and self.auto_index_thread.is_alive():
-            return
-        self.auto_index_stop.clear()
-        self.auto_index_thread = Thread(target=self._auto_index_loop, daemon=True)
-        self.auto_index_thread.start()
+        self._memory_svc.start_auto_indexer()
 
     def _auto_index_loop(self) -> None:
-        while not self.auto_index_stop.is_set():
-            self.auto_index_scan_once()
-            self.auto_index_stop.wait(30)
+        self._memory_svc._auto_index_loop()
 
     def auto_index_scan_once(self) -> AutoIndexStatus:
-        indexed_now = 0
-        self.auto_index_last_error = None
-        supported_suffixes = ALLOWED_DOCUMENT_SUFFIXES | OCR_IMAGE_SUFFIXES | {".pdf"}
-
-        for directory in self._watched_paths():
-            for file_path in directory.rglob("*"):
-                if not file_path.is_file():
-                    continue
-                if file_path.suffix.lower() not in supported_suffixes:
-                    continue
-                try:
-                    mtime_ns = file_path.stat().st_mtime_ns
-                except OSError:
-                    continue
-                file_key = str(file_path.resolve())
-                if self.auto_index_seen_mtime.get(file_key) == mtime_ns:
-                    continue
-
-                try:
-                    if file_path.suffix.lower() in ALLOWED_DOCUMENT_SUFFIXES:
-                        self.memory_db.import_document(file_path)
-                    else:
-                        extracted_text, _ = extract_text_for_ocr(file_path)
-                        self.memory_db.import_extracted_document(
-                            source_path=file_path,
-                            text=extracted_text,
-                            title=file_path.name,
-                        )
-                    self.auto_index_seen_mtime[file_key] = mtime_ns
-                    indexed_now += 1
-                except ValueError as exc:
-                    self.auto_index_seen_mtime[file_key] = mtime_ns
-                    self.auto_index_last_error = str(exc)
-
-        self.auto_index_last_scan = now_iso()
-        self.auto_index_indexed_last_run = indexed_now
-        self.auto_index_indexed_total += indexed_now
-        return self.auto_index_status()
+        return self._memory_svc.auto_index_scan_once()
 
     def scheduler_status(self) -> SchedulerStatus:
         return SchedulerStatus(
@@ -3186,95 +1640,23 @@ class RuntimeStore:
 
     @staticmethod
     def _parse_due_at(value: str | None) -> datetime | None:
-        if not value:
-            return None
-        raw = value.strip()
-        if not raw:
-            return None
-        if raw.endswith("Z"):
-            raw = raw[:-1] + "+00:00"
-        try:
-            parsed = datetime.fromisoformat(raw)
-        except ValueError:
-            return None
-        if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=timezone.utc)
-        return parsed.astimezone(timezone.utc)
+        return parse_due_at(value)
 
     @staticmethod
     def _parse_time_component(raw: str | None) -> tuple[int, int]:
-        if not raw:
-            return (9, 0)
-        text = raw.strip().lower()
-        match_ampm = re.fullmatch(r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)", text)
-        if match_ampm:
-            hour = int(match_ampm.group(1))
-            minute = int(match_ampm.group(2) or "0")
-            meridiem = match_ampm.group(3)
-            hour = hour % 12
-            if meridiem == "pm":
-                hour += 12
-            return (hour, minute)
-
-        match_24 = re.fullmatch(r"(\d{1,2})(?::(\d{2}))?", text)
-        if match_24:
-            hour = int(match_24.group(1))
-            minute = int(match_24.group(2) or "0")
-            if 0 <= hour <= 23 and 0 <= minute <= 59:
-                return (hour, minute)
-        return (9, 0)
+        return parse_time_component(raw)
 
     @staticmethod
     def _resolve_timezone(name: str | None) -> tuple[timezone | ZoneInfo, bool]:
-        if not name:
-            return timezone.utc, False
-        tz_name = name.strip()
-        if not tz_name:
-            return timezone.utc, False
-        try:
-            return ZoneInfo(tz_name), False
-        except Exception:
-            pass
-
-        normalized = tz_name.upper()
-        fallback_minutes = {
-            "UTC": 0,
-            "ETC/UTC": 0,
-            "GMT": 0,
-            "ASIA/MANILA": 8 * 60,
-            "ASIA/SINGAPORE": 8 * 60,
-            "ASIA/HONG_KONG": 8 * 60,
-            "ASIA/TOKYO": 9 * 60,
-            "ASIA/SEOUL": 9 * 60,
-            "AMERICA/NEW_YORK": -5 * 60,
-            "AMERICA/CHICAGO": -6 * 60,
-            "AMERICA/DENVER": -7 * 60,
-            "AMERICA/LOS_ANGELES": -8 * 60,
-            "EUROPE/LONDON": 0,
-            "EUROPE/PARIS": 60,
-        }.get(normalized)
-        if fallback_minutes is not None:
-            return timezone(timedelta(minutes=fallback_minutes)), True
-
-        offset_match = re.fullmatch(r"(?:UTC|GMT)\s*([+-])\s*(\d{1,2})(?::?(\d{2}))?", normalized)
-        if offset_match:
-            sign = 1 if offset_match.group(1) == "+" else -1
-            hours = int(offset_match.group(2))
-            minutes = int(offset_match.group(3) or "0")
-            total_minutes = sign * (hours * 60 + minutes)
-            return timezone(timedelta(minutes=total_minutes)), True
-        return timezone.utc, True
+        return resolve_timezone(name)
 
     @staticmethod
     def _format_utc(value: datetime) -> str:
-        return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+        return format_utc(value)
 
-    def _compute_next_run(self, due: datetime, recurrence: str, now_utc: datetime) -> datetime:
-        interval = timedelta(days=1) if recurrence == "daily" else timedelta(days=7)
-        next_due = due
-        while next_due <= now_utc:
-            next_due = next_due + interval
-        return next_due
+    @staticmethod
+    def _compute_next_run(due: datetime, recurrence: str, now_utc: datetime) -> datetime:
+        return compute_next_run(due, recurrence, now_utc)
 
     def task_next_run(self, request: TaskNextRunRequest) -> TaskNextRunResponse:
         due = self._parse_due_at(request.dueAt)
@@ -3383,16 +1765,11 @@ class RuntimeStore:
 
     @staticmethod
     def _ics_escape(value: str) -> str:
-        return (
-            value.replace("\\", "\\\\")
-            .replace(";", "\\;")
-            .replace(",", "\\,")
-            .replace("\n", "\\n")
-        )
+        return ics_escape(value)
 
     @staticmethod
     def _ics_dt(value: datetime) -> str:
-        return value.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        return ics_dt(value)
 
     def export_calendar(self, request: CalendarExportRequest) -> CalendarExportResponse:
         export_dir = Path("data/runtime/exports").resolve()
@@ -3480,74 +1857,23 @@ class RuntimeStore:
 
     @staticmethod
     def _ics_unescape(value: str) -> str:
-        return (
-            value.replace("\\n", "\n")
-            .replace("\\,", ",")
-            .replace("\\;", ";")
-            .replace("\\\\", "\\")
-        )
+        return ics_unescape(value)
 
     @staticmethod
     def _unfold_ics_lines(raw_text: str) -> list[str]:
-        unfolded: list[str] = []
-        for line in raw_text.splitlines():
-            if (line.startswith(" ") or line.startswith("\t")) and unfolded:
-                unfolded[-1] = unfolded[-1] + line[1:]
-                continue
-            unfolded.append(line)
-        return unfolded
+        return unfold_ics_lines(raw_text)
 
     @staticmethod
     def _parse_ics_property(line: str) -> tuple[str, dict[str, str], str] | None:
-        if ":" not in line:
-            return None
-        head, value = line.split(":", 1)
-        parts = head.split(";")
-        key = parts[0].upper().strip()
-        params: dict[str, str] = {}
-        for part in parts[1:]:
-            if "=" not in part:
-                continue
-            name, raw_value = part.split("=", 1)
-            params[name.upper().strip()] = raw_value.strip()
-        return key, params, value.strip()
+        return parse_ics_property(line)
 
-    def _parse_ics_datetime(self, raw: str, tzid: str | None = None) -> datetime | None:
-        value = raw.strip()
-        if not value:
-            return None
-        tz, _ = self._resolve_timezone(tzid or "UTC")
-        try:
-            if value.endswith("Z"):
-                dt = datetime.strptime(value, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
-                return dt.astimezone(timezone.utc)
-            if "T" in value:
-                dt_local = datetime.strptime(value, "%Y%m%dT%H%M%S").replace(tzinfo=tz)
-                return dt_local.astimezone(timezone.utc)
-            dt_local = datetime.strptime(value, "%Y%m%d").replace(tzinfo=tz)
-            return dt_local.astimezone(timezone.utc)
-        except ValueError:
-            return None
+    @staticmethod
+    def _parse_ics_datetime(raw: str, tzid: str | None = None) -> datetime | None:
+        return parse_ics_datetime(raw, tzid)
 
     @staticmethod
     def _parse_ics_trigger_minutes(raw: str) -> int | None:
-        text = raw.strip().upper()
-        if not text.startswith("-P"):
-            return None
-        match = re.fullmatch(
-            r"-P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?",
-            text,
-        )
-        if not match:
-            return None
-        days = int(match.group(1) or "0")
-        hours = int(match.group(2) or "0")
-        minutes = int(match.group(3) or "0")
-        seconds = int(match.group(4) or "0")
-        total_minutes = days * 24 * 60 + hours * 60 + minutes + (1 if seconds > 0 else 0)
-        if total_minutes <= 0:
-            return None
-        return total_minutes
+        return parse_ics_trigger_minutes(raw)
 
     def _find_task_conflict(self, title: str, due_at: str, external_id: str | None) -> TaskItem | None:
         if external_id:
