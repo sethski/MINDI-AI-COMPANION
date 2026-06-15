@@ -800,21 +800,21 @@ def runtime_update_config(payload: RuntimeConfig) -> dict:
 @app.post("/llm/generate")
 def llm_generate(payload: LlmGenerateRequest) -> dict:
     started = time()
-    features = _feature_status()
-    if not features["llm"]["ready"]:
-        _record_feature_failure("llm", features["llm"]["lastError"] or "llm_model_not_ready")
-        return {
-            "accepted": False,
-            "reason": features["llm"]["lastError"] or "llm_model_not_ready",
-            "provider": runtime_config.llmProvider,
-            "model": runtime_config.llmModel,
-        }
     text = payload.prompt.strip()
     if not text:
         _record_feature_failure("llm", "empty_prompt")
         return {
             "accepted": False,
             "reason": "empty_prompt",
+            "provider": runtime_config.llmProvider,
+            "model": runtime_config.llmModel,
+        }
+    features = _feature_status()
+    if not features["llm"]["ready"]:
+        _record_feature_failure("llm", features["llm"]["lastError"] or "llm_model_not_ready")
+        return {
+            "accepted": False,
+            "reason": features["llm"]["lastError"] or "llm_model_not_ready",
             "provider": runtime_config.llmProvider,
             "model": runtime_config.llmModel,
         }
