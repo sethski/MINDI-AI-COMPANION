@@ -1,7 +1,10 @@
 import { useCallback, useEffect, useId, useRef, useState } from "react";
-import { importDocument, importOcrDocument, sendAssistantRequest } from "../../lib/agent-api";
+import { listen } from "@tauri-apps/api/event";
+import { fetchChatHistory, importDocument, importOcrDocument, streamAssistantRequest } from "../../lib/agent-api";
+import { buildInputPrompt } from "../../lib/input-bridge";
 import { enqueueSyncItem, loadSyncQueue } from "../../lib/local-state";
-import { isTauriRuntime, saveUploadTemp } from "../../lib/tauri-window";
+import { isTauriRuntime, listenMindiInput, saveUploadTemp } from "../../lib/tauri-window";
+import type { ChatMessage } from "@mindi/shared";
 
 type ChatRole = "user" | "assistant";
 type TurnState = "sending" | "ok" | "error";
@@ -115,6 +118,44 @@ export function ChatPanel({ online, onSyncDepthChange }: ChatPanelProps) {
     setTurns((current) => current.map((turn) => (turn.id === id ? { ...turn, ...patch } : turn)));
   }, []);
 
+  const buildConversation = useCallback((currentTurns: ChatTurn[]): ChatMessage[] => {
+    return currentTurns
+      .filter((turn) => turn.state === "ok" && turn.content.trim().length > 0)
+      .slice(-12)
+      .map((turn) => ({
+        role: turn.role,
+        content: turn.content,
+        timestamp: new Date(turn.ts).toISOString(),
+      }));
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const history = await fetchChatHistory(120);
+        if (cancelled || history.messages.length === 0) {
+          return;
+        }
+        setTurns(
+          history.messages.map((message) => ({
+            id: message.id,
+            role: message.role,
+            content: message.content,
+            ts: Date.parse(message.ts) || Date.now(),
+            state: "ok" as const,
+            meta: message.meta ?? undefined,
+          })),
+        );
+      } catch {
+        // history unavailable when agent offline
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const sendText = useCallback(
     async (text: string) => {
       const trimmed = text.trim();
@@ -123,42 +164,91 @@ export function ChatPanel({ online, onSyncDepthChange }: ChatPanelProps) {
       }
 
       setBusy(true);
-      appendTurn({ id: newId(), role: "user", content: trimmed, ts: Date.now(), state: "ok" });
+      const userTurn: ChatTurn = { id: newId(), role: "user", content: trimmed, ts: Date.now(), state: "ok" };
+      appendTurn(userTurn);
       const replyId = newId();
       appendTurn({ id: replyId, role: "assistant", content: "", ts: Date.now(), state: "sending" });
+      const conversation = buildConversation([...turns, userTurn]);
 
       try {
-        const response = await sendAssistantRequest({ text: trimmed, mode: "chat", tab: "home" });
-        const degraded = Boolean(response.degraded);
-        const provider = response.provider ? `${response.provider}` : undefined;
-        const model = response.model ? ` · ${response.model}` : "";
+        let streamed = "";
+        const finalEvent = await streamAssistantRequest(
+          { text: trimmed, mode: "chat", tab: "home", conversation },
+          (event) => {
+            if (event.token) {
+              streamed += event.token;
+              patchTurn(replyId, { content: streamed, state: "sending" });
+            }
+          },
+        );
+        const degraded = Boolean(finalEvent?.degraded);
+        const busy = finalEvent?.fallbackReason === "assistant_busy";
+        const provider = finalEvent?.provider ? `${finalEvent.provider}` : undefined;
+        const model = finalEvent?.model ? ` · ${finalEvent.model}` : "";
+        const reply =
+          finalEvent?.reply?.trim() ||
+          streamed.trim() ||
+          (degraded
+            ? `Local model unavailable (${finalEvent?.fallbackReason ?? "runtime_error"}).`
+            : "I am ready when you are.");
         patchTurn(replyId, {
-          content:
-            response.reply?.trim() ||
-            (degraded
-              ? `Local model unavailable (${response.fallbackReason ?? "runtime_error"}).`
-              : "I am ready when you are."),
-          state: degraded ? "error" : "ok",
-          meta: degraded
-            ? `degraded: ${response.fallbackReason ?? "runtime_error"}`
-            : provider
-              ? `${provider}${model}`
-              : undefined,
+          content: reply,
+          state: busy ? "ok" : degraded ? "error" : "ok",
+          meta: busy
+            ? "assistant_busy"
+            : degraded
+              ? `degraded: ${finalEvent?.fallbackReason ?? "runtime_error"}`
+              : provider
+                ? `${provider}${model}`
+                : undefined,
         });
-      } catch {
-        enqueueSyncItem({ type: "chat", payload: { text: trimmed, mode: "chat", tab: "home" } });
-        onSyncDepthChange?.(loadSyncQueue().length);
+      } catch (error) {
+        const timedOut = error instanceof DOMException && error.name === "AbortError";
+        if (!timedOut) {
+          enqueueSyncItem({ type: "chat", payload: { text: trimmed, mode: "chat", tab: "home" } });
+          onSyncDepthChange?.(loadSyncQueue().length);
+        }
         patchTurn(replyId, {
-          content: "I could not reach the local agent, so I queued this and will sync when it is back.",
+          content: timedOut
+            ? "The local model took too long to respond. First replies can take up to two minutes — try again."
+            : "I could not reach the local agent, so I queued this and will sync when it is back.",
           state: "error",
-          meta: "agent_unreachable",
+          meta: timedOut ? "assistant_timeout" : "agent_unreachable",
         });
       } finally {
         setBusy(false);
       }
     },
-    [appendTurn, busy, onSyncDepthChange, patchTurn],
+    [appendTurn, buildConversation, busy, onSyncDepthChange, patchTurn, turns],
   );
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    void listenMindiInput((payload) => {
+      const prompt = buildInputPrompt(payload.kind, payload.text);
+      void sendText(prompt);
+    }).then((cleanup) => {
+      unlisten = cleanup;
+    });
+    return () => {
+      unlisten?.();
+    };
+  }, [sendText]);
+
+  useEffect(() => {
+    if (!isTauriRuntime()) {
+      return;
+    }
+    let unlisten: (() => void) | undefined;
+    void listen<{ reply: string }>("mindi-screen-help-result", (event) => {
+      void sendText(`Screen help:\n\n${event.payload.reply}`);
+    }).then((cleanup) => {
+      unlisten = cleanup;
+    });
+    return () => {
+      unlisten?.();
+    };
+  }, [sendText]);
 
   const handleSubmit = useCallback(() => {
     void sendText(draft);
@@ -329,10 +419,13 @@ export function ChatPanel({ online, onSyncDepthChange }: ChatPanelProps) {
                   <span className="chat__msg-time">{formatTime(turn.ts)}</span>
                 </div>
                 {turn.state === "sending" ? (
-                  <div className="chat__typing" aria-label="MINDI is thinking">
-                    <span />
-                    <span />
-                    <span />
+                  <div className="chat__typing-wrap">
+                    <div className="chat__typing" aria-label="MINDI is thinking">
+                      <span />
+                      <span />
+                      <span />
+                    </div>
+                    <span className="chat__msg-meta">Local model thinking — first reply may take 1–2 minutes</span>
                   </div>
                 ) : (
                   <p className="chat__msg-body">{turn.content}</p>

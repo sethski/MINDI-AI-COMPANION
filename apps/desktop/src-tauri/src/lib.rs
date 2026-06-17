@@ -3,16 +3,174 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 use tauri::{
-    AppHandle, Listener, LogicalPosition, LogicalSize, Manager, PhysicalPosition, WebviewWindow,
+    AppHandle, Emitter, Listener, LogicalPosition, LogicalSize, Manager, PhysicalPosition, WebviewWindow,
 };
 
 const ORB_LABEL: &str = "orb";
 const MAIN_LABEL: &str = "main";
 
+#[derive(Serialize, Deserialize, Clone)]
+struct MindiInputEvent {
+    kind: String,
+    text: String,
+}
+
 #[derive(Serialize, Deserialize, Default, Clone)]
 struct OrbPosition {
     x: f64,
     y: f64,
+}
+
+fn emit_mindi_input(app: &AppHandle, kind: &str, text: String) {
+    let payload = MindiInputEvent {
+        kind: kind.to_string(),
+        text,
+    };
+    let _ = app.emit("mindi-input", payload);
+}
+
+fn read_clipboard_text() -> Result<String, String> {
+    let mut clipboard = arboard::Clipboard::new().map_err(|error| error.to_string())?;
+    clipboard
+        .get_text()
+        .map_err(|error| error.to_string())
+}
+
+fn write_clipboard_text(text: &str) -> Result<(), String> {
+    let mut clipboard = arboard::Clipboard::new().map_err(|error| error.to_string())?;
+    clipboard
+        .set_text(text)
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(windows)]
+fn simulate_copy() -> Result<(), String> {
+    use std::thread;
+    use std::time::Duration;
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VIRTUAL_KEY,
+        VK_CONTROL, VK_C,
+    };
+
+    fn key_input(vk: VIRTUAL_KEY, key_up: bool) -> INPUT {
+        INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: vk,
+                    wScan: 0,
+                    dwFlags: if key_up { KEYEVENTF_KEYUP } else { Default::default() },
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        }
+    }
+
+    let inputs = [
+        key_input(VK_CONTROL, false),
+        key_input(VK_C, false),
+        key_input(VK_C, true),
+        key_input(VK_CONTROL, true),
+    ];
+    unsafe {
+        let sent = SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+        if sent != inputs.len() as u32 {
+            return Err("send_input_failed".to_string());
+        }
+    }
+    thread::sleep(Duration::from_millis(140));
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn simulate_copy() -> Result<(), String> {
+    Err("selection_copy_unsupported".to_string())
+}
+
+fn capture_selected_text() -> Result<String, String> {
+    let saved = read_clipboard_text().unwrap_or_default();
+    simulate_copy()?;
+    let selected = read_clipboard_text().unwrap_or_default();
+    if !saved.is_empty() {
+        let _ = write_clipboard_text(&saved);
+    }
+    Ok(selected)
+}
+
+fn show_main_window_sync(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window(MAIN_LABEL) {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
+}
+
+fn handle_input_shortcut(app: &AppHandle, kind: &str, use_selection: bool) {
+    let text = if use_selection {
+        match capture_selected_text() {
+            Ok(value) => value,
+            Err(_) => return,
+        }
+    } else {
+        match read_clipboard_text() {
+            Ok(value) => value,
+            Err(_) => return,
+        }
+    };
+    if text.trim().is_empty() {
+        return;
+    }
+    emit_mindi_input(app, kind, text);
+    show_main_window_sync(app);
+}
+
+fn register_input_shortcuts(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
+    use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
+
+    let selection = Shortcut::new(Some(Modifiers::CONTROL | Modifiers::SHIFT), Code::KeyM);
+    let summarize = Shortcut::new(Some(Modifiers::CONTROL | Modifiers::SHIFT), Code::KeyU);
+    let translate = Shortcut::new(Some(Modifiers::CONTROL | Modifiers::SHIFT), Code::KeyT);
+    let explain = Shortcut::new(Some(Modifiers::CONTROL | Modifiers::SHIFT), Code::KeyE);
+    let screen_help = Shortcut::new(Some(Modifiers::CONTROL | Modifiers::SHIFT), Code::KeyS);
+
+    app.global_shortcut().on_shortcut(selection, move |app, _shortcut, event| {
+        if event.state != ShortcutState::Pressed {
+            return;
+        }
+        handle_input_shortcut(app, "selection", true);
+    })?;
+
+    app.global_shortcut().on_shortcut(summarize, move |app, _shortcut, event| {
+        if event.state != ShortcutState::Pressed {
+            return;
+        }
+        handle_input_shortcut(app, "clipboard_summarize", false);
+    })?;
+
+    app.global_shortcut().on_shortcut(translate, move |app, _shortcut, event| {
+        if event.state != ShortcutState::Pressed {
+            return;
+        }
+        handle_input_shortcut(app, "clipboard_translate", false);
+    })?;
+
+    app.global_shortcut().on_shortcut(explain, move |app, _shortcut, event| {
+        if event.state != ShortcutState::Pressed {
+            return;
+        }
+        handle_input_shortcut(app, "clipboard_explain", false);
+    })?;
+
+    app.global_shortcut().on_shortcut(screen_help, move |app, _shortcut, event| {
+        if event.state != ShortcutState::Pressed {
+            return;
+        }
+        show_main_window_sync(app);
+        let _ = app.emit("mindi-screen-help", ());
+    })?;
+
+    Ok(())
 }
 
 fn orb_window(app: &AppHandle) -> Option<WebviewWindow> {
@@ -326,11 +484,11 @@ fn get_agent_token(app: AppHandle) -> Result<String, String> {
 }
 
 #[cfg(debug_assertions)]
-fn agent_port_open() -> bool {
+fn local_port_open(port: u16) -> bool {
     use std::net::{SocketAddr, TcpStream};
     use std::time::Duration;
 
-    let addr: SocketAddr = match "127.0.0.1:8765".parse() {
+    let addr: SocketAddr = match format!("127.0.0.1:{port}").parse() {
         Ok(value) => value,
         Err(_) => return false,
     };
@@ -341,7 +499,7 @@ fn agent_port_open() -> bool {
 fn ensure_dev_agent_running(_app: &AppHandle) {
     use std::process::{Command, Stdio};
 
-    if agent_port_open() {
+    if local_port_open(8765) {
         return;
     }
 
@@ -366,9 +524,39 @@ fn ensure_dev_agent_running(_app: &AppHandle) {
         .spawn();
 }
 
+#[cfg(debug_assertions)]
+fn ensure_dev_ai_runtime_running(_app: &AppHandle) {
+    use std::process::{Command, Stdio};
+
+    if local_port_open(8877) {
+        return;
+    }
+
+    let workspace_root =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let _ = Command::new("python")
+        .args([
+            "-m",
+            "uvicorn",
+            "mindi_ai_runtime.main:app",
+            "--reload",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "8877",
+            "--app-dir",
+            "services/ai_runtime/src",
+        ])
+        .current_dir(&workspace_root)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .setup(|app| {
             #[cfg(debug_assertions)]
             app.handle().plugin(
@@ -377,10 +565,14 @@ pub fn run() {
                     .build(),
             )?;
             #[cfg(debug_assertions)]
-            ensure_dev_agent_running(app.handle());
+            {
+                ensure_dev_agent_running(app.handle());
+                ensure_dev_ai_runtime_running(app.handle());
+            }
             configure_orb_window(app.handle())?;
             hide_main_window_on_startup(app.handle());
             register_exit_on_close(app.handle());
+            register_input_shortcuts(app.handle())?;
             #[cfg(debug_assertions)]
             register_debug_log_listener(app.handle());
             #[cfg(debug_assertions)]

@@ -1,9 +1,17 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import type { MindiInputPayload } from "./input-bridge";
 
 export function isTauriRuntime(): boolean {
-  return typeof window !== "undefined" && isTauri();
+  if (typeof window === "undefined") {
+    return false;
+  }
+  const scope = window as Window & {
+    isTauri?: boolean;
+    __TAURI_INTERNALS__?: unknown;
+  };
+  return isTauri() || scope.isTauri === true || Boolean(scope.__TAURI_INTERNALS__);
 }
 
 export async function orbStartDrag(): Promise<void> {
@@ -69,12 +77,31 @@ export async function orbSaveAudioTemp(dataBase64: string, extension: string): P
   return invoke<string>("orb_save_audio_temp", { dataBase64, extension });
 }
 
+export async function getAgentToken(): Promise<string | null> {
+  if (!isTauriRuntime()) return null;
+  try {
+    return await invoke<string>("get_agent_token");
+  } catch {
+    return null;
+  }
+}
+
 export async function listenOrbWake(onWake: () => void): Promise<() => void> {
   if (!isTauriRuntime()) {
     return () => undefined;
   }
   const unlisten = await listen("orb-wake", () => {
     onWake();
+  });
+  return unlisten;
+}
+
+export async function listenMindiInput(onInput: (payload: MindiInputPayload) => void): Promise<() => void> {
+  if (!isTauriRuntime()) {
+    return () => undefined;
+  }
+  const unlisten = await listen<MindiInputPayload>("mindi-input", (event) => {
+    onInput(event.payload);
   });
   return unlisten;
 }
