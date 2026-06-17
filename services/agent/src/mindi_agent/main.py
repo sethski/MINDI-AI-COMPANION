@@ -305,7 +305,7 @@ def memory_auto_index_status():
 
 
 @app.post("/memory/auto-index/scan")
-async def memory_auto_index_scan(includeUserFolders: bool = Query(default=True)):
+async def memory_auto_index_scan(includeUserFolders: bool = Query(default=False)):
     return await asyncio.to_thread(
         store.auto_index_scan_once,
         include_user_folders=includeUserFolders,

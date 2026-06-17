@@ -41,6 +41,35 @@ from .schemas import (
 
 PERCEPTION_SCREEN_SUBJECT = "perception.screen.capture"
 
+_AUTO_INDEX_SKIP_DIRS = frozenset(
+    {
+        ".git",
+        ".pnpm",
+        ".cursor",
+        "__pycache__",
+        "node_modules",
+        "target",
+        "dist",
+        "build",
+        ".turbo",
+        ".next",
+        "coverage",
+    }
+)
+_AUTO_INDEX_SUFFIXES = frozenset(
+    {
+        ".txt",
+        ".md",
+        ".markdown",
+        ".json",
+        ".csv",
+        ".log",
+        ".pdf",
+        ".rtf",
+    }
+)
+_AUTO_INDEX_MAX_BYTES = 2 * 1024 * 1024
+
 
 # ---------------------------------------------------------------------------
 # Pure geometry and retrieval helpers
@@ -523,10 +552,13 @@ class MemoryService:
 
     def watched_paths(self) -> list[Path]:
         defaults = [Path("data/inbox"), Path("data/notes"), Path("data/screenshots")]
+        on_demand_keys = {str(path).lower() for path in self.on_demand_paths()}
         folder_grants = [
             Path(grant.subject)
             for grant in self._store.permission_grants
-            if grant.scope == "folder" and grant.decision == "allow"
+            if grant.scope == "folder"
+            and grant.decision == "allow"
+            and str(Path(grant.subject).resolve()).lower() not in on_demand_keys
         ]
         seen: set[str] = set()
         resolved_dirs: list[Path] = []
@@ -590,15 +622,19 @@ class MemoryService:
     def auto_index_scan_once(self, *, include_user_folders: bool = False) -> AutoIndexStatus:
         indexed_now = 0
         self._store.auto_index_last_error = None
-        supported_suffixes = ALLOWED_DOCUMENT_SUFFIXES | OCR_IMAGE_SUFFIXES | {".pdf"}
+        supported_suffixes = _AUTO_INDEX_SUFFIXES | OCR_IMAGE_SUFFIXES
 
         for directory in self.all_index_paths(include_user_folders=include_user_folders):
             for file_path in directory.rglob("*"):
                 if not file_path.is_file():
                     continue
+                if any(part in _AUTO_INDEX_SKIP_DIRS for part in file_path.parts):
+                    continue
                 if file_path.suffix.lower() not in supported_suffixes:
                     continue
                 try:
+                    if file_path.stat().st_size > _AUTO_INDEX_MAX_BYTES:
+                        continue
                     mtime_ns = file_path.stat().st_mtime_ns
                 except OSError:
                     continue
@@ -607,7 +643,7 @@ class MemoryService:
                     continue
 
                 try:
-                    if file_path.suffix.lower() in ALLOWED_DOCUMENT_SUFFIXES:
+                    if file_path.suffix.lower() in _AUTO_INDEX_SUFFIXES:
                         self._store.memory_db.import_document(file_path)
                     else:
                         extracted_text, _ = extract_text_for_ocr(file_path)
