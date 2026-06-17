@@ -762,3 +762,89 @@ select {
     scroll-behavior: auto;
   }
 }
+
+.brain-hub {
+  display: grid;
+  grid-template-columns: 2fr 1fr;
+  gap: 1rem;
+}
+
+.brain-card {
+  min-height: 520px;
+}
+
+.brain-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.brain-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.brain-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin: 0.75rem 0;
+}
+
+.brain-filter {
+  border: 1px solid oklch(0.35 0.02 250);
+  background: oklch(0.18 0.02 250);
+  color: oklch(0.92 0.01 250);
+  border-radius: 999px;
+  padding: 0.2rem 0.65rem;
+  font-size: 0.78rem;
+}
+
+.brain-filter.active {
+  background: oklch(0.42 0.12 250);
+}
+
+.brain-canvas-wrap {
+  border: 1px solid oklch(0.28 0.02 250);
+  border-radius: 0.75rem;
+  background: oklch(0.14 0.02 250);
+  overflow: hidden;
+}
+
+.brain-canvas {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+
+.brain-edge {
+  stroke: oklch(0.45 0.03 250);
+  stroke-width: 1;
+  opacity: 0.55;
+}
+
+.brain-label {
+  fill: oklch(0.86 0.01 250);
+  font-size: 10px;
+}
+
+.brain-node.selected circle {
+  stroke: oklch(0.95 0.02 95);
+  stroke-width: 2;
+}
+
+.brain-meta {
+  max-height: 280px;
+  overflow: auto;
+  font-size: 0.78rem;
+  background: oklch(0.12 0.02 250);
+  border-radius: 0.5rem;
+  padding: 0.75rem;
+}
+
+@media (max-width: 1000px) {
+  .brain-hub {
+    grid-template-columns: 1fr;
+  }
+}

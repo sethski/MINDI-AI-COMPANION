@@ -99,7 +99,9 @@ import {
   saveToggleState,
 } from "./lib/local-state";
 import { MindiWakeBridge } from "./components/MindiWakeBridge";
+import { BrainPanel } from "./components/brain/BrainPanel";
 import { ChatPanel } from "./components/chat/ChatPanel";
+import { checkAgentOnline } from "./lib/orb-agent";
 import { isTauriRuntime, orbFocus } from "./lib/tauri-window";
 
 const EMPTY_SNAPSHOT: HubSnapshot = {
@@ -198,6 +200,8 @@ export default function App() {
   const [opsChainResult, setOpsChainResult] = useState<AutomationChainResponse | null>(null);
   const [aiRuntimeStatus, setAiRuntimeStatus] = useState<AiRuntimeStatusResponse | null>(null);
   const [aiStatusMessage, setAiStatusMessage] = useState("No AI runtime check yet.");
+  const [llmProvider, setLlmProvider] = useState("llama.cpp");
+  const [llmModel, setLlmModel] = useState("Qwen/Qwen2.5-7B-Instruct");
   const [llmModelPath, setLlmModelPath] = useState("");
   const [llmContextSize, setLlmContextSize] = useState("4096");
   const [llmMaxTokens, setLlmMaxTokens] = useState("256");
@@ -231,6 +235,7 @@ export default function App() {
   const [syncReplayBusy, setSyncReplayBusy] = useState(false);
   const [syncReplayRetryToken, setSyncReplayRetryToken] = useState(0);
   const [syncReplayDelayMs, setSyncReplayDelayMs] = useState(2000);
+  const [agentReachable, setAgentReachable] = useState<boolean | null>(null);
 
   useEffect(() => {
     saveToggleState(toggles);
@@ -249,77 +254,126 @@ export default function App() {
 
   useEffect(() => {
     let active = true;
-    Promise.all([
-      fetchHubSnapshot(),
-      listPermissionGrants(),
-      fetchAllowedApps(),
-      listMemoryNotes(20),
-      getAutoIndexStatus(),
-      getSchedulerStatus(),
-      getPerceptionPermissionStatus(),
-      listPerceptionSnapshots(12),
-      listSecurityEvents("open", 12),
-      getAlertFeed(12),
-      getPrivacyStatus(),
-      getIntelligenceStyleStatus(),
-      getIntelligenceLearningStatus(),
-      getIntelligenceTuningStatus(),
-      listIntelligenceEvalHistory(8),
-      getIntelligenceAdaptationStatus(),
-      getAiRuntimeStatus(),
-    ])
-      .then(
-        ([
-          hub,
-          grantList,
-          appAllowlist,
-          notes,
-          indexStatus,
-          scheduleStatus,
-          perceptionPermissionStatus,
-          snapshotItems,
-          securityItems,
-          alertFeedInitial,
-          privacyInitial,
-          intelligenceStyleInitial,
-          intelligenceLearningInitial,
-          intelligenceTuningInitial,
-          intelligenceEvalHistoryInitial,
-          intelligenceAdaptationInitial,
-          aiRuntimeInitial,
-        ]) => {
-        if (!active) {
-          return;
+
+    async function loadDashboard() {
+      try {
+        const hub = await fetchHubSnapshot();
+        if (active) {
+          setSnapshot(hub);
         }
-        setSnapshot(hub);
-        setPermissions(grantList);
-        setAllowedApps(appAllowlist.apps);
+      } catch {
+        if (active) {
+          setAgentReachable(false);
+        }
+      }
+
+      const results = await Promise.allSettled([
+        listPermissionGrants(),
+        fetchAllowedApps(),
+        listMemoryNotes(20),
+        getAutoIndexStatus(),
+        getSchedulerStatus(),
+        getPerceptionPermissionStatus(),
+        listPerceptionSnapshots(12),
+        listSecurityEvents("open", 12),
+        getAlertFeed(12),
+        getPrivacyStatus(),
+        getIntelligenceStyleStatus(),
+        getIntelligenceLearningStatus(),
+        getIntelligenceTuningStatus(),
+        listIntelligenceEvalHistory(8),
+        getIntelligenceAdaptationStatus(),
+        getAiRuntimeStatus(),
+      ]);
+
+      if (!active) {
+        return;
+      }
+
+      const [
+        grantListResult,
+        appAllowlistResult,
+        notesResult,
+        indexStatusResult,
+        scheduleStatusResult,
+        perceptionPermissionResult,
+        snapshotItemsResult,
+        securityItemsResult,
+        alertFeedResult,
+        privacyResult,
+        intelligenceStyleResult,
+        intelligenceLearningResult,
+        intelligenceTuningResult,
+        intelligenceEvalHistoryResult,
+        intelligenceAdaptationResult,
+        aiRuntimeResult,
+      ] = results;
+
+      if (grantListResult.status === "fulfilled") {
+        setPermissions(grantListResult.value);
+      }
+      if (appAllowlistResult.status === "fulfilled") {
+        setAllowedApps(appAllowlistResult.value.apps);
+      }
+      const notes = notesResult.status === "fulfilled" ? notesResult.value : [];
+      if (notesResult.status === "fulfilled") {
         setMemoryNotes(notes);
-        setAutoIndexStatus(indexStatus);
-        setSchedulerStatus(scheduleStatus);
-        setPerceptionPermission(perceptionPermissionStatus);
+      }
+      if (indexStatusResult.status === "fulfilled") {
+        setAutoIndexStatus(indexStatusResult.value);
+      }
+      if (scheduleStatusResult.status === "fulfilled") {
+        setSchedulerStatus(scheduleStatusResult.value);
+      }
+      if (perceptionPermissionResult.status === "fulfilled") {
+        setPerceptionPermission(perceptionPermissionResult.value);
+      }
+      const snapshotItems =
+        snapshotItemsResult.status === "fulfilled" ? snapshotItemsResult.value : [];
+      if (snapshotItemsResult.status === "fulfilled") {
         setPerceptionSnapshots(snapshotItems);
-        setSecurityEvents(securityItems);
-        setSecurityStatus(`Loaded ${securityItems.length} open security events.`);
-        setAlertFeed(alertFeedInitial);
-        setAlertStatus(`Loaded ${alertFeedInitial.items.length} prioritized alerts.`);
-        setPrivacyStatus(privacyInitial);
-        setPrivacyUiEnabled(privacyInitial.redactionEnabled);
-        setIntelligenceStyle(intelligenceStyleInitial);
-        setIntelligenceLanguageMode(intelligenceStyleInitial.languageMode);
-        setIntelligenceSlangEnabled(intelligenceStyleInitial.slangEnabled);
-        setIntelligenceLearning(intelligenceLearningInitial);
-        setIntelligenceLearningNoteId((notes[0] && notes[0].id) || "");
-        setIntelligenceTuning(intelligenceTuningInitial);
-        setIntelligencePreset((intelligenceTuningInitial.pending ?? intelligenceTuningInitial.active).preset);
+      }
+      if (securityItemsResult.status === "fulfilled") {
+        setSecurityEvents(securityItemsResult.value);
+        setSecurityStatus(`Loaded ${securityItemsResult.value.length} open security events.`);
+      }
+      if (alertFeedResult.status === "fulfilled") {
+        setAlertFeed(alertFeedResult.value);
+        setAlertStatus(`Loaded ${alertFeedResult.value.items.length} prioritized alerts.`);
+      }
+      if (privacyResult.status === "fulfilled") {
+        setPrivacyStatus(privacyResult.value);
+        setPrivacyUiEnabled(privacyResult.value.redactionEnabled);
+      }
+      if (intelligenceStyleResult.status === "fulfilled") {
+        setIntelligenceStyle(intelligenceStyleResult.value);
+        setIntelligenceLanguageMode(intelligenceStyleResult.value.languageMode);
+        setIntelligenceSlangEnabled(intelligenceStyleResult.value.slangEnabled);
+      }
+      if (intelligenceLearningResult.status === "fulfilled") {
+        setIntelligenceLearning(intelligenceLearningResult.value);
+      }
+      if (intelligenceTuningResult.status === "fulfilled") {
+        setIntelligenceTuning(intelligenceTuningResult.value);
+        setIntelligencePreset(
+          (intelligenceTuningResult.value.pending ?? intelligenceTuningResult.value.active).preset,
+        );
         setIntelligenceVerbosity(
-          (intelligenceTuningInitial.pending ?? intelligenceTuningInitial.active).responseVerbosity,
+          (intelligenceTuningResult.value.pending ?? intelligenceTuningResult.value.active)
+            .responseVerbosity,
         );
-        setIntelligenceEvalHistory(intelligenceEvalHistoryInitial);
-        setIntelligenceAdaptation(intelligenceAdaptationInitial);
+      }
+      if (intelligenceEvalHistoryResult.status === "fulfilled") {
+        setIntelligenceEvalHistory(intelligenceEvalHistoryResult.value);
+      }
+      if (intelligenceAdaptationResult.status === "fulfilled") {
+        setIntelligenceAdaptation(intelligenceAdaptationResult.value);
         setIntelligenceStatus(
-          `Loaded ${intelligenceEvalHistoryInitial.length} eval history items. Adaptation=${intelligenceAdaptationInitial.recommendedMethod}.`,
+          `Loaded ${intelligenceEvalHistoryResult.status === "fulfilled" ? intelligenceEvalHistoryResult.value.length : 0} eval history items. Adaptation=${intelligenceAdaptationResult.value.recommendedMethod}.`,
         );
+      }
+      if (aiRuntimeResult.status === "fulfilled") {
+        const aiRuntimeInitial = aiRuntimeResult.value;
         setAiRuntimeStatus(aiRuntimeInitial);
         setAiStatusMessage(
           `Runtime reachable=${String(aiRuntimeInitial.runtime.reachable)} llmReady=${String(
@@ -328,28 +382,24 @@ export default function App() {
             aiRuntimeInitial.features.ocr.ready,
           )}`,
         );
+        setLlmProvider(aiRuntimeInitial.config.llmProvider);
+        setLlmModel(aiRuntimeInitial.config.llmModel);
         setLlmModelPath(aiRuntimeInitial.config.llmModelPath);
         setLlmContextSize(String(aiRuntimeInitial.config.llmContextSize));
         setLlmMaxTokens(String(aiRuntimeInitial.config.llmMaxTokens));
         setAsrModelPath(aiRuntimeInitial.config.asrModelPath);
         setOcrModelPath(aiRuntimeInitial.config.ocrModelPath);
-        if (snapshotItems.length > 0) {
-          setPerceptionSelectedSnapshotId(snapshotItems[0].id);
-          setPerceptionSnapshotStatus(`Loaded ${snapshotItems.length} recent snapshots.`);
-        }
-        },
-      )
-      .catch(() => {
-        if (active) {
-          setSnapshot((current) => ({
-            ...current,
-            status: {
-              ...current.status,
-              state: "offline",
-            },
-          }));
-        }
-      });
+      }
+      if (notes.length > 0) {
+        setIntelligenceLearningNoteId(notes[0].id);
+      }
+      if (snapshotItems.length > 0) {
+        setPerceptionSelectedSnapshotId(snapshotItems[0].id);
+        setPerceptionSnapshotStatus(`Loaded ${snapshotItems.length} recent snapshots.`);
+      }
+    }
+
+    void loadDashboard();
     return () => {
       active = false;
     };
@@ -600,7 +650,7 @@ export default function App() {
   }
 
   useEffect(() => {
-    if (!networkOnline || syncReplayBusy || syncDepth === 0) {
+    if (agentReachable !== true || syncReplayBusy || syncDepth === 0) {
       return;
     }
     let active = true;
@@ -671,14 +721,48 @@ export default function App() {
         window.clearTimeout(retryTimer);
       }
     };
-  }, [networkOnline, syncDepth, syncReplayRetryToken]);
+  }, [agentReachable, syncDepth, syncReplayRetryToken]);
 
   const topStatus = useMemo(() => {
-    if (!networkOnline) {
+    if (agentReachable === false) {
       return "offline";
     }
+    if (agentReachable === true) {
+      return snapshot.status.state === "offline" ? "ready" : snapshot.status.state;
+    }
     return snapshot.status.state;
-  }, [networkOnline, snapshot.status.state]);
+  }, [agentReachable, snapshot.status.state]);
+
+  useEffect(() => {
+    let active = true;
+
+    async function probeAgent() {
+      const reachable = await checkAgentOnline();
+      if (!active) {
+        return;
+      }
+      setAgentReachable(reachable);
+      if (reachable) {
+        try {
+          const hub = await fetchHubSnapshot();
+          if (active) {
+            setSnapshot(hub);
+          }
+        } catch {
+          // Hub refresh failed; keep last snapshot.
+        }
+      }
+    }
+
+    void probeAgent();
+    const timer = window.setInterval(() => {
+      void probeAgent();
+    }, 10_000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, []);
 
   async function handleSend() {
     const text = message.trim();
@@ -1840,6 +1924,8 @@ export default function App() {
           status.features.llm.ready,
         )} asrReady=${String(status.features.asr.ready)} ocrReady=${String(status.features.ocr.ready)}`,
       );
+      setLlmProvider(status.config.llmProvider);
+      setLlmModel(status.config.llmModel);
       setLlmModelPath(status.config.llmModelPath);
       setLlmContextSize(String(status.config.llmContextSize));
       setLlmMaxTokens(String(status.config.llmMaxTokens));
@@ -1853,6 +1939,8 @@ export default function App() {
   async function applyAiRuntimeConfigFromSettings() {
     try {
       const status = await updateAiRuntimeConfig({
+        llmProvider,
+        llmModel,
         llmModelPath,
         llmContextSize: Math.max(256, Number.parseInt(llmContextSize, 10) || 4096),
         llmMaxTokens: Math.max(1, Number.parseInt(llmMaxTokens, 10) || 256),
@@ -1860,6 +1948,8 @@ export default function App() {
         ocrModelPath,
       });
       setAiRuntimeStatus(status);
+      setLlmProvider(status.config.llmProvider);
+      setLlmModel(status.config.llmModel);
       setLlmModelPath(status.config.llmModelPath);
       setLlmContextSize(String(status.config.llmContextSize));
       setLlmMaxTokens(String(status.config.llmMaxTokens));
@@ -2202,6 +2292,8 @@ export default function App() {
             <p>All control runs append audit logs.</p>
           </div>
         </section>
+      ) : tab === "brain" ? (
+        <BrainPanel />
       ) : tab === "vision" ? (
         <section className="hub">
           <div className="card">
@@ -2350,7 +2442,22 @@ export default function App() {
             <p className="assistant-reply">{aiStatusMessage}</p>
             <div className="stack">
               <label>
-                LLM model path (GGUF)
+                LLM provider
+                <select value={llmProvider} onChange={(event) => setLlmProvider(event.target.value)}>
+                  <option value="llama.cpp">llama.cpp</option>
+                  <option value="ollama">ollama</option>
+                </select>
+              </label>
+              <label>
+                LLM model
+                <input
+                  value={llmModel}
+                  onChange={(event) => setLlmModel(event.target.value)}
+                  placeholder={llmProvider === "ollama" ? "qwen2.5:0.5b" : "Qwen/Qwen2.5-7B-Instruct"}
+                />
+              </label>
+              <label>
+                LLM model path (GGUF for llama.cpp)
                 <input
                   value={llmModelPath}
                   onChange={(event) => setLlmModelPath(event.target.value)}
@@ -3094,7 +3201,7 @@ export default function App() {
         </section>
       ) : (
         <section className="chat-layout">
-          <ChatPanel online={topStatus === "ready"} onSyncDepthChange={setSyncDepth} />
+          <ChatPanel online={agentReachable === true} onSyncDepthChange={setSyncDepth} />
 
           <aside className="chat-aside">
             <div className="card">
