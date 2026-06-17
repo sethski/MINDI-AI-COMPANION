@@ -13,6 +13,9 @@ from zoneinfo import ZoneInfo
 from .agent_state import DEFAULT_AGENT_STATE_PATH, load_agent_state, save_agent_state
 from .automation_service import AutomationService
 from .file_service import FileService, category_for_suffix
+from .launcher_service import LauncherService
+from .proactive_service import ProactiveService
+from .research_service import ResearchService
 from .intelligence_service import (
     LEARNING_BLOCKED_TERMS,
     LEARNING_SOURCE_TAGS,
@@ -108,9 +111,17 @@ from .schemas import (
     FileOrganizeRequest,
     FileOrganizeResponse,
     HubSnapshot,
+    LauncherRequest,
+    LauncherResponse,
     MemoryDocument,
     MemoryDocumentChunk,
     MemoryNote,
+    MemoryGraphResponse,
+    ChatHistoryMessage,
+    ChatHistoryResponse,
+    ProactiveNudge,
+    ProactiveOrbActivityRequest,
+    ProactiveStatus,
     MemorySearchResponse,
     OcrImportRequest,
     OcrImportResponse,
@@ -248,6 +259,9 @@ class RuntimeStore:
         self._task_svc: TaskService = TaskService(self)
         self._perm_svc: PermissionService = PermissionService(self)
         self._automation_svc: AutomationService = AutomationService(self)
+        self._launcher_svc: LauncherService = LauncherService(self)
+        self._research_svc: ResearchService = ResearchService(self)
+        self._proactive_svc: ProactiveService = ProactiveService(self)
         self._respond_svc: RespondService = RespondService(self)
         snapshot = load_agent_state(self.agent_state_path)
         if snapshot is not None:
@@ -278,6 +292,19 @@ class RuntimeStore:
                 createdAt=now_iso(),
             )
         )
+        home = Path.home()
+        for folder_name in ("Documents", "Desktop", "Downloads"):
+            folder = home / folder_name
+            if folder.exists():
+                self.permission_grants.append(
+                    PermissionGrant(
+                        id=str(uuid4()),
+                        scope="folder",
+                        subject=str(folder),
+                        decision="allow",
+                        createdAt=now_iso(),
+                    )
+                )
 
     def _persist_durable_state(self) -> None:
         save_agent_state(self.tasks, self.permission_grants, self.agent_state_path)
@@ -533,6 +560,9 @@ class RuntimeStore:
 
     def respond(self, request: AssistantRequest) -> AssistantResponse:
         return self._respond_svc.respond(request)
+
+    def stream_respond(self, request: AssistantRequest):
+        return self._respond_svc.stream_respond(request)
 
     def _respond_unlocked(self, request: AssistantRequest) -> AssistantResponse:
         return self._respond_svc._respond_unlocked(request)
@@ -791,8 +821,55 @@ class RuntimeStore:
     def _auto_index_loop(self) -> None:
         self._memory_svc._auto_index_loop()
 
-    def auto_index_scan_once(self) -> AutoIndexStatus:
-        return self._memory_svc.auto_index_scan_once()
+    def auto_index_scan_once(self, *, include_user_folders: bool = False) -> AutoIndexStatus:
+        return self._memory_svc.auto_index_scan_once(include_user_folders=include_user_folders)
+
+    def get_memory_graph(self) -> MemoryGraphResponse:
+        return self._memory_svc.get_memory_graph()
+
+    def get_chat_history(self, *, limit: int = 100) -> ChatHistoryResponse:
+        rows = self.memory_db.list_chat_messages(limit=limit)
+        return ChatHistoryResponse(
+            messages=[
+                ChatHistoryMessage(
+                    id=row["id"],
+                    role=row["role"],
+                    content=row["content"],
+                    ts=row["ts"],
+                    meta=row.get("meta"),
+                )
+                for row in rows
+            ]
+        )
+
+    def append_chat_turn(self, *, user_text: str, assistant_text: str, meta: str | None = None) -> None:
+        trimmed_user = user_text.strip()
+        trimmed_assistant = assistant_text.strip()
+        if not trimmed_user:
+            return
+        self.memory_db.append_chat_message(role="user", content=trimmed_user)
+        if trimmed_assistant:
+            self.memory_db.append_chat_message(role="assistant", content=trimmed_assistant, meta=meta)
+
+    def clear_chat_history(self) -> int:
+        return self.memory_db.clear_chat_messages()
+
+    def proactive_status(self) -> ProactiveStatus:
+        return self._proactive_svc.status()
+
+    def proactive_set_orb_idle(self, request: ProactiveOrbActivityRequest) -> ProactiveStatus:
+        return self._proactive_svc.set_orb_idle(request.idle)
+
+    def proactive_consume_nudges(self, *, limit: int = 3) -> list[ProactiveNudge]:
+        return self._proactive_svc.consume_nudges(limit=limit)
+
+    def proactive_run_briefing(self) -> ProactiveNudge:
+        return self._proactive_svc.run_briefing_now("morning")
+
+    def open_launcher(self, request: LauncherRequest) -> LauncherResponse:
+        if request.kind == "url":
+            return self._launcher_svc.open_url(request)
+        return self._launcher_svc.open_file(request)
 
     def scheduler_status(self) -> SchedulerStatus:
         return SchedulerStatus(
@@ -814,6 +891,7 @@ class RuntimeStore:
     def _scheduler_loop(self) -> None:
         while not self.scheduler_stop.is_set():
             self.scheduler_scan_once()
+            self._proactive_svc.tick()
             self.scheduler_stop.wait(20)
 
     @staticmethod
@@ -1265,6 +1343,7 @@ class RuntimeStore:
     def scheduler_scan_once(self) -> SchedulerStatus:
         now_utc = datetime.now(timezone.utc)
         created_alerts = 0
+        new_alerts: list[AlertItem] = []
         tasks_mutated = False
         self.scheduler_last_error = None
 
@@ -1284,16 +1363,15 @@ class RuntimeStore:
                     if overdue_seconds < 60
                     else f"Task '{task.title}' is overdue ({task.dueAt})."
                 )
-                self.alerts.insert(
-                    0,
-                    AlertItem(
-                        id=str(uuid4()),
-                        severity=severity,
-                        title=f"Task Due: {task.title}",
-                        detail=detail,
-                        createdAt=now_iso(),
-                    ),
+                alert = AlertItem(
+                    id=str(uuid4()),
+                    severity=severity,
+                    title=f"Task Due: {task.title}",
+                    detail=detail,
+                    createdAt=now_iso(),
                 )
+                self.alerts.insert(0, alert)
+                new_alerts.append(alert)
                 self.scheduler_alerted_due[task.id] = marker
                 if task.recurrence in {"daily", "weekly"}:
                     next_due = self._compute_next_run(
@@ -1309,6 +1387,8 @@ class RuntimeStore:
         if tasks_mutated:
             self._persist_durable_state()
         self.alerts = self.alerts[:100]
+        if new_alerts:
+            self._proactive_svc.enqueue_alert_nudges(new_alerts)
         self.scheduler_last_scan = now_iso()
         self.scheduler_alerts_last_run = created_alerts
         self.scheduler_alerts_total += created_alerts

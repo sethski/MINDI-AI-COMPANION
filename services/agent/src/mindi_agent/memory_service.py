@@ -35,6 +35,7 @@ from .schemas import (
     PerceptionSnapshot,
     PerceptionSnapshotSearchResponse,
     PerceptionUiBlock,
+    MemoryGraphResponse,
     now_iso,
 )
 
@@ -540,11 +541,34 @@ class MemoryService:
             resolved_dirs.append(path)
         return resolved_dirs
 
+    def on_demand_paths(self) -> list[Path]:
+        home = Path.home()
+        paths: list[Path] = []
+        for name in ("Documents", "Desktop", "Downloads"):
+            candidate = home / name
+            if candidate.exists() and candidate.is_dir():
+                paths.append(candidate.resolve())
+        return paths
+
+    def all_index_paths(self, *, include_user_folders: bool) -> list[Path]:
+        paths = self.watched_paths()
+        if include_user_folders:
+            seen = {str(path).lower() for path in paths}
+            for candidate in self.on_demand_paths():
+                key = str(candidate).lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                paths.append(candidate)
+        return paths
+
     def auto_index_status(self) -> AutoIndexStatus:
-        paths = [str(p) for p in self.watched_paths()]
+        paths = [str(p) for p in self.all_index_paths(include_user_folders=False)]
+        on_demand = [str(p) for p in self.on_demand_paths()]
         return AutoIndexStatus(
             running=self._store.auto_index_thread is not None and self._store.auto_index_thread.is_alive(),
             watchedPaths=paths,
+            onDemandPaths=on_demand,
             lastScanAt=self._store.auto_index_last_scan,
             indexedTotal=self._store.auto_index_indexed_total,
             indexedLastRun=self._store.auto_index_indexed_last_run,
@@ -563,12 +587,12 @@ class MemoryService:
             self.auto_index_scan_once()
             self._store.auto_index_stop.wait(30)
 
-    def auto_index_scan_once(self) -> AutoIndexStatus:
+    def auto_index_scan_once(self, *, include_user_folders: bool = False) -> AutoIndexStatus:
         indexed_now = 0
         self._store.auto_index_last_error = None
         supported_suffixes = ALLOWED_DOCUMENT_SUFFIXES | OCR_IMAGE_SUFFIXES | {".pdf"}
 
-        for directory in self.watched_paths():
+        for directory in self.all_index_paths(include_user_folders=include_user_folders):
             for file_path in directory.rglob("*"):
                 if not file_path.is_file():
                     continue
@@ -602,3 +626,7 @@ class MemoryService:
         self._store.auto_index_indexed_last_run = indexed_now
         self._store.auto_index_indexed_total += indexed_now
         return self.auto_index_status()
+
+    def get_memory_graph(self) -> MemoryGraphResponse:
+        task_payload = [task.model_dump() for task in self._store.tasks[:80]]
+        return self._store.memory_db.build_memory_graph(tasks=task_payload)

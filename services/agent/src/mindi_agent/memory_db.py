@@ -11,6 +11,9 @@ from .schemas import (
     CreateMemoryNoteRequest,
     MemoryDocument,
     MemoryDocumentChunk,
+    MemoryGraphEdge,
+    MemoryGraphNode,
+    MemoryGraphResponse,
     MemoryNote,
     PerceptionSnapshot,
     now_iso,
@@ -199,6 +202,17 @@ class MemoryDB:
                   block_count INTEGER NOT NULL,
                   image_width INTEGER,
                   image_height INTEGER,
+                  created_at TEXT NOT NULL
+                );
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS chat_messages (
+                  id TEXT PRIMARY KEY,
+                  role TEXT NOT NULL,
+                  content TEXT NOT NULL,
+                  meta TEXT,
                   created_at TEXT NOT NULL
                 );
                 """
@@ -536,6 +550,181 @@ class MemoryDB:
             imageHeight=row["image_height"],
             createdAt=row["created_at"],
         )
+
+    def list_documents(self, limit: int = 200) -> list[MemoryDocument]:
+        with self._lock, self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, source_path, title, imported_at, chunk_count
+                FROM memory_documents
+                ORDER BY imported_at DESC
+                LIMIT ?;
+                """,
+                (max(1, min(limit, 500)),),
+            ).fetchall()
+        return [
+            MemoryDocument(
+                id=row["id"],
+                sourcePath=row["source_path"],
+                title=row["title"],
+                importedAt=row["imported_at"],
+                chunkCount=int(row["chunk_count"] or 0),
+            )
+            for row in rows
+        ]
+
+    def build_memory_graph(self, tasks: list[dict] | None = None) -> MemoryGraphResponse:
+        nodes: list[MemoryGraphNode] = []
+        edges: list[MemoryGraphEdge] = []
+        node_ids: set[str] = set()
+
+        def add_node(node: MemoryGraphNode) -> None:
+            if node.id in node_ids:
+                return
+            node_ids.add(node.id)
+            nodes.append(node)
+
+        for note in self.list_notes(limit=120):
+            add_node(
+                MemoryGraphNode(
+                    id=note.id,
+                    kind="note",
+                    label=note.title[:72],
+                    meta={"updatedAt": note.updatedAt, "tags": note.tags},
+                )
+            )
+            for tag in note.tags:
+                tag_id = f"tag:{tag.strip().lower()}"
+                if not tag.strip():
+                    continue
+                add_node(MemoryGraphNode(id=tag_id, kind="tag", label=tag.strip(), meta={}))
+                edges.append(
+                    MemoryGraphEdge(
+                        id=f"{note.id}->{tag_id}",
+                        source=note.id,
+                        target=tag_id,
+                        kind="tagged",
+                    )
+                )
+
+        for document in self.list_documents(limit=180):
+            add_node(
+                MemoryGraphNode(
+                    id=document.id,
+                    kind="document",
+                    label=document.title[:72],
+                    meta={
+                        "sourcePath": document.sourcePath,
+                        "chunkCount": document.chunkCount,
+                    },
+                )
+            )
+            parent = str(Path(document.sourcePath).parent)
+            folder_id = f"folder:{parent.lower()}"
+            folder_label = Path(parent).name or parent
+            add_node(
+                MemoryGraphNode(
+                    id=folder_id,
+                    kind="folder",
+                    label=folder_label[:72],
+                    meta={"path": parent},
+                )
+            )
+            edges.append(
+                MemoryGraphEdge(
+                    id=f"{document.id}->{folder_id}",
+                    source=document.id,
+                    target=folder_id,
+                    kind="stored_in",
+                )
+            )
+
+        for snapshot in self.list_perception_snapshots(limit=60):
+            label = f"Screen {snapshot.createdAt[:10]}"
+            add_node(
+                MemoryGraphNode(
+                    id=snapshot.id,
+                    kind="perception",
+                    label=label,
+                    meta={
+                        "textLength": snapshot.textLength,
+                        "blockCount": snapshot.blockCount,
+                        "createdAt": snapshot.createdAt,
+                    },
+                )
+            )
+
+        for task in tasks or []:
+            task_id = str(task.get("id") or "").strip()
+            if not task_id:
+                continue
+            title = str(task.get("title") or "Task")
+            add_node(
+                MemoryGraphNode(
+                    id=task_id,
+                    kind="task",
+                    label=title[:72],
+                    meta={"status": task.get("status"), "dueAt": task.get("dueAt")},
+                )
+            )
+
+        return MemoryGraphResponse(nodes=nodes, edges=edges, generatedAt=now_iso())
+
+    def append_chat_message(
+        self,
+        *,
+        role: str,
+        content: str,
+        meta: str | None = None,
+    ) -> dict:
+        message_id = str(uuid4())
+        timestamp = now_iso()
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO chat_messages (id, role, content, meta, created_at)
+                VALUES (?, ?, ?, ?, ?);
+                """,
+                (message_id, role, content, meta, timestamp),
+            )
+            conn.commit()
+        return {
+            "id": message_id,
+            "role": role,
+            "content": content,
+            "meta": meta,
+            "ts": timestamp,
+        }
+
+    def list_chat_messages(self, limit: int = 100) -> list[dict]:
+        with self._lock, self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, role, content, meta, created_at
+                FROM chat_messages
+                ORDER BY created_at DESC
+                LIMIT ?;
+                """,
+                (max(1, min(limit, 500)),),
+            ).fetchall()
+        items = [
+            {
+                "id": str(row["id"]),
+                "role": str(row["role"]),
+                "content": str(row["content"]),
+                "meta": str(row["meta"]) if row["meta"] else None,
+                "ts": str(row["created_at"]),
+            }
+            for row in rows
+        ]
+        items.reverse()
+        return items
+
+    def clear_chat_messages(self) -> int:
+        with self._lock, self._connect() as conn:
+            cursor = conn.execute("DELETE FROM chat_messages;")
+            conn.commit()
+            return int(cursor.rowcount or 0)
 
     @staticmethod
     def _read_text_file(path: Path) -> str:

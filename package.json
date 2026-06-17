@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "packageManager": "pnpm@9.15.0",
   "scripts": {
-    "dev:desktop": "pnpm --dir apps/desktop dev:app",
+    "dev:desktop": "concurrently -k -n AGENT,RUNTIME,DESKTOP -c blue,cyan,magenta \"pnpm dev:agent\" \"pnpm dev:ai-runtime\" \"pnpm --dir apps/desktop dev:app\"",
     "build:desktop": "pnpm --dir apps/desktop build:app",
     "dev:agent": "python -m uvicorn mindi_agent.main:app --reload --host 127.0.0.1 --port 8765 --app-dir services/agent/src",
     "dev:ai-runtime": "python -m uvicorn mindi_ai_runtime.main:app --reload --host 127.0.0.1 --port 8877 --app-dir services/ai_runtime/src",

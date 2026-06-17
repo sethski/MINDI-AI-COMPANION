@@ -1,3 +1,5 @@
+import { isTauriRuntime, getAgentToken } from "./tauri-window";
+
 import type {
   AiRuntimeConfigUpdateRequest,
   AiRuntimeSmokeRequest,
@@ -25,6 +27,9 @@ import type {
   AutoIndexStatus,
   SchedulerStatus,
   MemoryNote,
+  MemoryGraphResponse,
+  LauncherRequest,
+  LauncherResponse,
   MemorySearchResponse,
   OcrImportResponse,
   PerceptionAnalyzeRequest,
@@ -69,23 +74,84 @@ import type {
   CalendarImportResponse,
   DatasetPrepareRequest,
   DatasetPrepareResponse,
+  ChatHistoryResponse,
+  ProactiveNudge,
+  ProactiveStatus,
 } from "@mindi/shared";
 
 const AGENT_URL = "http://127.0.0.1:8765";
+const ASSISTANT_TIMEOUT_MS = 240_000;
+
+let _agentToken: string | null | undefined;
+
+async function resolveToken(): Promise<string | null> {
+  if (_agentToken !== undefined) return _agentToken;
+  _agentToken = isTauriRuntime() ? await getAgentToken() : null;
+  return _agentToken;
+}
+
+const _RETRY_DELAYS_MS = [300, 900, 2700] as const;
+const _CIRCUIT_THRESHOLD = 3;
+const _CIRCUIT_OPEN_MS = 30_000;
+const _circuit = { failures: 0, openUntil: 0 };
+
+function _sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function _incrementCircuit(): void {
+  _circuit.failures++;
+  _circuit.openUntil = Date.now() + _CIRCUIT_OPEN_MS;
+}
 
 async function agentFetch<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${AGENT_URL}${path}`, {
-    ...init,
-    headers: {
-      "Content-Type": "application/json",
-      ...(init?.headers ?? {}),
-    },
-  });
-
-  if (!response.ok) {
-    throw new Error(`Agent request failed: ${response.status}`);
+  if (_circuit.failures >= _CIRCUIT_THRESHOLD && Date.now() < _circuit.openUntil) {
+    throw new Error("agent_circuit_open");
   }
-  return (await response.json()) as T;
+
+  const token = await resolveToken();
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    ...(init?.headers as Record<string, string> | undefined ?? {}),
+  };
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+
+  let attempt = 0;
+
+  while (true) {
+    let response: Response;
+    try {
+      response = await fetch(`${AGENT_URL}${path}`, { ...init, headers });
+    } catch {
+      if (attempt < _RETRY_DELAYS_MS.length) {
+        await _sleep(_RETRY_DELAYS_MS[attempt]);
+        attempt++;
+        continue;
+      }
+      _incrementCircuit();
+      throw new Error("agent_unreachable");
+    }
+
+    if (response.ok) {
+      _circuit.failures = 0;
+      return (await response.json()) as T;
+    }
+
+    if (response.status === 503 && attempt < _RETRY_DELAYS_MS.length) {
+      await _sleep(_RETRY_DELAYS_MS[attempt]);
+      attempt++;
+      continue;
+    }
+
+    _incrementCircuit();
+    let message = `Agent request failed: ${response.status}`;
+    try {
+      const body = (await response.json()) as { detail?: string; reason?: string };
+      if (body.detail) message = `Agent error: ${String(body.detail)}`;
+      else if (body.reason) message = `Agent error: ${String(body.reason)}`;
+    } catch { /* ignore body parse failure */ }
+    throw new Error(message);
+  }
 }
 
 export async function fetchHubSnapshot(): Promise<HubSnapshot> {
@@ -95,10 +161,96 @@ export async function fetchHubSnapshot(): Promise<HubSnapshot> {
 export async function sendAssistantRequest(
   payload: AssistantRequest,
 ): Promise<AssistantResponse> {
-  return agentFetch<AssistantResponse>("/assistant/respond", {
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), ASSISTANT_TIMEOUT_MS);
+  try {
+    return await agentFetch<AssistantResponse>("/assistant/respond", {
+      method: "POST",
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+  } finally {
+    window.clearTimeout(timer);
+  }
+}
+
+export interface AssistantStreamEvent {
+  token?: string;
+  done?: boolean;
+  reply?: string;
+  status?: string;
+  provider?: string;
+  model?: string;
+  degraded?: boolean;
+  fallbackReason?: string;
+  error?: string;
+  suggestedActions?: string[];
+}
+
+export async function streamAssistantRequest(
+  payload: AssistantRequest,
+  onEvent: (event: AssistantStreamEvent) => void,
+  signal?: AbortSignal,
+): Promise<AssistantStreamEvent | null> {
+  const token = await resolveToken();
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+  };
+  if (token) {
+    headers.Authorization = `Bearer ${token}`;
+  }
+  const response = await fetch(`${AGENT_URL}/assistant/respond/stream`, {
     method: "POST",
+    headers,
     body: JSON.stringify(payload),
+    signal,
   });
+  if (!response.ok || !response.body) {
+    throw new Error(`stream_failed:${response.status}`);
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let finalEvent: AssistantStreamEvent | null = null;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) {
+      break;
+    }
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() ?? "";
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith("data:")) {
+        continue;
+      }
+      const raw = trimmed.slice(5).trim();
+      if (!raw) {
+        continue;
+      }
+      try {
+        const event = JSON.parse(raw) as AssistantStreamEvent;
+        onEvent(event);
+        if (event.done) {
+          finalEvent = event;
+        }
+        if (event.error) {
+          finalEvent = event;
+          break;
+        }
+      } catch {
+        // Ignore malformed SSE chunks.
+      }
+    }
+    if (finalEvent?.error) {
+      break;
+    }
+  }
+
+  return finalEvent;
 }
 
 export async function getAiRuntimeStatus(): Promise<AiRuntimeStatusResponse> {
@@ -109,6 +261,29 @@ export async function updateAiRuntimeConfig(
   payload: AiRuntimeConfigUpdateRequest,
 ): Promise<AiRuntimeStatusResponse> {
   return agentFetch<AiRuntimeStatusResponse>("/ops/ai/config", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export interface TtsSynthesizeRequest {
+  text: string;
+}
+
+export interface TtsSynthesizeResponse {
+  accepted: boolean;
+  reason: string;
+  audioDataUrl?: string | null;
+  provider?: string | null;
+  model?: string | null;
+  degraded?: boolean;
+  latencyMs?: number | null;
+}
+
+export async function synthesizeTts(
+  payload: TtsSynthesizeRequest,
+): Promise<TtsSynthesizeResponse> {
+  return agentFetch<TtsSynthesizeResponse>("/ops/tts/synthesize", {
     method: "POST",
     body: JSON.stringify(payload),
   });
@@ -127,6 +302,14 @@ export async function transcribeMicBlob(sourceValue: string): Promise<AsrTranscr
   return transcribeAsr({
     sourceType: "mic",
     sourceValue,
+  });
+}
+
+export async function transcribeWakeBlob(sourceValue: string): Promise<AsrTranscribeResponse> {
+  return transcribeAsr({
+    sourceType: "mic",
+    sourceValue,
+    languageHint: "English",
   });
 }
 
@@ -158,7 +341,7 @@ export async function prepareDataset(
 export async function createTask(payload: CreateTaskRequest): Promise<TaskItem> {
   return agentFetch<TaskItem>("/tasks", {
     method: "POST",
-    body: JSON.stringify(payload),
+    body: JSON.stringify({ ...payload, idempotencyKey: crypto.randomUUID() }),
   });
 }
 
@@ -235,7 +418,7 @@ export async function createMemoryNote(
 ): Promise<MemoryNote> {
   return agentFetch<MemoryNote>("/memory/notes", {
     method: "POST",
-    body: JSON.stringify(payload),
+    body: JSON.stringify({ ...payload, idempotencyKey: crypto.randomUUID() }),
   });
 }
 
@@ -303,6 +486,46 @@ export async function scanAutoIndexNow(): Promise<AutoIndexStatus> {
   return agentFetch<AutoIndexStatus>("/memory/auto-index/scan", {
     method: "POST",
     body: JSON.stringify({}),
+  });
+}
+
+export async function fetchMemoryGraph(): Promise<MemoryGraphResponse> {
+  return agentFetch<MemoryGraphResponse>("/memory/graph");
+}
+
+export async function fetchChatHistory(limit = 100): Promise<ChatHistoryResponse> {
+  return agentFetch<ChatHistoryResponse>(`/chat/history?limit=${limit}`);
+}
+
+export async function clearChatHistory(): Promise<{ deleted: number }> {
+  return agentFetch<{ deleted: number }>("/chat/history", { method: "DELETE" });
+}
+
+export async function getProactiveStatus(): Promise<ProactiveStatus> {
+  return agentFetch<ProactiveStatus>("/ops/proactive/status");
+}
+
+export async function postProactiveOrbActivity(idle: boolean): Promise<ProactiveStatus> {
+  return agentFetch<ProactiveStatus>("/ops/proactive/orb-activity", {
+    method: "POST",
+    body: JSON.stringify({ idle }),
+  });
+}
+
+export async function pullProactiveNudges(limit = 3): Promise<ProactiveNudge[]> {
+  return agentFetch<ProactiveNudge[]>(`/ops/proactive/nudges?limit=${limit}`);
+}
+
+export async function runProactiveBriefing(): Promise<ProactiveNudge> {
+  return agentFetch<ProactiveNudge>("/ops/proactive/briefing", { method: "POST", body: "{}" });
+}
+
+export async function openLauncher(
+  payload: LauncherRequest,
+): Promise<LauncherResponse> {
+  return agentFetch<LauncherResponse>("/control/launcher", {
+    method: "POST",
+    body: JSON.stringify(payload),
   });
 }
 

@@ -34,19 +34,28 @@ class AssistantRequest(BaseModel):
 
 
 class RagCitation(BaseModel):
-    chunkId: str
-    documentId: str
-    sourcePath: str
-    title: str
-    chunkIndex: int
-    score: float
-    textPreview: str
+    chunkId: str = ""
+    documentId: str = ""
+    sourcePath: str = ""
+    title: str = ""
+    chunkIndex: int = 0
+    score: float = 0.0
+    textPreview: str = ""
+    sourceType: str | None = None
 
 
 class RagTrace(BaseModel):
     retrievalMode: Literal["none", "keyword", "semantic", "hybrid"] = "none"
     confidence: float = 0.0
     fallbackReason: str | None = None
+
+
+class ExecutedAction(BaseModel):
+    tool: str
+    accepted: bool
+    reason: str
+    detail: str | None = None
+    tier: str = "reversible"
 
 
 class AssistantResponse(BaseModel):
@@ -60,6 +69,75 @@ class AssistantResponse(BaseModel):
     fallbackReason: str | None = None
     citations: list[RagCitation] = Field(default_factory=list)
     rag: RagTrace = Field(default_factory=RagTrace)
+    executedActions: list[ExecutedAction] = Field(default_factory=list)
+
+
+class LauncherRequest(BaseModel):
+    kind: Literal["url", "file"]
+    target: str
+
+
+class LauncherResponse(BaseModel):
+    accepted: bool
+    reason: str
+    kind: Literal["url", "file"]
+    target: str | None = None
+
+
+class MemoryGraphNode(BaseModel):
+    id: str
+    kind: Literal["note", "document", "folder", "tag", "task", "perception"]
+    label: str
+    meta: dict = Field(default_factory=dict)
+
+
+class MemoryGraphEdge(BaseModel):
+    id: str
+    source: str
+    target: str
+    kind: Literal["tagged", "stored_in", "linked", "related"]
+
+
+class MemoryGraphResponse(BaseModel):
+    nodes: list[MemoryGraphNode] = Field(default_factory=list)
+    edges: list[MemoryGraphEdge] = Field(default_factory=list)
+    generatedAt: str
+
+
+class ChatHistoryMessage(BaseModel):
+    id: str
+    role: Literal["user", "assistant"]
+    content: str
+    ts: str
+    meta: str | None = None
+
+
+class ChatHistoryResponse(BaseModel):
+    messages: list[ChatHistoryMessage] = Field(default_factory=list)
+
+
+class ProactiveNudge(BaseModel):
+    id: str
+    kind: Literal["briefing", "deadline", "idle_insight", "reminder"]
+    title: str
+    message: str
+    createdAt: str
+
+
+class ProactiveStatus(BaseModel):
+    enabled: bool = True
+    orbIdle: bool = True
+    pendingNudges: int = 0
+    lastMorningBriefingDate: str | None = None
+    lastEveningBriefingDate: str | None = None
+    lastIdleInsightAt: str | None = None
+    morningHour: int = 8
+    eveningHour: int = 18
+    idleInsightMinutes: int = 45
+
+
+class ProactiveOrbActivityRequest(BaseModel):
+    idle: bool
 
 
 class AgentStatus(BaseModel):
@@ -795,6 +873,7 @@ class IntelligenceAdaptationExportResponse(BaseModel):
 class AutoIndexStatus(BaseModel):
     running: bool
     watchedPaths: list[str]
+    onDemandPaths: list[str] = Field(default_factory=list)
     lastScanAt: str | None = None
     indexedTotal: int = 0
     indexedLastRun: int = 0

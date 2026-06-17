@@ -5,7 +5,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from .schemas import (
     AiRuntimeConfigUpdateRequest,
@@ -31,9 +31,11 @@ from .schemas import (
     TaskUpdateRequest,
     DocumentImportRequest,
     FileOrganizeRequest,
+    LauncherRequest,
     OcrImportRequest,
     OrbListeningRequest,
     PerceptionAnalyzeRequest,
+    ProactiveOrbActivityRequest,
     PrivacyUpdateRequest,
     SyncQueueRequest,
     TaskNextRunRequest,
@@ -127,6 +129,14 @@ def hub_snapshot():
 @app.post("/assistant/respond")
 async def assistant_respond(payload: AssistantRequest):
     return await asyncio.to_thread(store.respond, payload)
+
+
+@app.post("/assistant/respond/stream")
+async def assistant_respond_stream(payload: AssistantRequest):
+    return StreamingResponse(
+        store.stream_respond(payload),
+        media_type="text/event-stream",
+    )
 
 
 @app.get("/ops/ai/status")
@@ -295,8 +305,52 @@ def memory_auto_index_status():
 
 
 @app.post("/memory/auto-index/scan")
-async def memory_auto_index_scan():
-    return await asyncio.to_thread(store.auto_index_scan_once)
+async def memory_auto_index_scan(includeUserFolders: bool = Query(default=True)):
+    return await asyncio.to_thread(
+        store.auto_index_scan_once,
+        include_user_folders=includeUserFolders,
+    )
+
+
+@app.get("/memory/graph")
+def memory_graph():
+    return store.get_memory_graph()
+
+
+@app.get("/chat/history")
+def chat_history(limit: int = Query(default=100, ge=1, le=500)):
+    return store.get_chat_history(limit=limit)
+
+
+@app.delete("/chat/history")
+def clear_chat_history():
+    deleted = store.clear_chat_history()
+    return {"deleted": deleted}
+
+
+@app.get("/ops/proactive/status")
+def proactive_status():
+    return store.proactive_status()
+
+
+@app.post("/ops/proactive/orb-activity")
+def proactive_orb_activity(payload: ProactiveOrbActivityRequest):
+    return store.proactive_set_orb_idle(payload)
+
+
+@app.get("/ops/proactive/nudges")
+def proactive_nudges(limit: int = Query(default=3, ge=1, le=10)):
+    return store.proactive_consume_nudges(limit=limit)
+
+
+@app.post("/ops/proactive/briefing")
+def proactive_briefing_now():
+    return store.proactive_run_briefing()
+
+
+@app.post("/control/launcher")
+async def control_launcher(payload: LauncherRequest):
+    return await asyncio.to_thread(store.open_launcher, payload)
 
 
 @app.get("/ops/scheduler/status")

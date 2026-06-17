@@ -13,12 +13,15 @@ from .schemas import (
     ActionTier,
     AssistantRequest,
     AssistantResponse,
+    ChatMessage,
+    ExecutedAction,
     IntelligenceTuningConfig,
     MemoryDocumentChunk,
     PolicyDecision,
     RagTrace,
     now_iso,
 )
+from .action_router import ActionRouter, ActionRouteResult
 from uuid import uuid4
 
 _LLM_FALLBACK_REPLY = (
@@ -42,6 +45,69 @@ _LLM_UNAVAILABLE_REPLIES: dict[str, str] = {
 class RespondService:
     def __init__(self, store: RuntimeStore) -> None:
         self._store = store
+        self._action_router = ActionRouter(store)
+
+    def _should_try_action_route(self, request: AssistantRequest) -> bool:
+        if request.wakeInvoke:
+            return False
+        if not (request.text or "").strip():
+            return False
+        return request.mode == "action" or not self.is_casual_chat_request(request.text)
+
+    def _route_action(self, request: AssistantRequest) -> ActionRouteResult | None:
+        if not self._should_try_action_route(request):
+            return None
+        plan = self._action_router.classify(request.text)
+        if plan is None:
+            return None
+        return self._action_router.execute(plan, original_text=request.text)
+
+    @staticmethod
+    def _serialize_executed_actions(actions: list[ExecutedAction]) -> list[dict]:
+        return [action.model_dump() for action in actions]
+
+    def _resolve_conversation(self, request: AssistantRequest) -> list[ChatMessage]:
+        if request.conversation:
+            return request.conversation[-12:]
+        rows = self._store.memory_db.list_chat_messages(limit=12)
+        return [
+            ChatMessage(role=row["role"], content=row["content"], timestamp=row["ts"])
+            for row in rows
+            if row["role"] in {"user", "assistant"}
+        ]
+
+    @staticmethod
+    def _format_conversation_context(messages: list[ChatMessage]) -> str:
+        if not messages:
+            return ""
+        blocks = [
+            f"<{message.role}>{message.content}</{message.role}>"
+            for message in messages
+            if message.content.strip()
+        ]
+        if not blocks:
+            return ""
+        return "Recent conversation:\n" + "\n".join(blocks)
+
+    def _with_conversation(self, prompt: str, request: AssistantRequest) -> str:
+        context = self._format_conversation_context(self._resolve_conversation(request))
+        if not context:
+            return prompt
+        return f"{context}\n\n{prompt}"
+
+    def _should_persist_chat(self, request: AssistantRequest) -> bool:
+        if request.wakeInvoke:
+            return False
+        return bool((request.text or "").strip()) and (request.mode or "chat") == "chat"
+
+    def _persist_chat_turn(self, request: AssistantRequest, reply: str, meta: str | None = None) -> None:
+        if not self._should_persist_chat(request):
+            return
+        self._store.append_chat_turn(
+            user_text=request.text,
+            assistant_text=reply,
+            meta=meta,
+        )
 
     def policy_decision(
         self,
@@ -206,10 +272,25 @@ class RespondService:
         rag_trace: dict = {"retrievalMode": "none", "confidence": 0.0, "fallbackReason": None}
 
         if decision.allowed:
+            action_result = self._route_action(request)
+            if action_result and action_result.handled and action_result.immediate:
+                reply = self._style_reply(action_result.reply, decision=decision, config=tuning)
+                return AssistantResponse(
+                    reply=reply,
+                    decision=decision,
+                    suggestedActions=["Show status", "Scan files", "Open dashboard"],
+                    status="ready",
+                    provider="action_router",
+                    model="local_rules",
+                    executedActions=action_result.executed_actions,
+                    citations=action_result.citations,
+                )
+
             if request.wakeInvoke:
                 llm_prompt = self._build_wake_invoke_prompt()
                 llm_result = self._store.ai_runtime.generate_reply(
                     prompt=llm_prompt, language_mode=self._store.intelligence_language_mode,
+                    llm_mode="voice",
                 )
                 if llm_result.get("accepted"):
                     reply = str(llm_result.get("reply") or llm_result.get("response") or "").strip()
@@ -276,8 +357,14 @@ class RespondService:
                 else:
                     llm_prompt = f"<user_turn>{request.text}</user_turn>"
                     rag_trace = {"retrievalMode": "none", "confidence": 0.0, "fallbackReason": "no_relevant_local_sources"}
+                if action_result and action_result.handled and action_result.llm_prompt:
+                    llm_prompt = action_result.llm_prompt
+                    citations = action_result.citations
+                    rag_trace = {"retrievalMode": "hybrid", "confidence": 0.8, "fallbackReason": None}
+                llm_prompt = self._with_conversation(llm_prompt, request)
                 llm_result = self._store.ai_runtime.generate_reply(
                     prompt=llm_prompt, language_mode=self._store.intelligence_language_mode,
+                    llm_mode="voice",
                 )
                 if llm_result.get("accepted"):
                     reply = str(llm_result.get("reply") or llm_result.get("response") or "").strip()
@@ -294,17 +381,222 @@ class RespondService:
                     fallback_reason = reason
             suggestions = ["Create note", "Add task", "Show status"]
             status = "ready"
+            executed_actions = (
+                action_result.executed_actions
+                if action_result and action_result.handled
+                else []
+            )
         else:
             reply = "Blocked for safety. Confirm or unlock before risky execution."
             suggestions = ["Explain risk", "Request confirmation", "Open safety panel"]
             status = "blocked"
             provider = "safety_gate"
             model = "policy_only"
+            executed_actions = []
 
         reply = self._style_reply(reply, decision=decision, config=tuning)
+        meta = f"{provider or ''}{f' · {model}' if model else ''}".strip(" ·") or None
+        self._persist_chat_turn(request, reply, meta=meta)
         return AssistantResponse(
             reply=reply, decision=decision, suggestedActions=suggestions,
             status=status, provider=provider, model=model,
             degraded=degraded, fallbackReason=fallback_reason,
             citations=citations, rag=rag_trace,
+            executedActions=executed_actions,
         )
+
+    def _build_llm_prompt_for_request(
+        self, request: AssistantRequest
+    ) -> tuple[str, dict]:
+        tuning = self._store._active_tuning_config()
+        decision = self.policy_decision(request, config=tuning)
+        citations: list[dict] = []
+        rag_trace: dict = {"retrievalMode": "none", "confidence": 0.0, "fallbackReason": None}
+        action_result: ActionRouteResult | None = None
+        executed_actions: list[ExecutedAction] = []
+
+        if not decision.allowed:
+            return "", {
+                "allowed": False,
+                "decision": decision,
+                "rag_trace": rag_trace,
+                "citations": citations,
+                "executed_actions": executed_actions,
+            }
+
+        action_result = self._route_action(request)
+        if action_result and action_result.handled and action_result.immediate:
+            return "", {
+                "allowed": True,
+                "decision": decision,
+                "immediate_action": action_result,
+                "rag_trace": rag_trace,
+                "citations": citations,
+                "executed_actions": action_result.executed_actions,
+            }
+
+        if request.wakeInvoke:
+            return self._build_wake_invoke_prompt(), {
+                "allowed": True,
+                "decision": decision,
+                "wake_invoke": True,
+                "rag_trace": {"retrievalMode": "none", "confidence": 0.0, "fallbackReason": "wake_invoke"},
+                "citations": [],
+                "executed_actions": executed_actions,
+            }
+
+        latest_snapshot = self._store.memory_db.latest_perception_snapshot()
+        lowered = (request.text or "").lower()
+        asks_about_screen = any(
+            term in lowered
+            for term in ("screen", "vision", "display", "what do you see", "what's on screen", "ocr")
+        )
+        if asks_about_screen and latest_snapshot is not None:
+            return "", {
+                "allowed": True,
+                "decision": decision,
+                "screen_snapshot": latest_snapshot,
+                "rag_trace": rag_trace,
+                "citations": citations,
+                "executed_actions": executed_actions,
+            }
+
+        rag_items: list[MemoryDocumentChunk] = []
+        if not self.is_casual_chat_request(request.text):
+            rag_items = self._store.memory_db.search_documents(query=request.text, limit=3)
+        if rag_items and self._store._should_attach_document_rag(request.text, rag_items):
+            retrieval_mode = self._store._document_retrieval_mode(rag_items)
+            confidence = self._store._document_retrieval_confidence(rag_items)
+            rag_trace = {"retrievalMode": retrieval_mode, "confidence": confidence, "fallbackReason": None}
+            citations = [
+                {
+                    "chunkId": item.id, "documentId": item.documentId, "sourcePath": item.sourcePath,
+                    "title": item.title, "chunkIndex": item.chunkIndex, "score": item.score,
+                    "textPreview": item.text[:240],
+                }
+                for item in rag_items
+            ]
+            context_blocks = [
+                "\n".join([f"Source {i}: {item.title}", f"Path: {item.sourcePath}", f"Excerpt: {item.text[:900]}"])
+                for i, item in enumerate(rag_items, start=1)
+            ]
+            llm_prompt = (
+                "Answer using the local source context when it is relevant. "
+                "Do not invent citations. If the context is weak, say what is missing.\n\n"
+                + "\n\n".join(context_blocks)
+                + f"\n\n<user_turn>{request.text}</user_turn>"
+            )
+        else:
+            llm_prompt = f"<user_turn>{request.text}</user_turn>"
+            rag_trace = {"retrievalMode": "none", "confidence": 0.0, "fallbackReason": "no_relevant_local_sources"}
+
+        if action_result and action_result.handled and action_result.llm_prompt:
+            llm_prompt = action_result.llm_prompt
+            citations = action_result.citations
+            executed_actions = action_result.executed_actions
+            rag_trace = {"retrievalMode": "hybrid", "confidence": 0.8, "fallbackReason": None}
+
+        llm_prompt = self._with_conversation(llm_prompt, request)
+
+        return llm_prompt, {
+            "allowed": True,
+            "decision": decision,
+            "rag_trace": rag_trace,
+            "citations": citations,
+            "executed_actions": executed_actions,
+        }
+
+    def stream_respond(self, request: AssistantRequest):
+        import json
+
+        if not self._store.respond_lock.acquire(blocking=False):
+            yield f"data: {json.dumps({'error': 'assistant_busy'}, ensure_ascii=True)}\n\n"
+            return
+        try:
+            tuning = self._store._active_tuning_config()
+            llm_prompt, meta = self._build_llm_prompt_for_request(request)
+            decision = meta["decision"]
+            result = "allowed" if decision.allowed else "blocked"
+            self._store.logs.insert(
+                0,
+                ActionLogItem(
+                    id=str(uuid4()), intent=request.text,
+                    tier=decision.tier, result=result, reason=decision.reason, createdAt=now_iso(),
+                ),
+            )
+
+            if not meta.get("allowed", False):
+                reply = "Blocked for safety. Confirm or unlock before risky execution."
+                yield f"data: {json.dumps({'token': reply}, ensure_ascii=True)}\n\n"
+                yield f"data: {json.dumps({'done': True, 'reply': reply, 'status': 'blocked'}, ensure_ascii=True)}\n\n"
+                return
+
+            if meta.get("immediate_action") is not None:
+                action_result = meta["immediate_action"]
+                reply = self._style_reply(action_result.reply, decision=decision, config=tuning)
+                self._persist_chat_turn(request, reply, meta="action_router")
+                yield f"data: {json.dumps({'token': reply}, ensure_ascii=True)}\n\n"
+                yield f"data: {json.dumps({'done': True, 'reply': reply, 'status': 'ready', 'provider': 'action_router', 'model': 'local_rules', 'executedActions': self._serialize_executed_actions(action_result.executed_actions)}, ensure_ascii=True)}\n\n"
+                return
+
+            if meta.get("screen_snapshot") is not None:
+                latest_snapshot = meta["screen_snapshot"]
+                snippet = (latest_snapshot.text or "").strip()
+                summary = snippet[:220] if snippet else "No OCR text available."
+                reply = (
+                    "Latest perception snapshot available. "
+                    f"Captured at {latest_snapshot.createdAt}, blocks={latest_snapshot.blockCount}, "
+                    f"textLength={latest_snapshot.textLength}. Summary: {summary}"
+                )
+                reply = self._style_reply(reply, decision=decision, config=tuning)
+                yield f"data: {json.dumps({'token': reply}, ensure_ascii=True)}\n\n"
+                yield f"data: {json.dumps({'done': True, 'reply': reply, 'status': 'ready', 'provider': 'memory_snapshot', 'model': 'latest_perception_context'}, ensure_ascii=True)}\n\n"
+                return
+
+            tokens: list[str] = []
+            llm_mode = "voice"
+            for event in self._store.ai_runtime.stream_reply_tokens(
+                prompt=llm_prompt,
+                language_mode=self._store.intelligence_language_mode,
+                llm_mode=llm_mode,
+            ):
+                if event.get("error"):
+                    reason = str(event["error"])
+                    reply = _LLM_UNAVAILABLE_REPLIES.get(reason, _LLM_FALLBACK_REPLY)
+                    yield f"data: {json.dumps({'token': reply}, ensure_ascii=True)}\n\n"
+                    yield f"data: {json.dumps({'done': True, 'reply': reply, 'status': 'ready', 'degraded': True, 'fallbackReason': reason}, ensure_ascii=True)}\n\n"
+                    return
+                token = str(event.get("token", ""))
+                if not token:
+                    continue
+                tokens.append(token)
+                yield f"data: {json.dumps({'token': token}, ensure_ascii=True)}\n\n"
+
+            reply = "".join(tokens).strip()
+            if meta.get("wake_invoke") and not reply:
+                reply = "I am here. What should we tackle first?"
+            if not reply:
+                reply = "I heard you, but the model returned an empty response."
+            reply = self._style_reply(reply, decision=decision, config=tuning)
+            self._persist_chat_turn(
+                request,
+                reply,
+                meta=f"llama.server · {self._store.ai_runtime._config.get('voiceModel', 'Qwen/Qwen2.5-3B-Instruct')}",
+            )
+            suggestions = ["Create note", "Add task", "Show status"] if meta.get("wake_invoke") else ["Create note", "Add task", "Show status"]
+            if meta.get("wake_invoke"):
+                suggestions = ["Open dashboard", "Review tasks", "Check status"]
+            done_payload = {
+                "done": True,
+                "reply": reply,
+                "status": "ready",
+                "provider": "llama.server",
+                "model": self._store.ai_runtime._config.get("voiceModel", "Qwen/Qwen2.5-3B-Instruct"),
+                "suggestedActions": suggestions,
+                "citations": meta.get("citations", []),
+                "rag": meta.get("rag_trace", {}),
+                "executedActions": self._serialize_executed_actions(meta.get("executed_actions", [])),
+            }
+            yield f"data: {json.dumps(done_payload, ensure_ascii=True)}\n\n"
+        finally:
+            self._store.respond_lock.release()

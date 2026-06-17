@@ -2,6 +2,7 @@ export type MindiTabId =
   | "home"
   | "control"
   | "memory"
+  | "brain"
   | "vision"
   | "ops"
   | "safety"
@@ -39,6 +40,106 @@ export interface AssistantResponse {
   model?: string;
   degraded?: boolean;
   fallbackReason?: string;
+  citations?: RagCitation[];
+  rag?: RagTrace;
+  executedActions?: ExecutedAction[];
+}
+
+export interface ExecutedAction {
+  tool: string;
+  accepted: boolean;
+  reason: string;
+  detail?: string;
+  tier?: string;
+}
+
+export interface RagCitation {
+  chunkId?: string;
+  documentId?: string;
+  sourcePath?: string;
+  title?: string;
+  chunkIndex?: number;
+  score?: number;
+  textPreview?: string;
+  sourceType?: string;
+}
+
+export interface RagTrace {
+  retrievalMode?: "none" | "keyword" | "semantic" | "hybrid";
+  confidence?: number;
+  fallbackReason?: string | null;
+}
+
+export interface LauncherRequest {
+  kind: "url" | "file";
+  target: string;
+}
+
+export interface LauncherResponse {
+  accepted: boolean;
+  reason: string;
+  kind: "url" | "file";
+  target?: string;
+}
+
+export type MemoryGraphNodeKind =
+  | "note"
+  | "document"
+  | "folder"
+  | "tag"
+  | "task"
+  | "perception";
+
+export interface MemoryGraphNode {
+  id: string;
+  kind: MemoryGraphNodeKind;
+  label: string;
+  meta?: Record<string, unknown>;
+}
+
+export interface MemoryGraphEdge {
+  id: string;
+  source: string;
+  target: string;
+  kind: "tagged" | "stored_in" | "linked" | "related";
+}
+
+export interface MemoryGraphResponse {
+  nodes: MemoryGraphNode[];
+  edges: MemoryGraphEdge[];
+  generatedAt: string;
+}
+
+export interface ChatHistoryMessage {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  ts: string;
+  meta?: string | null;
+}
+
+export interface ChatHistoryResponse {
+  messages: ChatHistoryMessage[];
+}
+
+export interface ProactiveNudge {
+  id: string;
+  kind: "briefing" | "deadline" | "idle_insight" | "reminder";
+  title: string;
+  message: string;
+  createdAt: string;
+}
+
+export interface ProactiveStatus {
+  enabled: boolean;
+  orbIdle: boolean;
+  pendingNudges: number;
+  lastMorningBriefingDate?: string | null;
+  lastEveningBriefingDate?: string | null;
+  lastIdleInsightAt?: string | null;
+  morningHour: number;
+  eveningHour: number;
+  idleInsightMinutes: number;
 }
 
 export interface AgentStatus {
@@ -515,6 +616,7 @@ export interface PerceptionPermissionStatus {
 export interface AutoIndexStatus {
   running: boolean;
   watchedPaths: string[];
+  onDemandPaths?: string[];
   lastScanAt?: string;
   indexedTotal: number;
   indexedLastRun: number;
@@ -816,6 +918,7 @@ export const TAB_ORDER: MindiTabId[] = [
   "home",
   "control",
   "memory",
+  "brain",
   "vision",
   "ops",
   "safety",
