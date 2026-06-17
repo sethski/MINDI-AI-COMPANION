@@ -69,6 +69,7 @@ class VoiceService:
             source_value=source_value,
             language_hint=request.languageHint,
             return_timestamps=request.returnTimestamps,
+            asr_mode="voice",
         )
         segments_payload = payload.get("segments") or []
         segments: list[AsrSegment] = []

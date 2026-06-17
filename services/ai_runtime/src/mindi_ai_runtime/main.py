@@ -12,7 +12,11 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from fastapi import FastAPI
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+
+from .llama_server import chat_completion, ensure_llama_server, stream_chat_completion
+from .whisper_asr import load_whisper_model, reset_whisper_model, transcribe_source
 
 
 class RuntimeConfig(BaseModel):
@@ -23,14 +27,21 @@ class RuntimeConfig(BaseModel):
     ttsModelPath: str = ""
     ttsCommand: str = "piper"
     llmCommand: str = "llama-cli"
+    llmServerCommand: str = "llama-server"
+    llmServerPort: int = 8081
+    voiceModelPath: str = ""
+    voiceMaxTokens: int = 128
     llmContextSize: int = 4096
     llmMaxTokens: int = 256
     llmTemperature: float = 0.2
     llmThreads: int = 0
     llmProvider: str = "llama.cpp"
     asrProvider: str = "huggingface_local"
+    voiceAsrProvider: str = "faster_whisper"
+    voiceAsrModel: str = "base.en"
     ocrProvider: str = "huggingface_local"
     llmModel: str = "Qwen/Qwen2.5-7B-Instruct"
+    voiceModel: str = "Qwen/Qwen2.5-3B-Instruct"
     asrModel: str = "Qwen/Qwen3-ASR-1.7B"
     ocrModel: str = "zai-org/GLM-OCR"
     ocrPythonExecutable: str = ""
@@ -45,6 +56,8 @@ class RuntimeConfig(BaseModel):
 class LlmGenerateRequest(BaseModel):
     prompt: str
     languageMode: str = "english"
+    llmMode: str = "voice"
+    stream: bool = False
 
 
 class AsrTranscribeRequest(BaseModel):
@@ -52,6 +65,7 @@ class AsrTranscribeRequest(BaseModel):
     sourceValue: str
     languageHint: str | None = None
     returnTimestamps: bool | None = None
+    asrMode: str = "default"
 
 
 class OcrExtractRequest(BaseModel):
@@ -173,7 +187,14 @@ def _resolve_ocr_python_executable() -> Path | None:
     return Path(raw).expanduser()
 
 
-def _llm_runtime_error(model_path: Path | None) -> str | None:
+def _resolve_voice_model_path() -> Path | None:
+    voice_path = runtime_config.voiceModelPath.strip()
+    if voice_path:
+        return _resolve_llm_model_path(voice_path)
+    return _resolve_llm_model_path(runtime_config.llmModelPath)
+
+
+def _llm_runtime_error(model_path: Path | None, *, llm_mode: str = "deep") -> str | None:
     if runtime_config.llmProvider == "ollama":
         model = runtime_config.llmModel.strip()
         if not model:
@@ -182,6 +203,14 @@ def _llm_runtime_error(model_path: Path | None) -> str | None:
         if ok:
             return None
         return str(payload.get("reason", "ollama_unreachable"))
+    if llm_mode == "voice":
+        voice_path = _resolve_voice_model_path()
+        if voice_path is None or not voice_path.exists() or not voice_path.is_file():
+            return "voice_model_path_missing"
+        server_command = runtime_config.llmServerCommand.strip() or "llama-server"
+        if shutil.which(server_command) is None and not Path(server_command).exists():
+            return "llama_server_binary_missing"
+        return None
     if model_path is None:
         return "model_path_missing"
     if not model_path.exists() or not model_path.is_file():
@@ -250,10 +279,12 @@ def _ollama_model_available(model: str) -> tuple[bool, dict]:
     return False, {"reason": "ollama_model_missing"}
 
 
-def _asr_runtime_error(asr_path: Path | None) -> str | None:
-    # No local path configured: fall back to the HuggingFace model ref
-    # (e.g. Qwen/Qwen3-ASR-1.7B). Readiness then tracks the real load path:
-    # the qwen_asr dependency must be importable, otherwise the load fails.
+def _asr_runtime_error(asr_path: Path | None, *, asr_mode: str = "default") -> str | None:
+    provider = runtime_config.voiceAsrProvider if asr_mode == "voice" else runtime_config.asrProvider
+    if provider == "faster_whisper":
+        if importlib.util.find_spec("faster_whisper") is None:
+            return "faster_whisper_dependency_missing"
+        return None
     if asr_path is None:
         if importlib.util.find_spec("qwen_asr") is None:
             return "qwen_asr_dependency_missing"
@@ -501,9 +532,32 @@ def _run_ollama(prompt: str) -> tuple[bool, dict]:
     return True, {"reply": reply}
 
 
-def _run_llm(prompt: str) -> tuple[bool, dict]:
+def _run_llama_server(prompt: str, *, max_tokens: int | None = None) -> tuple[bool, dict]:
+    voice_path = _resolve_voice_model_path()
+    if voice_path is None:
+        return False, {"reason": "voice_model_path_missing"}
+    ok, boot = ensure_llama_server(
+        server_command=runtime_config.llmServerCommand.strip() or "llama-server",
+        model_path=voice_path,
+        port=max(1024, int(runtime_config.llmServerPort)),
+        context_size=max(256, int(runtime_config.llmContextSize)),
+        threads=int(runtime_config.llmThreads),
+    )
+    if not ok:
+        return False, boot
+    return chat_completion(
+        port=max(1024, int(runtime_config.llmServerPort)),
+        prompt=prompt,
+        max_tokens=max_tokens or max(1, int(runtime_config.voiceMaxTokens)),
+        temperature=float(runtime_config.llmTemperature),
+    )
+
+
+def _run_llm(prompt: str, *, llm_mode: str = "deep") -> tuple[bool, dict]:
     if runtime_config.llmProvider == "ollama":
         return _run_ollama(prompt)
+    if llm_mode == "voice":
+        return _run_llama_server(prompt)
     return _run_llama_cpp(prompt)
 
 
@@ -704,10 +758,13 @@ def _record_feature_success(feature: str, latency_ms: int) -> None:
 
 def _feature_status() -> dict:
     llm_path = _resolve_llm_model_path(runtime_config.llmModelPath)
+    voice_path = _resolve_voice_model_path()
     asr_path = _resolve_model_path(runtime_config.asrModelPath)
     ocr_path = _resolve_model_path(runtime_config.ocrModelPath)
-    llm_runtime_error = _llm_runtime_error(llm_path)
-    asr_ready_error = _asr_runtime_error(asr_path)
+    llm_runtime_error = _llm_runtime_error(llm_path, llm_mode="deep")
+    voice_runtime_error = _llm_runtime_error(voice_path, llm_mode="voice")
+    asr_ready_error = _asr_runtime_error(asr_path, asr_mode="default")
+    voice_asr_ready_error = _asr_runtime_error(asr_path, asr_mode="voice")
     ocr_ready_error = _ocr_runtime_error(ocr_path)
     return {
         "llm": {
@@ -725,6 +782,19 @@ def _feature_status() -> dict:
             "lastFailureReason": feature_telemetry["llm"].get("lastFailureReason")
             or llm_runtime_error,
         },
+        "voiceLlm": {
+            "enabled": True,
+            "ready": voice_runtime_error is None,
+            "experimental": False,
+            "pathConfigured": bool(runtime_config.voiceModelPath.strip() or runtime_config.llmModelPath.strip()),
+            "provider": "llama.server",
+            "model": runtime_config.voiceModel,
+            "modelPath": runtime_config.voiceModelPath or runtime_config.llmModelPath,
+            "lastError": voice_runtime_error,
+            "lastLatencyMs": feature_telemetry["llm"].get("lastLatencyMs"),
+            "lastFailureReason": feature_telemetry["llm"].get("lastFailureReason")
+            or voice_runtime_error,
+        },
         "asr": {
             "enabled": True,
             "ready": asr_ready_error is None,
@@ -737,6 +807,19 @@ def _feature_status() -> dict:
             "lastLatencyMs": feature_telemetry["asr"].get("lastLatencyMs"),
             "lastFailureReason": feature_telemetry["asr"].get("lastFailureReason")
             or asr_ready_error,
+        },
+        "voiceAsr": {
+            "enabled": True,
+            "ready": voice_asr_ready_error is None,
+            "experimental": runtime_config.experimentalAsr,
+            "pathConfigured": True,
+            "provider": runtime_config.voiceAsrProvider,
+            "model": runtime_config.voiceAsrModel,
+            "modelPath": "",
+            "lastError": voice_asr_ready_error,
+            "lastLatencyMs": feature_telemetry["asr"].get("lastLatencyMs"),
+            "lastFailureReason": feature_telemetry["asr"].get("lastFailureReason")
+            or voice_asr_ready_error,
         },
         "ocr": {
             "enabled": True,
@@ -785,6 +868,7 @@ def runtime_update_config(payload: RuntimeConfig) -> dict:
         asr_runtime_error = None
         asr_model_ref = None
         asr_model = None
+        reset_whisper_model()
         ocr_runtime_error = None
         ocr_model_ref = None
         ocr_pipe = None
@@ -797,29 +881,49 @@ def runtime_update_config(payload: RuntimeConfig) -> dict:
     return runtime_status()
 
 
+@app.on_event("startup")
+def _startup_prewarm() -> None:
+    voice_path = _resolve_voice_model_path()
+    voice_error = _llm_runtime_error(voice_path, llm_mode="voice")
+    if voice_error is None and voice_path is not None:
+        ensure_llama_server(
+            server_command=runtime_config.llmServerCommand.strip() or "llama-server",
+            model_path=voice_path,
+            port=max(1024, int(runtime_config.llmServerPort)),
+            context_size=max(256, int(runtime_config.llmContextSize)),
+            threads=int(runtime_config.llmThreads),
+        )
+    if runtime_config.voiceAsrProvider == "faster_whisper":
+        load_whisper_model(model_size=runtime_config.voiceAsrModel.strip() or "base.en")
+
+
 @app.post("/llm/generate")
 def llm_generate(payload: LlmGenerateRequest) -> dict:
     started = time()
     text = payload.prompt.strip()
+    llm_mode = payload.llmMode.strip().lower() or "voice"
+    if runtime_config.llmProvider == "ollama":
+        llm_mode = "deep"
     if not text:
         _record_feature_failure("llm", "empty_prompt")
         return {
             "accepted": False,
             "reason": "empty_prompt",
             "provider": runtime_config.llmProvider,
-            "model": runtime_config.llmModel,
+            "model": runtime_config.voiceModel if llm_mode == "voice" else runtime_config.llmModel,
         }
     features = _feature_status()
-    if not features["llm"]["ready"]:
-        _record_feature_failure("llm", features["llm"]["lastError"] or "llm_model_not_ready")
+    feature_key = "voiceLlm" if llm_mode == "voice" else "llm"
+    if not features[feature_key]["ready"]:
+        _record_feature_failure("llm", features[feature_key]["lastError"] or "llm_model_not_ready")
         return {
             "accepted": False,
-            "reason": features["llm"]["lastError"] or "llm_model_not_ready",
-            "provider": runtime_config.llmProvider,
-            "model": runtime_config.llmModel,
+            "reason": features[feature_key]["lastError"] or "llm_model_not_ready",
+            "provider": "llama.server" if llm_mode == "voice" else runtime_config.llmProvider,
+            "model": runtime_config.voiceModel if llm_mode == "voice" else runtime_config.llmModel,
         }
     prompt = _build_llm_prompt(prompt=text, language_mode=payload.languageMode)
-    ok, result = _run_llm(prompt)
+    ok, result = _run_llm(prompt, llm_mode=llm_mode)
     if not ok:
         latency_ms = int((time() - started) * 1000)
         _record_feature_failure("llm", str(result.get("reason", "llm_runtime_error")), latency_ms)
@@ -827,8 +931,8 @@ def llm_generate(payload: LlmGenerateRequest) -> dict:
             "accepted": False,
             "reason": result.get("reason", "llm_runtime_error"),
             "detail": result.get("detail"),
-            "provider": runtime_config.llmProvider,
-            "model": runtime_config.llmModel,
+            "provider": "llama.server" if llm_mode == "voice" else runtime_config.llmProvider,
+            "model": runtime_config.voiceModel if llm_mode == "voice" else runtime_config.llmModel,
             "degraded": True,
         }
     latency_ms = int((time() - started) * 1000)
@@ -837,26 +941,89 @@ def llm_generate(payload: LlmGenerateRequest) -> dict:
         "accepted": True,
         "reason": "ok",
         "reply": str(result["reply"]).strip(),
-        "provider": runtime_config.llmProvider,
-        "model": runtime_config.llmModel,
+        "provider": "llama.server" if llm_mode == "voice" else runtime_config.llmProvider,
+        "model": runtime_config.voiceModel if llm_mode == "voice" else runtime_config.llmModel,
         "latencyMs": latency_ms,
     }
+
+
+@app.post("/llm/generate/stream")
+def llm_generate_stream(payload: LlmGenerateRequest):
+    text = payload.prompt.strip()
+    llm_mode = payload.llmMode.strip().lower() or "voice"
+    if runtime_config.llmProvider == "ollama":
+        llm_mode = "deep"
+    if not text:
+        return {"accepted": False, "reason": "empty_prompt"}
+
+    features = _feature_status()
+    feature_key = "voiceLlm" if llm_mode == "voice" else "llm"
+    if not features[feature_key]["ready"]:
+        return {
+            "accepted": False,
+            "reason": features[feature_key]["lastError"] or "llm_model_not_ready",
+        }
+
+    prompt = _build_llm_prompt(prompt=text, language_mode=payload.languageMode)
+
+    def event_stream():
+        if llm_mode == "voice":
+            voice_path = _resolve_voice_model_path()
+            if voice_path is None:
+                yield "data: {\"error\":\"voice_model_path_missing\"}\n\n"
+                return
+            ok, boot = ensure_llama_server(
+                server_command=runtime_config.llmServerCommand.strip() or "llama-server",
+                model_path=voice_path,
+                port=max(1024, int(runtime_config.llmServerPort)),
+                context_size=max(256, int(runtime_config.llmContextSize)),
+                threads=int(runtime_config.llmThreads),
+            )
+            if not ok:
+                yield f"data: {{\"error\":\"{boot.get('reason', 'llama_server_unavailable')}\"}}\n\n"
+                return
+            try:
+                for token in stream_chat_completion(
+                    port=max(1024, int(runtime_config.llmServerPort)),
+                    prompt=prompt,
+                    max_tokens=max(1, int(runtime_config.voiceMaxTokens)),
+                    temperature=float(runtime_config.llmTemperature),
+                ):
+                    yield f"data: {json.dumps({'token': token}, ensure_ascii=True)}\n\n"
+            except Exception:
+                yield "data: {\"error\":\"llm_stream_failed\"}\n\n"
+                return
+        else:
+            ok, result = _run_llm(prompt, llm_mode="deep")
+            if not ok:
+                yield f"data: {{\"error\":\"{result.get('reason', 'llm_runtime_error')}\"}}\n\n"
+                return
+            reply = str(result.get("reply", ""))
+            if reply:
+                yield f"data: {json.dumps({'token': reply}, ensure_ascii=True)}\n\n"
+        yield "data: {\"done\":true}\n\n"
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
 @app.post("/asr/transcribe")
 def asr_transcribe(payload: AsrTranscribeRequest) -> dict:
     started = time()
+    asr_mode = payload.asrMode.strip().lower() or "voice"
+    provider = runtime_config.voiceAsrProvider if asr_mode == "voice" else runtime_config.asrProvider
+    model_name = runtime_config.voiceAsrModel if asr_mode == "voice" else runtime_config.asrModel
     features = _feature_status()
+    feature_key = "voiceAsr" if asr_mode == "voice" else "asr"
     if payload.sourceType not in {"file", "mic"}:
         _record_feature_failure("asr", "invalid_source_type")
         return {"accepted": False, "reason": "invalid_source_type"}
-    if not features["asr"]["ready"]:
+    if not features[feature_key]["ready"]:
         _record_feature_failure("asr", "asr_model_not_ready")
         return {
             "accepted": False,
             "reason": "asr_model_not_ready",
-            "provider": runtime_config.asrProvider,
-            "model": runtime_config.asrModel,
+            "provider": provider,
+            "model": model_name,
             "degraded": True,
         }
     value = payload.sourceValue.strip()
@@ -876,6 +1043,36 @@ def asr_transcribe(payload: AsrTranscribeRequest) -> dict:
             audio_input = str(candidate.resolve())
         else:
             audio_input = value
+
+    language_hint = payload.languageHint if payload.languageHint is not None else runtime_config.asrLanguageHint
+
+    if provider == "faster_whisper":
+        ok, result = transcribe_source(
+            source_value=audio_input,
+            language_hint=language_hint,
+            model_size=runtime_config.voiceAsrModel.strip() or "base.en",
+        )
+        if not ok:
+            _record_feature_failure("asr", str(result.get("reason", "whisper_inference_failed")), int((time() - started) * 1000))
+            return {
+                "accepted": False,
+                "reason": result.get("reason", "whisper_inference_failed"),
+                "provider": provider,
+                "model": model_name,
+                "degraded": True,
+            }
+        latency_ms = int((time() - started) * 1000)
+        _record_feature_success("asr", latency_ms)
+        return {
+            "accepted": True,
+            "reason": "ok",
+            "text": str(result.get("text", "")).strip(),
+            "segments": result.get("segments") or [],
+            "provider": provider,
+            "model": model_name,
+            "degraded": False,
+            "latencyMs": latency_ms,
+        }
 
     ok, load_result = _load_qwen_asr_model()
     if not ok:

@@ -5,11 +5,12 @@
   "identifier": "com.mindi.desktop",
   "build": {
     "frontendDist": "../dist",
-    "devUrl": "http://localhost:5173",
+    "devUrl": "http://127.0.0.1:5173",
     "beforeDevCommand": "pnpm dev",
     "beforeBuildCommand": "pnpm build"
   },
   "app": {
+    "withGlobalTauri": true,
     "windows": [
       {
         "label": "main",
@@ -40,7 +41,7 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self' ipc: http://ipc.localhost http://localhost:5173 http://127.0.0.1:5173; script-src 'self' 'unsafe-inline' 'unsafe-eval' http://localhost:5173 http://127.0.0.1:5173; style-src 'self' 'unsafe-inline' http://localhost:5173 http://127.0.0.1:5173; connect-src 'self' http://localhost:5173 http://127.0.0.1:5173 http://127.0.0.1:8765 http://127.0.0.1:8877 http://127.0.0.1:7917 ws://localhost:5173 ws://127.0.0.1:5173 ipc: http://ipc.localhost; img-src 'self' data: blob: http://localhost:5173 http://127.0.0.1:5173; media-src 'self' blob: data: http://localhost:5173 http://127.0.0.1:5173; font-src 'self' data: http://localhost:5173 http://127.0.0.1:5173"
     }
   },
   "bundle": {

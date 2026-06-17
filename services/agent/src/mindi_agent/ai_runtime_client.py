@@ -207,32 +207,89 @@ class LocalAiRuntimeClient:
         self._request("POST", "/runtime/config", payload=merged)
         return self.get_status()
 
-    def generate_reply(self, *, prompt: str, language_mode: str) -> dict:
+    def generate_reply(
+        self,
+        *,
+        prompt: str,
+        language_mode: str,
+        llm_mode: str = "voice",
+    ) -> dict:
         started = time()
         ok, payload = self._request(
             "POST",
             "/llm/generate",
-            payload={"prompt": prompt, "languageMode": language_mode},
+            payload={
+                "prompt": prompt,
+                "languageMode": language_mode,
+                "llmMode": llm_mode,
+            },
             timeout=240.0,
         )
         latency_ms = int((time() - started) * 1000)
         if not ok or not payload.get("accepted"):
             reason = payload.get("reason", "runtime_unavailable")
+            model_key = "voiceModel" if llm_mode == "voice" else "llmModel"
             return {
                 "accepted": False,
                 "reason": reason,
-                "provider": str(self._config.get("llmProvider", "llama.cpp")),
-                "model": str(self._config.get("llmModel", "Qwen/Qwen2.5-7B-Instruct")),
+                "provider": "llama.server" if llm_mode == "voice" else str(self._config.get("llmProvider", "llama.cpp")),
+                "model": str(self._config.get(model_key, "Qwen/Qwen2.5-7B-Instruct")),
                 "latencyMs": latency_ms,
             }
+        model_key = "voiceModel" if llm_mode == "voice" else "llmModel"
         return {
             "accepted": True,
             "reason": "ok",
             "reply": str(payload.get("reply", "")),
-            "provider": str(payload.get("provider", self._config.get("llmProvider", "llama.cpp"))),
-            "model": str(payload.get("model", self._config.get("llmModel", "Qwen/Qwen2.5-7B-Instruct"))),
+            "provider": str(payload.get("provider", "llama.server" if llm_mode == "voice" else self._config.get("llmProvider", "llama.cpp"))),
+            "model": str(payload.get("model", self._config.get(model_key, "Qwen/Qwen2.5-7B-Instruct"))),
             "latencyMs": int(payload.get("latencyMs", latency_ms)),
         }
+
+    def stream_reply_tokens(
+        self,
+        *,
+        prompt: str,
+        language_mode: str,
+        llm_mode: str = "voice",
+    ):
+        url = f"{self.base_url}/llm/generate/stream"
+        raw = json.dumps(
+            {
+                "prompt": prompt,
+                "languageMode": language_mode,
+                "llmMode": llm_mode,
+                "stream": True,
+            },
+            ensure_ascii=True,
+        ).encode("utf-8")
+        req = Request(
+            url=url,
+            method="POST",
+            data=raw,
+            headers={"Content-Type": "application/json"},
+        )
+        with urlopen(req, timeout=240.0) as resp:
+            for raw_line in resp:
+                line = raw_line.decode("utf-8", errors="replace").strip()
+                if not line.startswith("data:"):
+                    continue
+                payload_raw = line[5:].strip()
+                if not payload_raw:
+                    continue
+                try:
+                    payload = json.loads(payload_raw)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(payload, dict):
+                    if payload.get("done"):
+                        break
+                    if payload.get("error"):
+                        yield {"error": str(payload.get("error"))}
+                        break
+                    token = payload.get("token")
+                    if token:
+                        yield {"token": str(token)}
 
     def transcribe(
         self,
@@ -241,8 +298,13 @@ class LocalAiRuntimeClient:
         source_value: str,
         language_hint: str | None = None,
         return_timestamps: bool | None = None,
+        asr_mode: str = "voice",
     ) -> dict:
-        payload: dict[str, object] = {"sourceType": source_type, "sourceValue": source_value}
+        payload: dict[str, object] = {
+            "sourceType": source_type,
+            "sourceValue": source_value,
+            "asrMode": asr_mode,
+        }
         if language_hint is not None:
             payload["languageHint"] = language_hint
         if return_timestamps is not None:

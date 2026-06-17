@@ -1,15 +1,19 @@
 import { emit, listen } from "@tauri-apps/api/event";
 import { useEffect, useState } from "react";
 import { useWakeWord } from "../hooks/useWakeWord";
-import { updateAiRuntimeConfig } from "../lib/agent-api";
+import { getAiRuntimeStatus, updateAiRuntimeConfig } from "../lib/agent-api";
 import { debugSessionLog } from "../lib/debug-session-log";
 import { checkAsrReady, isMicEnabled, listenMicToggle } from "../lib/orb-agent";
+import {
+  listenScreenHelpHotkey,
+  pollProactiveNudges,
+  reportOrbIdle,
+} from "../lib/proactive-bridge";
 import { isTauriRuntime, orbFocus } from "../lib/tauri-window";
 
 export function MindiWakeBridge() {
   const [micEnabled, setMicEnabled] = useState(isMicEnabled);
   const [orbBusy, setOrbBusy] = useState(false);
-  const [micPrimed, setMicPrimed] = useState(false);
 
   useEffect(() => {
     if (!isTauriRuntime()) {
@@ -26,72 +30,44 @@ export function MindiWakeBridge() {
     });
     // #endregion
 
-    void fetch("http://127.0.0.1:8765/ops/ai/status")
-      .then((response) => (response.ok ? response.json() : null))
-      .then((status) => updateAiRuntimeConfig(status?.config ?? {}))
+    void getAiRuntimeStatus()
+      .then((status) => updateAiRuntimeConfig(status.config ?? {}))
       .then(() => {
-      void checkAsrReady().then((ready) => {
-        // #region agent log
-        debugSessionLog({
-          runId: "post-fix",
-          hypothesisId: "H",
-          location: "MindiWakeBridge.tsx:runtime-sync",
-          message: "ai runtime config synced from desktop",
-          data: { asrReady: ready },
+        void checkAsrReady().then((ready) => {
+          // #region agent log
+          debugSessionLog({
+            runId: "post-fix",
+            hypothesisId: "H",
+            location: "MindiWakeBridge.tsx:runtime-sync",
+            message: "ai runtime config synced from desktop",
+            data: { asrReady: ready },
+          });
+          // #endregion
         });
-        // #endregion
       });
-    });
 
     const cleanups: Array<() => void> = [];
     void listen("orb-session-busy", () => {
       setOrbBusy(true);
+      void reportOrbIdle(false);
     }).then((unlisten) => cleanups.push(unlisten));
     void listen("orb-session-idle", () => {
       setOrbBusy(false);
+      void reportOrbIdle(true);
     }).then((unlisten) => cleanups.push(unlisten));
     cleanups.push(listenMicToggle(setMicEnabled));
 
-    const primeMic = (source: "gesture" | "startup") => {
-      void navigator.mediaDevices
-        .getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } })
-        .then((stream) => {
-          for (const track of stream.getTracks()) {
-            track.stop();
-          }
-          setMicPrimed(true);
-          // #region agent log
-          debugSessionLog({
-            runId: "post-fix",
-            hypothesisId: "C",
-            location: "MindiWakeBridge.tsx:primeMic",
-            message: "mic primed for wake listening",
-            data: { source },
-          });
-          // #endregion
-        })
-        .catch((error) => {
-          // #region agent log
-          debugSessionLog({
-            runId: "post-fix",
-            hypothesisId: "C",
-            location: "MindiWakeBridge.tsx:primeMic:catch",
-            message: "mic prime failed",
-            data: {
-              source,
-              error: error instanceof Error ? error.message : String(error),
-            },
-          });
-          // #endregion
-        });
-    };
+    void reportOrbIdle(true);
+    const nudgeInterval = window.setInterval(() => {
+      void pollProactiveNudges();
+    }, 25000);
+    cleanups.push(() => window.clearInterval(nudgeInterval));
 
-    primeMic("startup");
-    const onFirstPointerDown = () => primeMic("gesture");
-    window.addEventListener("pointerdown", onFirstPointerDown, { once: true });
+    void listenScreenHelpHotkey((reply) => {
+      void emit("mindi-screen-help-result", { reply });
+    }).then((unlisten) => cleanups.push(unlisten));
 
     return () => {
-      window.removeEventListener("pointerdown", onFirstPointerDown);
       for (const cleanup of cleanups) {
         cleanup();
       }

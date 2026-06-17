@@ -20,7 +20,10 @@ export default defineConfig({
   server: {
     port: 5173,
     strictPort: true,
-    host: useMobileHmr ? tauriDevHost : "localhost",
+    host: useMobileHmr ? tauriDevHost : "127.0.0.1",
+    headers: {
+      "Permissions-Policy": "microphone=*",
+    },
     hmr: useMobileHmr
       ? {
           protocol: "ws",
@@ -29,7 +32,7 @@ export default defineConfig({
         }
       : {
           protocol: "ws",
-          host: "localhost",
+          host: "127.0.0.1",
           port: 5173,
           clientPort: 5173,
         },

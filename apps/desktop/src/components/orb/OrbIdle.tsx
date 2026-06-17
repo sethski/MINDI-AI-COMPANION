@@ -1,113 +1,148 @@
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import { motion } from "framer-motion";
+import { debugSessionLog } from "../../lib/debug-session-log";
+
 interface OrbIdleProps {
   offline: boolean;
-  micDisabled: boolean;
-  onActivate: () => void;
+  wakeListening: boolean;
+  micBlocked: boolean;
+  nudgeCaption?: string;
   onOpenDashboard: () => void;
   onDragStart: () => void;
   onMenuOpenChange: (open: boolean) => void;
   onQuit: () => void;
 }
 
-const DRAG_THRESHOLD_PX = 6;
+const DRAG_THRESHOLD_PX = 14;
 
-function MicGlyph() {
-  return (
-    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" aria-hidden="true">
-      <path
-        d="M12 3.5a3 3 0 0 0-3 3v5a3 3 0 0 0 6 0v-5a3 3 0 0 0-3-3Z"
-        fill="currentColor"
-      />
-      <path
-        d="M6 11a6 6 0 0 0 12 0M12 17v3.5"
-        stroke="currentColor"
-        strokeWidth="1.6"
-        strokeLinecap="round"
-      />
-    </svg>
-  );
+function setMenuState(
+  open: boolean,
+  setMenuOpen: (open: boolean) => void,
+  onMenuOpenChange: (open: boolean) => void,
+) {
+  setMenuOpen(open);
+  onMenuOpenChange(open);
 }
 
 export function OrbIdle({
   offline,
-  micDisabled,
-  onActivate,
+  wakeListening,
+  micBlocked,
+  nudgeCaption,
   onOpenDashboard,
   onDragStart,
   onMenuOpenChange,
   onQuit,
 }: OrbIdleProps) {
   const pointerRef = useRef<{ x: number; y: number } | null>(null);
-  const draggedRef = useRef(false);
+  const dragStartedRef = useRef(false);
   const [menuOpen, setMenuOpen] = useState(false);
 
-  useEffect(() => {
-    onMenuOpenChange(menuOpen);
-  }, [menuOpen, onMenuOpenChange]);
+  const handleTap = (event: React.PointerEvent<HTMLElement>) => {
+    if (event.button !== 0 || dragStartedRef.current) {
+      dragStartedRef.current = false;
+      return;
+    }
+    const start = pointerRef.current;
+    pointerRef.current = null;
+    if (!start) {
+      return;
+    }
+    const deltaX = Math.abs(event.clientX - start.x);
+    const deltaY = Math.abs(event.clientY - start.y);
+    if (deltaX > DRAG_THRESHOLD_PX || deltaY > DRAG_THRESHOLD_PX) {
+      return;
+    }
+    const target = event.target as HTMLElement;
+    if (target.closest(".orb-idle__menu-item")) {
+      return;
+    }
+    const nextOpen = !menuOpen;
+    // #region agent log
+    debugSessionLog({
+      runId: "post-fix",
+      hypothesisId: "H1,H2,H6",
+      location: "OrbIdle.tsx:tap",
+      message: "orb tap toggles menu",
+      data: { menuOpen, nextOpen },
+    });
+    // #endregion
+    setMenuState(nextOpen, setMenuOpen, onMenuOpenChange);
+  };
 
   return (
     <motion.div
-      className={`orb-idle ${offline ? "orb-idle--offline" : ""} ${menuOpen ? "orb-idle--menu-open" : ""}`}
+      className={`orb-idle ${offline ? "orb-idle--offline" : ""} ${menuOpen ? "orb-idle--menu-open" : ""} ${wakeListening ? "orb-idle--wake" : ""} ${micBlocked ? "orb-idle--mic-blocked" : ""}`}
+      role="button"
+      tabIndex={0}
+      aria-label={
+        micBlocked
+          ? "MINDI orb. Microphone blocked. Check Windows privacy settings."
+          : menuOpen
+            ? "MINDI menu open"
+            : "MINDI orb. Click for menu. Say Mindi to talk."
+      }
+      title={
+        micBlocked
+          ? "Microphone blocked — allow mic for MINDI in Windows Settings"
+          : "Click for menu · Say “Mindi” to talk"
+      }
       onPointerDown={(event) => {
         if (event.button !== 0) {
           return;
         }
-        draggedRef.current = false;
+        dragStartedRef.current = false;
         pointerRef.current = { x: event.clientX, y: event.clientY };
       }}
       onPointerMove={(event) => {
         const start = pointerRef.current;
-        if (!start || draggedRef.current) {
+        if (!start || dragStartedRef.current) {
           return;
         }
         const deltaX = Math.abs(event.clientX - start.x);
         const deltaY = Math.abs(event.clientY - start.y);
         if (deltaX > DRAG_THRESHOLD_PX || deltaY > DRAG_THRESHOLD_PX) {
-          draggedRef.current = true;
-          setMenuOpen(false);
+          dragStartedRef.current = true;
+          setMenuState(false, setMenuOpen, onMenuOpenChange);
           onDragStart();
         }
       }}
-      onPointerUp={() => {
-        pointerRef.current = null;
-      }}
+      onPointerUp={handleTap}
       onPointerCancel={() => {
         pointerRef.current = null;
-        draggedRef.current = false;
+        dragStartedRef.current = false;
       }}
-      onContextMenu={(event) => {
-        event.preventDefault();
-        setMenuOpen(true);
+      onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          setMenuState(!menuOpen, setMenuOpen, onMenuOpenChange);
+        }
+        if (event.key === "Escape" && menuOpen) {
+          setMenuState(false, setMenuOpen, onMenuOpenChange);
+        }
       }}
       whileTap={{ scale: 0.96 }}
       layout
     >
-      <button
-        type="button"
-        className="orb-idle__core"
-        aria-label="Open MINDI menu"
-        title="Click to open MINDI menu. Say Hey MINDI or use the mic to talk."
-        onClick={() => {
-          if (menuOpen) {
-            setMenuOpen(false);
-            return;
-          }
-          if (draggedRef.current) {
-            return;
-          }
-          setMenuOpen(true);
-        }}
-      />
+      <div className="orb-idle__core" aria-hidden="true">
+        {wakeListening ? <span className="orb-idle__wake-ring" aria-hidden="true" /> : null}
+        {micBlocked ? <span className="orb-idle__mic-blocked" aria-hidden="true" /> : null}
+      </div>
+      {nudgeCaption ? (
+        <p className="orb-idle__nudge" role="status">
+          {nudgeCaption}
+        </p>
+      ) : null}
       {menuOpen ? (
         <div className="orb-idle__menu" role="menu">
           <button
             type="button"
             role="menuitem"
             className="orb-idle__menu-item"
+            onPointerDown={(event) => event.stopPropagation()}
             onClick={(event) => {
               event.stopPropagation();
-              setMenuOpen(false);
+              setMenuState(false, setMenuOpen, onMenuOpenChange);
               onOpenDashboard();
             }}
           >
@@ -117,9 +152,10 @@ export function OrbIdle({
             type="button"
             role="menuitem"
             className="orb-idle__menu-item"
+            onPointerDown={(event) => event.stopPropagation()}
             onClick={(event) => {
               event.stopPropagation();
-              setMenuOpen(false);
+              setMenuState(false, setMenuOpen, onMenuOpenChange);
               onQuit();
             }}
           >
@@ -127,25 +163,6 @@ export function OrbIdle({
           </button>
         </div>
       ) : null}
-      <button
-        type="button"
-        className={`orb-idle__mic ${micDisabled ? "orb-idle__mic--muted" : "orb-idle__mic--ready"}`}
-        aria-label={micDisabled ? "Microphone off" : "Start voice with MINDI"}
-        title={micDisabled ? "Mic is off. Enable Mic in the dashboard." : "Talk to MINDI"}
-        disabled={micDisabled}
-        onPointerDown={(event) => {
-          event.stopPropagation();
-        }}
-        onPointerUp={(event) => {
-          event.stopPropagation();
-        }}
-        onClick={(event) => {
-          event.stopPropagation();
-          onActivate();
-        }}
-      >
-        <MicGlyph />
-      </button>
     </motion.div>
   );
 }
@@ -173,14 +190,18 @@ export function OrbActive({
   waveform,
   pulse,
 }: OrbActiveProps) {
+  const showCaption = phase === "error";
+
   return (
     <motion.div
-      className={`orb-active ${offline ? "orb-active--offline" : ""}`}
+      className={`orb-active ${offline ? "orb-active--offline" : ""} orb-active--${phase}`}
       initial={reducedMotion ? false : { opacity: 0, scale: 0.82 }}
       animate={{ opacity: 1, scale: 1 }}
       exit={reducedMotion ? undefined : { opacity: 0, scale: 0.88 }}
       transition={{ type: "spring", stiffness: 100, damping: 20 }}
       layout
+      aria-live="polite"
+      aria-label={caption || formatPhase(phase)}
     >
       {!reducedMotion ? pulse : null}
       <div className="orb-active__header">
@@ -195,13 +216,13 @@ export function OrbActive({
           }}
         />
         <span className="orb-active__phase">{formatPhase(phase)}</span>
-        <button type="button" className="orb-active__close" onClick={onCancel} aria-label="Dismiss">
-          x
+        <button type="button" className="orb-active__close" onClick={onCancel} aria-label="End call">
+          ×
         </button>
       </div>
       <div className="orb-active__body">
         {!reducedMotion ? waveform : <span className="orb-active__static-mark" aria-hidden="true" />}
-        <p className="orb-active__caption">{caption}</p>
+        {showCaption ? <p className="orb-active__caption">{caption}</p> : null}
       </div>
     </motion.div>
   );
@@ -210,9 +231,9 @@ export function OrbActive({
 function formatPhase(phase: ActivePhase): string {
   switch (phase) {
     case "waking":
-      return "Waking";
+      return "Connecting";
     case "greeting":
-      return "Hello";
+      return "Ready";
     case "listening":
       return "Listening";
     case "thinking":

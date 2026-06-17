@@ -1,12 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef } from "react";
-import { sendAssistantRequest, transcribeMicBlob } from "../lib/agent-api";
+import { convertBlobToWav } from "../lib/orb-audio";
+import { streamAssistantRequest, synthesizeTts, transcribeMicBlob } from "../lib/agent-api";
 import { enqueueSyncItem } from "../lib/local-state";
+import { debugSessionLog } from "../lib/debug-session-log";
 import { isTauriRuntime, orbSaveAudioTemp } from "../lib/tauri-window";
-import { isMicEnabled } from "../lib/orb-agent";
+import { isMicEnabled, requestMicStream } from "../lib/orb-agent";
 
 const SILENCE_END_MS = 1400;
 const SPEECH_LEVEL_THRESHOLD = 14;
 const MAX_LISTEN_MS = 30000;
+const MIN_VOICE_TURN_MS = 1500;
 
 interface SpeechRecognitionAlternativeLike {
   transcript: string;
@@ -60,61 +63,62 @@ function blobToBase64(blob: Blob): Promise<string> {
   });
 }
 
-function waitForSpeechVoices(timeoutMs = 1200): Promise<SpeechSynthesisVoice[]> {
-  return new Promise((resolve) => {
-    const voices = window.speechSynthesis.getVoices();
-    if (voices.length > 0) {
-      resolve(voices);
-      return;
-    }
-
-    const finish = () => resolve(window.speechSynthesis.getVoices());
-    window.speechSynthesis.onvoiceschanged = finish;
-    window.setTimeout(finish, timeoutMs);
-  });
-}
-
-function pickSpeechVoice(voices: SpeechSynthesisVoice[]): SpeechSynthesisVoice | undefined {
-  const english =
-    voices.find((voice) => voice.lang.toLowerCase().startsWith("en") && voice.localService) ??
-    voices.find((voice) => voice.lang.toLowerCase().startsWith("en")) ??
-    voices[0];
-  return english;
-}
-
-function speakText(text: string): Promise<void> {
+function playAudioDataUrl(audioDataUrl: string, audioRef: { current: HTMLAudioElement | null }): Promise<void> {
   return new Promise((resolve, reject) => {
-    if (!("speechSynthesis" in window)) {
-      reject(new Error("speech_synthesis_unavailable"));
-      return;
-    }
-
-    void waitForSpeechVoices()
-      .then((voices) => {
-        window.speechSynthesis.cancel();
-        window.speechSynthesis.resume();
-
-        const utterance = new SpeechSynthesisUtterance(text);
-        const voice = pickSpeechVoice(voices);
-        if (voice) {
-          utterance.voice = voice;
-          utterance.lang = voice.lang;
-        } else {
-          utterance.lang = "en-US";
-        }
-        utterance.rate = 1;
-        utterance.pitch = 1;
-        utterance.onend = () => resolve();
-        utterance.onerror = () => reject(new Error("speech_synthesis_failed"));
-        window.speechSynthesis.speak(utterance);
-      })
-      .catch(() => reject(new Error("speech_synthesis_failed")));
+    const audio = new Audio(audioDataUrl);
+    audioRef.current = audio;
+    audio.onended = () => {
+      if (audioRef.current === audio) {
+        audioRef.current = null;
+      }
+      resolve();
+    };
+    audio.onerror = () => {
+      if (audioRef.current === audio) {
+        audioRef.current = null;
+      }
+      reject(new Error("audio_playback_failed"));
+    };
+    void audio.play().catch(() => reject(new Error("audio_playback_failed")));
   });
+}
+
+async function speakViaAiRuntime(text: string, audioRef: { current: HTMLAudioElement | null }): Promise<void> {
+  const result = await synthesizeTts({ text });
+  // #region agent log
+  debugSessionLog({
+    runId: "post-fix",
+    hypothesisId: "H5",
+    location: "useVoiceSession.ts:speakViaAiRuntime",
+    message: "local AI TTS synthesis result",
+    data: {
+      accepted: result.accepted,
+      reason: result.reason,
+      provider: result.provider,
+      model: result.model,
+      textPreview: text.slice(0, 60),
+    },
+  });
+  // #endregion
+  if (!result.accepted || !result.audioDataUrl) {
+    throw new Error(result.reason ?? "tts_unavailable");
+  }
+  await playAudioDataUrl(result.audioDataUrl, audioRef);
+}
+
+function splitSentences(buffer: string): { ready: string[]; remainder: string } {
+  const parts = buffer.split(/(?<=[.!?])\s+/);
+  if (parts.length <= 1) {
+    return { ready: [], remainder: buffer };
+  }
+  const remainder = parts.pop() ?? "";
+  return { ready: parts.filter((part) => part.trim().length > 0), remainder };
 }
 
 export interface VoiceSessionOptions {
   onLevel?: (level: number) => void;
   onUtteranceComplete?: () => void;
+  onPartialTranscript?: (text: string) => void;
 }
 
 export interface AssistantTurn {
@@ -135,6 +139,7 @@ export function useVoiceSession(options: VoiceSessionOptions = {}) {
   const silenceStartRef = useRef<number | null>(null);
   const utteranceCompleteRef = useRef(options.onUtteranceComplete);
   const listenStartedAtRef = useRef(0);
+  const activeAudioRef = useRef<HTMLAudioElement | null>(null);
 
   useEffect(() => {
     utteranceCompleteRef.current = options.onUtteranceComplete;
@@ -176,8 +181,9 @@ export function useVoiceSession(options: VoiceSessionOptions = {}) {
     return () => {
       stopRecognition();
       cleanupStream();
-      if ("speechSynthesis" in window) {
-        window.speechSynthesis.cancel();
+      if (activeAudioRef.current) {
+        activeAudioRef.current.pause();
+        activeAudioRef.current = null;
       }
     };
   }, [cleanupStream, stopRecognition]);
@@ -186,7 +192,18 @@ export function useVoiceSession(options: VoiceSessionOptions = {}) {
     if (!text.trim()) {
       return;
     }
-    await speakText(text);
+    if (activeAudioRef.current) {
+      activeAudioRef.current.pause();
+      activeAudioRef.current = null;
+    }
+    await speakViaAiRuntime(text, activeAudioRef);
+  }, []);
+
+  const stopSpeaking = useCallback(() => {
+    if (activeAudioRef.current) {
+      activeAudioRef.current.pause();
+      activeAudioRef.current = null;
+    }
   }, []);
 
   const startListening = useCallback(async (): Promise<void> => {
@@ -200,12 +217,7 @@ export function useVoiceSession(options: VoiceSessionOptions = {}) {
     silenceStartRef.current = null;
     listenStartedAtRef.current = Date.now();
 
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        echoCancellation: true,
-        noiseSuppression: true,
-      },
-    });
+    const stream = await requestMicStream();
     mediaStreamRef.current = stream;
 
     const audioContext = new AudioContext();
@@ -250,8 +262,6 @@ export function useVoiceSession(options: VoiceSessionOptions = {}) {
     };
     vadFrameRef.current = requestAnimationFrame(runVadFrame);
 
-    // In Tauri, prefer Qwen ASR (via stopListening) over the Web Speech API.
-    // Web Speech is only used as a fallback in browser dev.
     const Recognition = isTauriRuntime() ? null : getSpeechRecognition();
     if (Recognition) {
       const recognition = new Recognition();
@@ -271,6 +281,7 @@ export function useVoiceSession(options: VoiceSessionOptions = {}) {
           }
         }
         transcriptRef.current = latest.trim();
+        options.onPartialTranscript?.(transcriptRef.current);
         options.onLevel?.(Math.min(1, latest.length / 40));
         if (hasFinal && transcriptRef.current.length > 2) {
           speechSeenRef.current = true;
@@ -320,9 +331,14 @@ export function useVoiceSession(options: VoiceSessionOptions = {}) {
       return "";
     }
 
+    if (Date.now() - listenStartedAtRef.current < MIN_VOICE_TURN_MS) {
+      return "";
+    }
+
     try {
-      const dataUrl = await blobToBase64(blob);
-      const extension = blob.type.includes("webm") ? "webm" : "wav";
+      const wavBlob = await convertBlobToWav(blob);
+      const dataUrl = await blobToBase64(wavBlob);
+      const extension = "wav";
       let sourceValue = dataUrl;
 
       try {
@@ -343,28 +359,71 @@ export function useVoiceSession(options: VoiceSessionOptions = {}) {
     return "";
   }, [cleanupStream, stopRecognition]);
 
-  const askAssistant = useCallback(async (text: string): Promise<AssistantTurn> => {
+  const askAssistant = useCallback(
+    async (
+      text: string,
+      options?: {
+        wakeInvoke?: boolean;
+        onToken?: (token: string, fullText: string) => void;
+        onSentence?: (sentence: string) => Promise<void>;
+      },
+    ): Promise<AssistantTurn> => {
     const trimmed = text.trim();
-    if (!trimmed) {
+    const wakeInvoke = options?.wakeInvoke ?? false;
+    if (!wakeInvoke && !trimmed) {
       return { reply: "I did not catch that. Try again.", degraded: false };
     }
 
     try {
-      const response = await sendAssistantRequest({
-        text: trimmed,
-        mode: "chat",
-        tab: "home",
-      });
-      if (response.degraded) {
+      let streamed = "";
+      let sentenceBuffer = "";
+      const finalEvent = await streamAssistantRequest(
+        {
+          text: wakeInvoke ? "MINDI" : trimmed,
+          mode: "chat",
+          tab: "home",
+          wakeInvoke,
+        },
+        async (event) => {
+          if (!event.token) {
+            return;
+          }
+          streamed += event.token;
+          sentenceBuffer += event.token;
+          options?.onToken?.(event.token, streamed);
+          const { ready, remainder } = splitSentences(sentenceBuffer);
+          sentenceBuffer = remainder;
+          for (const sentence of ready) {
+            if (options?.onSentence) {
+              await options.onSentence(sentence);
+            }
+          }
+        },
+      );
+      if (sentenceBuffer.trim() && options?.onSentence) {
+        await options.onSentence(sentenceBuffer.trim());
+      }
+      if (finalEvent?.error) {
         return {
-          reply:
-            response.reply?.trim() ||
-            `Local model unavailable (${response.fallbackReason ?? "runtime_error"}). Check agent and AI runtime.`,
+          reply: _LLM_UNAVAILABLE(finalEvent.error),
           degraded: true,
-          reason: response.fallbackReason,
+          reason: finalEvent.error,
         };
       }
-      return { reply: response.reply?.trim() || "I am ready when you are.", degraded: false };
+      if (finalEvent?.degraded) {
+        return {
+          reply:
+            finalEvent.reply?.trim() ||
+            streamed.trim() ||
+            `Local model unavailable (${finalEvent.fallbackReason ?? "runtime_error"}). Check agent and AI runtime.`,
+          degraded: true,
+          reason: finalEvent.fallbackReason,
+        };
+      }
+      return {
+        reply: finalEvent?.reply?.trim() || streamed.trim() || "I am ready when you are.",
+        degraded: false,
+      };
     } catch {
       enqueueSyncItem({
         type: "chat",
@@ -381,10 +440,20 @@ export function useVoiceSession(options: VoiceSessionOptions = {}) {
   return useMemo(
     () => ({
       speak,
+      stopSpeaking,
       startListening,
       stopListening,
       askAssistant,
     }),
-    [speak, startListening, stopListening, askAssistant],
+    [speak, stopSpeaking, startListening, stopListening, askAssistant],
   );
+}
+
+function _LLM_UNAVAILABLE(reason: string): string {
+  const replies: Record<string, string> = {
+    model_path_missing: "No local model is configured. Open Settings > AI Runtime and point MINDI to a GGUF model file.",
+    voice_model_path_missing: "Voice model missing. Configure the 3B model in AI Runtime settings.",
+    runtime_unreachable: "The AI Runtime service is not running. Start it from the MINDI launcher or terminal.",
+  };
+  return replies[reason] ?? "I am here but my language model is not loaded yet. Open the AI Runtime panel to configure and start it.";
 }

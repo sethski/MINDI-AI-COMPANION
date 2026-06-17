@@ -1,5 +1,5 @@
 import { QUICK_TOGGLES } from "@mindi/shared";
-import { setOrbListeningState } from "./agent-api";
+import { getAiRuntimeStatus, setOrbListeningState } from "./agent-api";
 import { loadToggleState } from "./local-state";
 
 export function isMicEnabled(): boolean {
@@ -42,13 +42,23 @@ interface AiStatusPayload {
   };
 }
 
+export async function requestMicStream(): Promise<MediaStream> {
+  try {
+    return await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true },
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!/not supported/i.test(message)) {
+      throw error;
+    }
+    return navigator.mediaDevices.getUserMedia({ audio: true });
+  }
+}
+
 export async function checkAsrReady(): Promise<boolean> {
   try {
-    const response = await fetch("http://127.0.0.1:8765/ops/ai/status", { method: "GET" });
-    if (!response.ok) {
-      return false;
-    }
-    const payload = (await response.json()) as AiStatusPayload;
+    const payload = (await getAiRuntimeStatus()) as AiStatusPayload;
     return payload.features?.asr?.ready === true;
   } catch {
     return false;

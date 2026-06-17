@@ -9,17 +9,22 @@ export type OrbPhase =
 
 export const ORB_IDLE_SIZE = { width: 72, height: 72 } as const;
 export const ORB_MENU_SIZE = { width: 180, height: 156 } as const;
-export const ORB_ACTIVE_SIZE = { width: 320, height: 120 } as const;
+export const ORB_ACTIVE_SIZE = { width: 288, height: 96 } as const;
 
-export const ORB_GREETINGS = [
-  "Hi, I'm MINDI. What do you need?",
-  "Hello. I'm listening.",
-  "Hey there. How can I help?",
-] as const;
+const WAKE_TOKEN_PATTERN = /\b(?:hey[,]?\s*)?(?:mindi|mindy)\b/i;
+const WAKE_STRIP_PATTERN = /\b(?:hey[,]?\s*)?(?:mindi|mindy)\b/gi;
 
-export function pickGreeting(): string {
-  const index = Math.floor(Math.random() * ORB_GREETINGS.length);
-  return ORB_GREETINGS[index] ?? ORB_GREETINGS[0];
+function normalizeTranscriptForWake(transcript: string): string {
+  return transcript.toLowerCase().replace(/[^\w\s']/g, " ").replace(/\s+/g, " ").trim();
+}
+
+export function transcriptMatchesWake(transcript: string): boolean {
+  const normalized = normalizeTranscriptForWake(transcript);
+  return WAKE_TOKEN_PATTERN.test(normalized);
+}
+
+export function stripWakeWord(transcript: string): string {
+  return transcript.replace(WAKE_STRIP_PATTERN, " ").replace(/\s+/g, " ").trim();
 }
 
 export function isActivePhase(phase: OrbPhase): boolean {
